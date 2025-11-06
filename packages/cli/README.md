@@ -37,17 +37,38 @@ npx @luciformresearch/ragforge-cli --help
 
 ## Quick Start
 
+**Three ways to start:**
+
+### 1. From Scratch (All-in-One)
 ```bash
-# Initialize a new RAG project
+# Introspects your Neo4j DB, generates config YAML, and builds the client
 ragforge init --project my-rag --out ./my-rag-project
+```
 
-# Or generate from existing config
+### 2. Introspect First (Recommended for customization)
+```bash
+# Step 1: Analyze your database and generate intelligent YAML config
+ragforge introspect --project my-rag --out ./my-rag-project
+
+# Step 2: Edit ragforge.config.yaml to customize
+# (add vector indexes, configure searchable fields, etc.)
+
+# Step 3: Generate the client from your customized config
+ragforge generate --config ./my-rag-project/ragforge.config.yaml --out ./my-rag-project/generated
+```
+
+### 3. From Existing Config
+```bash
+# If you already have a ragforge.config.yaml
 ragforge generate --config ./ragforge.config.yaml --out ./generated
+```
 
-# Create vector indexes
+**Then setup embeddings:**
+```bash
+# Create vector indexes in Neo4j
 ragforge embeddings:index --config ./ragforge.config.yaml
 
-# Generate embeddings
+# Generate embeddings for your data
 ragforge embeddings:generate --config ./ragforge.config.yaml
 ```
 
@@ -86,7 +107,14 @@ ragforge init \
 
 ### `ragforge introspect`
 
-Introspect Neo4j database and generate schema JSON.
+**Intelligently** introspect your Neo4j database and generate a smart YAML configuration.
+
+This command analyzes your graph schema and:
+- Detects your domain (code, e-commerce, documentation, etc.)
+- Suggests searchable entities and fields
+- Identifies relationships for filtering
+- Finds working examples from your actual data
+- Generates an optimized YAML config ready to customize
 
 ```bash
 ragforge introspect \
@@ -99,8 +127,12 @@ ragforge introspect \
 ```
 
 **Generates:**
-- `schema.json` - Database schema
-- `ragforge.config.yaml` - Initial configuration template
+- `schema.json` - Complete Neo4j schema snapshot
+- `ragforge.config.yaml` - **Intelligent configuration** with:
+  - Auto-detected entities
+  - Suggested searchable fields
+  - Relationship configurations
+  - Working examples from your data
 
 ---
 
@@ -123,7 +155,11 @@ ragforge generate \
 - `--out <dir>` - Output directory
 - `--schema <path>` - Path to schema.json (optional, will introspect if not provided)
 - `--force` - Overwrite existing files
-- `--auto-detect-fields` - Use LLM to suggest searchable fields
+- `--auto-detect-fields` - **🤖 Use LLM to intelligently detect searchable fields**
+  - Analyzes your actual data in Neo4j
+  - Suggests which fields are best for filtering
+  - Detects field types and patterns
+  - Requires `GEMINI_API_KEY` environment variable
 - `--reset-embeddings-config` - Overwrite customized embedding loader
 
 **Generates:**
