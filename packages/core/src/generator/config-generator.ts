@@ -316,13 +316,22 @@ export class ConfigGenerator {
         };
       });
 
+    const displayNameField = this.pickDisplayNameField(node);
+    const uniqueField = this.pickUniqueField(node);
+    const queryField = this.pickQueryField(node, displayNameField);
+    const exampleDisplayFields = this.pickExampleDisplayFields(node, [displayNameField, uniqueField]);
+
     return {
       name: node.label,
       description: `${node.label} entity (${node.count} nodes)`,
       searchable_fields: searchableFields,
       vector_index: vectorIndex,
       vector_indexes: vectorIndexes.length ? vectorIndexes : undefined,
-      relationships: relationships.length > 0 ? relationships : undefined
+      relationships: relationships.length > 0 ? relationships : undefined,
+      display_name_field: displayNameField,
+      unique_field: uniqueField,
+      query_field: queryField,
+      example_display_fields: exampleDisplayFields.length > 0 ? exampleDisplayFields : undefined
     };
   }
 
@@ -576,6 +585,10 @@ export class ConfigGenerator {
         continue;
       }
 
+      if (this.isLikelyEmbeddingProperty(prop.name)) {
+        continue;
+      }
+
       const score = this.scoreEmbeddingCandidate(node, prop, schema, domain);
       if (score <= 0) {
         continue;
@@ -641,6 +654,14 @@ export class ConfigGenerator {
   private static isTextualProperty(prop: PropertySchema): boolean {
     if (prop.type === 'String') return true;
     if (prop.type === 'List') return true;
+    return false;
+  }
+
+  private static isLikelyEmbeddingProperty(name: string): boolean {
+    const lower = name.toLowerCase();
+    if (lower.includes('embedding')) return true;
+    if (lower.includes('vector')) return true;
+    if (lower.startsWith('desc_embedding')) return true;
     return false;
   }
 
@@ -718,5 +739,68 @@ export class ConfigGenerator {
       .replace(/_{2,}/g, '_')
       .replace(/^_|_$/g, '')
       .toLowerCase();
+  }
+
+  private static pickDisplayNameField(node: NodeSchema): string {
+    const candidate = this.findPropertyByPriority(node, ['name', 'title', 'label']);
+    if (candidate) return candidate;
+
+    const firstString = node.properties.find(prop => prop.type === 'String');
+    return firstString?.name || 'name';
+  }
+
+  private static pickUniqueField(node: NodeSchema): string {
+    const uniqueProp = node.properties.find(prop => prop.unique);
+    if (uniqueProp) return uniqueProp.name;
+
+    const candidate = this.findPropertyByPriority(node, ['uuid', 'id', 'guid', 'slug']);
+    if (candidate) return candidate;
+
+    return 'uuid';
+  }
+
+  private static pickQueryField(node: NodeSchema, displayNameField: string): string {
+    const candidate = this.findPropertyByPriority(node, ['title', 'name', 'label']);
+    if (candidate) return candidate;
+
+    return displayNameField;
+  }
+
+  private static pickExampleDisplayFields(node: NodeSchema, exclude: string[]): string[] {
+    const excluded = new Set(exclude.map(name => name.toLowerCase()));
+    const priority = ['category', 'type', 'status', 'language', 'file', 'version', 'tag'];
+    const selected: string[] = [];
+
+    for (const key of priority) {
+      const prop = this.findPropertyByPriority(node, [key]);
+      if (prop && !excluded.has(prop.toLowerCase())) {
+        selected.push(prop);
+        excluded.add(prop.toLowerCase());
+        if (selected.length === 2) return selected;
+      }
+    }
+
+    for (const prop of node.properties) {
+      if (selected.length === 2) break;
+      if (prop.type !== 'String') continue;
+      if (excluded.has(prop.name.toLowerCase())) continue;
+      selected.push(prop.name);
+      excluded.add(prop.name.toLowerCase());
+    }
+
+    return selected;
+  }
+
+  private static findPropertyByPriority(node: NodeSchema, candidates: string[]): string | undefined {
+    const lowerMap = new Map(node.properties.map(prop => [prop.name.toLowerCase(), prop.name]));
+
+    for (const candidate of candidates) {
+      const match = lowerMap.get(candidate.toLowerCase());
+      if (match) {
+        return match;
+      }
+    }
+
+    return undefined;
   }
 }

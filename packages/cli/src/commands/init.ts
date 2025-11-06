@@ -55,9 +55,16 @@ Options:
   --database <name>       Optional database (defaults to Neo4j default)
   --project <name>        Project name used for generated artifacts
   --out <dir>             Output directory (default: ./ragforge-<project>)
-  --force                 Overwrite existing output directory
-  --reset-embeddings-config     Regenerate generated/embeddings/load-config.ts even if it exists
+  --force                 Recreate the entire project tree even if files already exist
+  --reset-embeddings-config  Always rewrite generated/embeddings/load-config.ts
   -h, --help              Show this help
+
+Examples:
+  ragforge init --uri bolt://localhost:7687 --username neo4j --password secret \\
+                --project my-rag --out ./ragforge-my-rag
+
+  ragforge init --project demo --out ./ragforge-demo --force --reset-embeddings-config
+      Useful when re-initializing a playground directory and you want fresh templates.
 `);
 }
 
@@ -206,7 +213,8 @@ export async function runInit(options: InitOptions): Promise<void> {
     options.rootDir,
     options.project,
     options.preserveEmbeddingsConfig,
-    preservedEmbeddingsConfig
+    preservedEmbeddingsConfig,
+    options.force
   );
   console.log(`📦  Generated client written to ${generatedDir}`);
   await writeGeneratedEnv(generatedDir, {

@@ -49,7 +49,8 @@ export async function persistGeneratedArtifacts(
   rootDir: string,
   projectName: string,
   preserveEmbeddingsConfig: boolean,
-  preservedEmbeddingsConfig?: string
+  preservedEmbeddingsConfig: string | undefined,
+  forceRewrite: boolean
 ): Promise<void> {
   const queriesDir = path.join(outDir, 'queries');
   await fs.mkdir(queriesDir, { recursive: true });
@@ -79,12 +80,18 @@ export async function persistGeneratedArtifacts(
 
     const loaderPath = path.join(embeddingsDir, 'load-config.ts');
 
-    if (preserveEmbeddingsConfig && preservedEmbeddingsConfig) {
+    const shouldPreserve = preserveEmbeddingsConfig && !forceRewrite;
+
+    if (shouldPreserve && preservedEmbeddingsConfig) {
       await writeFileIfChanged(loaderPath, preservedEmbeddingsConfig);
-    } else if (preserveEmbeddingsConfig) {
+      console.log('ℹ️  Preserved embeddings/load-config.ts from existing project (use --reset-embeddings-config to regenerate).');
+    } else if (shouldPreserve) {
       await writeFileIfMissing(loaderPath, generated.embeddings.loader, 'embeddings/load-config.ts');
     } else {
       await writeFileIfChanged(loaderPath, generated.embeddings.loader);
+      if (preserveEmbeddingsConfig && forceRewrite) {
+        console.log('⚠️  Overwriting embeddings/load-config.ts because --force was supplied.');
+      }
     }
 
     // Clean up legacy files

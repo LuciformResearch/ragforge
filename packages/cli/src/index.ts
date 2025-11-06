@@ -36,6 +36,7 @@ function printRootHelp(): void {
 
 Usage:
   ragforge <command> [options]
+  ragforge help <command>    Show detailed help for a specific command
 
 Available commands:
   init                 Introspect Neo4j and generate config + client

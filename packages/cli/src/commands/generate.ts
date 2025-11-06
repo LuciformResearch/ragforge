@@ -45,16 +45,29 @@ export function printGenerateHelp(): void {
 
 Options:
   --config <file>         Path to RagForge YAML config (default: ./ragforge.config.yaml)
-  --schema <file>         Optional schema JSON snapshot. If omitted, introspection runs.
+  --schema <file>         Optional schema snapshot to skip live introspection
   --out <dir>             Output directory for generated client (default: ./generated)
-  --uri <bolt-uri>        Neo4j Bolt URI (used when --schema is absent)
+  --uri <bolt-uri>        Neo4j Bolt URI (required when --schema is omitted)
   --username <user>       Neo4j username (used when --schema is absent)
   --password <password>   Neo4j password (used when --schema is absent)
   --database <name>       Optional Neo4j database
-  --force                 Overwrite output directory when not empty
-  --reset-embeddings-config     Regenerate generated/embeddings/load-config.ts even if it exists
-  --auto-detect-fields    Use LLM to auto-detect optimal field mappings (display_name_field, unique_field, etc.)
+  --force                 Recreate files managed by the generator even if they exist
+  --reset-embeddings-config  Ignore preserved loader and always rewrite embeddings/load-config.ts
+  --auto-detect-fields    Ask the LLM to refine display/query/embedding fields before generation
   -h, --help              Show this message
+
+Common flows:
+  ragforge generate --config ./ragforge.config.yaml --out ./generated
+      Regenerate TypeScript artifacts from an existing YAML.
+
+  ragforge generate --schema ./schema.json --config ./ragforge.config.yaml --out ./generated
+      Use a saved schema snapshot (no live Neo4j connection needed).
+
+  ragforge generate --config ./ragforge.config.yaml --force --reset-embeddings-config
+      Force-overwrite any managed files, including the embeddings loader/scripts.
+
+  ragforge generate --config ./ragforge.config.yaml --auto-detect-fields
+      Run the LLM field detector (needs GEMINI_API_KEY and Neo4j creds) before writing files.
 `);
 }
 
@@ -256,7 +269,8 @@ export async function runGenerate(options: GenerateOptions): Promise<void> {
     options.rootDir,
     config.name,
     options.preserveEmbeddingsConfig,
-    preservedEmbeddingsConfig
+    preservedEmbeddingsConfig,
+    options.force
   );
 
   console.log(`\n✨  Generation complete. Artifacts available in ${options.outDir}`);
