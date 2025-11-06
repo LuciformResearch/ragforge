@@ -6,7 +6,6 @@
  * configs, and emit TypeScript client artifacts.
  */
 
-import { createRequire } from 'module';
 import process from 'process';
 import {
   parseInitOptions,
@@ -30,11 +29,10 @@ import {
   printEmbeddingsHelp
 } from './commands/embeddings.js';
 
-const require = createRequire(import.meta.url);
-const pkg = require('../package.json') as { version?: string };
+import { VERSION } from './version.js';
 
 function printRootHelp(): void {
-  console.log(`RagForge CLI v${pkg.version || '0.0.0'}
+  console.log(`RagForge CLI v${VERSION}
 
 Usage:
   ragforge <command> [options]
@@ -53,7 +51,7 @@ Global options:
 }
 
 function printVersion(): void {
-  console.log(pkg.version || '0.0.0');
+  console.log(VERSION);
 }
 
 async function main(): Promise<void> {
