@@ -15,6 +15,11 @@ interface FieldMappings {
   embedding_fields?: string[];
 }
 
+interface ProjectMetadata {
+  name: string;
+  description: string;
+}
+
 interface SampleNode {
   [key: string]: any;
 }
@@ -35,6 +40,116 @@ export class FieldDetector {
 
   async close(): Promise<void> {
     await this.driver.close();
+  }
+
+  /**
+   * Auto-detect project name and description based on entity types using LLM
+   */
+  async detectProjectMetadata(entityNames: string[]): Promise<ProjectMetadata> {
+    const prompt = `You are analyzing a graph database schema to suggest a project name and description.
+
+Entity types found in the database: ${entityNames.join(', ')}
+
+Based on these entities, determine:
+1. A concise project name (1-2 words) that captures the domain
+2. A brief description (one sentence) of what this system manages
+
+Guidelines:
+- Name should be lowercase with hyphens if needed (e.g., "inventory-system", "social-network")
+- Description should be clear and factual about what the system manages
+- Avoid generic terms like "app", "system", "platform" in the name
+- Infer the domain from the entity relationships
+
+Return ONLY valid XML in this exact format (no markdown, no explanation):
+<project>
+  <name>domain-name</name>
+  <description>Clear description of what the system manages</description>
+</project>`;
+
+    try {
+      const response = await this.genAI.models.generateContent({
+        model: 'gemma-3n-e2b-it',
+        contents: prompt,
+        config: {
+          temperature: 0.3,
+          maxOutputTokens: 100,
+        }
+      });
+
+      if (!response.text) {
+        throw new Error('No text in LLM response');
+      }
+
+      const text = response.text.trim();
+
+      // Remove markdown code blocks if present and normalize whitespace
+      const xmlText = text
+        .replace(/```xml\n?/g, '')
+        .replace(/```\n?/g, '')
+        .trim()
+        // Normalize whitespace between tags (remove indentation/newlines)
+        .replace(/>\s+</g, '><');
+
+      try {
+        const parser = new LuciformXMLParser(xmlText, { mode: 'luciform-permissive' });
+        const parsed = parser.parse() as any;
+
+        // Access the root element (project)
+        const rootElement = parsed.document?.children?.[0];
+
+        if (!rootElement || rootElement.name !== 'project') {
+          throw new Error('No project element found in XML root');
+        }
+
+        // Extract name and description from child elements
+        let projectName: string | undefined;
+        let projectDescription: string | undefined;
+
+        for (const child of rootElement.children || []) {
+          if (child.type === 'element') {
+            if (child.name === 'name' && child.children?.[0]?.type === 'text') {
+              projectName = child.children[0].content;
+            } else if (child.name === 'description' && child.children?.[0]?.type === 'text') {
+              projectDescription = child.children[0].content;
+            }
+          }
+        }
+
+        if (!projectName || typeof projectName !== 'string') {
+          throw new Error(`Could not extract project name from XML. Type: ${typeof projectName}`);
+        }
+
+        if (!projectDescription || typeof projectDescription !== 'string') {
+          throw new Error(`Could not extract project description from XML. Type: ${typeof projectDescription}`);
+        }
+
+        // Clean and slugify the name
+        const cleanName = projectName
+          .trim()
+          .toLowerCase()
+          .replace(/[^a-z0-9-]+/g, '-')
+          .replace(/^-+|-+$/g, '');
+
+        const cleanDescription = projectDescription.trim();
+
+        console.log(`🎯  LLM suggested: "${cleanName}" - ${cleanDescription}`);
+        return { name: cleanName, description: cleanDescription };
+      } catch (parseError) {
+        console.warn('⚠️  Failed to parse project metadata from LLM:', xmlText);
+        // Fallback to a generic name based on first entity
+        const fallback = entityNames[0].toLowerCase() + '-app';
+        const fallbackDesc = `Generated RAG framework for ${entityNames.join(', ')}`;
+        console.log(`   Using fallback: "${fallback}"`);
+        return { name: fallback, description: fallbackDesc };
+      }
+    } catch (error) {
+      console.warn('⚠️  Error detecting project metadata with LLM:', error);
+      // Fallback to a generic name based on first entity
+      const fallback = entityNames[0].toLowerCase() + '-app';
+      const fallbackDesc = `Generated RAG framework for ${entityNames.join(', ')}`;
+      console.log(`   Using fallback: "${fallback}"`);
+      return { name: fallback, description: fallbackDesc };
+    }
   }
 
   /**

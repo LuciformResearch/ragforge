@@ -35,7 +35,7 @@ export async function deriveProjectNaming(explicitProject?: string, explicitOut?
   const folderName = path.basename(cwd);
 
   const project = explicitProject || gitName || folderName;
-  const defaultOut = explicitOut || path.resolve(cwd, `ragforge-${project}`);
+  const defaultOut = explicitOut || path.resolve(cwd, 'generated');
   const outputDir = explicitOut ? path.resolve(explicitOut) : defaultOut;
 
   return { project, outputDir };

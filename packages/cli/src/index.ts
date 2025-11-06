@@ -34,20 +34,39 @@ import { VERSION } from './version.js';
 function printRootHelp(): void {
   console.log(`RagForge CLI v${VERSION}
 
-Usage:
-  ragforge <command> [options]
-  ragforge help <command>    Show detailed help for a specific command
+Quick start:
+  ragforge init                      # Introspect Neo4j + generate client (uses .env)
+  ragforge init --auto-detect-fields # + LLM field detection (needs GEMINI_API_KEY)
 
-Available commands:
-  init                 Introspect Neo4j and generate config + client
-  generate             Regenerate client artifacts from an existing config
-  introspect           Produce config + schema snapshot without client code
-  embeddings:index     Create vector indexes defined in embeddings config
+Connection defaults from .env in current directory:
+  NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD, NEO4J_DATABASE, GEMINI_API_KEY
+
+Usage:
+  ragforge init [options]            Complete setup (introspect + generate)
+  ragforge help <command>            Show detailed help for a specific command
+
+Advanced commands:
+  generate             Regenerate client from existing config
+  introspect           Just introspection, no client code
+  embeddings:index     Create vector indexes
   embeddings:generate  Generate embeddings via Gemini
 
 Global options:
   -h, --help       Show this message
   -v, --version    Show CLI version
+
+Examples:
+  # Simple - uses .env in current directory
+  ragforge init
+
+  # With LLM field auto-detection
+  ragforge init --auto-detect-fields
+
+  # Custom project name and output
+  ragforge init --project myapp --out ./generated
+
+  # Override connection (instead of .env)
+  ragforge init --uri bolt://localhost:7687 --username neo4j --password secret
 `);
 }
 
