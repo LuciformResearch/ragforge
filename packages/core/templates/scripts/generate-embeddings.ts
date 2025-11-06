@@ -12,7 +12,7 @@ import { EMBEDDINGS_CONFIG } from '../embeddings/load-config.ts';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
-async function main() {
+async function main(): Promise<void> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     throw new Error('GEMINI_API_KEY is required to generate embeddings.');
@@ -26,15 +26,16 @@ async function main() {
   });
 
   const defaults = EMBEDDINGS_CONFIG.defaults ?? {};
-  const providerCache = new Map();
+  const providerCache = new Map<string, GeminiEmbeddingProvider>();
 
-  const getProvider = (model, dimension) => {
+  const getProvider = (model?: string, dimension?: number): GeminiEmbeddingProvider => {
     const resolvedModel = model ?? defaults.model;
     const resolvedDimension = dimension ?? defaults.dimension;
     const cacheKey = `${resolvedModel ?? 'default'}::${resolvedDimension ?? 'none'}`;
 
-    if (providerCache.has(cacheKey)) {
-      return providerCache.get(cacheKey);
+    const cached = providerCache.get(cacheKey);
+    if (cached) {
+      return cached;
     }
 
     const provider = new GeminiEmbeddingProvider({
@@ -73,4 +74,4 @@ async function main() {
   }
 }
 
-main();
+void main();

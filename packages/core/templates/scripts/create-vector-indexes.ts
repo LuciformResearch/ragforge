@@ -4,12 +4,12 @@ import { fileURLToPath } from 'url';
 import { Neo4jClient } from '@luciformresearch/ragforge-runtime';
 import neo4j from 'neo4j-driver';
 
-import { EMBEDDINGS_CONFIG } from '../embeddings/load-config.ts';
+import { EMBEDDINGS_CONFIG } from '../embeddings/load-config.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
-async function main() {
+async function main(): Promise<void> {
   const client = new Neo4jClient({
     uri: process.env.NEO4J_URI || 'bolt://localhost:7687',
     username: process.env.NEO4J_USERNAME || 'neo4j',
@@ -25,6 +25,7 @@ async function main() {
         const similarity = pipeline.similarity ?? EMBEDDINGS_CONFIG.defaults?.similarity ?? 'cosine';
 
         console.log(`Creating vector index ${pipeline.name} for ${entity.entity}.${pipeline.targetProperty} (dim=${dimension}, similarity=${similarity})`);
+
         await client.run(`DROP INDEX ${pipeline.name} IF EXISTS`);
         await client.run(
           `CREATE VECTOR INDEX ${pipeline.name} IF NOT EXISTS
@@ -50,4 +51,4 @@ async function main() {
   }
 }
 
-main();
+void main();

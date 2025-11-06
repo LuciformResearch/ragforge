@@ -102,8 +102,23 @@ export async function persistGeneratedArtifacts(
         }
       }
     }
-    await writeFileIfChanged(path.join(scriptsDir, 'create-vector-indexes.js'), generated.embeddings.createIndexesScript);
-    await writeFileIfChanged(path.join(scriptsDir, 'generate-embeddings.js'), generated.embeddings.generateEmbeddingsScript);
+    await writeFileIfChanged(path.join(scriptsDir, 'create-vector-indexes.ts'), generated.embeddings.createIndexesScript);
+    await writeFileIfChanged(path.join(scriptsDir, 'generate-embeddings.ts'), generated.embeddings.generateEmbeddingsScript);
+
+    const legacyScriptFiles = [
+      path.join(scriptsDir, 'create-vector-indexes.js'),
+      path.join(scriptsDir, 'generate-embeddings.js')
+    ];
+
+    for (const legacyPath of legacyScriptFiles) {
+      try {
+        await fs.unlink(legacyPath);
+      } catch (error: any) {
+        if (error?.code !== 'ENOENT') {
+          throw error;
+        }
+      }
+    }
   }
 
   // Write rebuild-agent script
@@ -113,7 +128,7 @@ export async function persistGeneratedArtifacts(
   if (isDevelopmentMode) {
     await copyRuntimePackage(rootDir, outDir);
   }
-  await writeGeneratedPackageJson(outDir, projectName, isDevelopmentMode);
+  await writeGeneratedPackageJson(outDir, projectName, isDevelopmentMode, generated);
   await writeGeneratedTsconfig(outDir);
   await writeExampleScripts(outDir, generated, projectName);
   await writeGitIgnore(outDir);
@@ -235,7 +250,12 @@ async function copyRuntimePackage(rootDir: string, targetDir: string): Promise<v
   await relaxRuntimePackageMetadata(runtimeDest);
 }
 
-async function writeGeneratedPackageJson(outDir: string, projectName: string, isDevelopmentMode: boolean): Promise<void> {
+async function writeGeneratedPackageJson(
+  outDir: string,
+  projectName: string,
+  isDevelopmentMode: boolean,
+  generated: GeneratedCode
+): Promise<void> {
   const safeName = projectName
     .toLowerCase()
     .replace(/[^a-z0-9-]/g, '-')
@@ -263,6 +283,13 @@ async function writeGeneratedPackageJson(outDir: string, projectName: string, is
     };
   }
 
+  const exampleScripts = Object.fromEntries(
+    Array.from(generated.examples.keys()).map(exampleFile => [
+      `examples:${exampleFile}`,
+      `tsx ./examples/${exampleFile}.ts`
+    ])
+  );
+
   pkg.scripts = {
       build: 'echo "Nothing to build"',
       start: 'tsx ./client.ts',
@@ -270,10 +297,9 @@ async function writeGeneratedPackageJson(outDir: string, projectName: string, is
       'regen:auto': 'node ../../ragforge/packages/cli/dist/index.js generate --config ../ragforge.config.yaml --out . --force --auto-detect-fields',
       'regen:reset': 'node ../../ragforge/packages/cli/dist/index.js generate --config ../ragforge.config.yaml --out . --force --reset-embeddings-config',
       'rebuild:agent': 'tsx ./scripts/rebuild-agent.ts',
-      'embeddings:index': 'node ./scripts/create-vector-indexes.js',
-      'embeddings:generate': 'node ./scripts/generate-embeddings.js',
-      'examples:basic': 'tsx ./examples/basic-query.ts',
-      'examples:semantic': 'tsx ./examples/semantic-search.ts'
+      'embeddings:index': 'tsx ./scripts/create-vector-indexes.ts',
+      'embeddings:generate': 'tsx ./scripts/generate-embeddings.ts',
+      ...exampleScripts
     };
 
   await writeFileIfChanged(path.join(outDir, 'package.json'), JSON.stringify(pkg, null, 2) + '\n');

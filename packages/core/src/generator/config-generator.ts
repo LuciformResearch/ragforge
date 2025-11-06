@@ -563,11 +563,11 @@ export class ConfigGenerator {
 
  
   private static generateCreateIndexesScript(): string {
-    return loadTemplate('scripts/create-vector-indexes.js');
+    return loadTemplate('scripts/create-vector-indexes.ts');
   }
 
 
   private static generateGenerateEmbeddingsScript(): string {
-    return loadTemplate('scripts/generate-embeddings.js');
+    return loadTemplate('scripts/generate-embeddings.ts');
   }
 }

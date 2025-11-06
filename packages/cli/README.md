@@ -166,7 +166,7 @@ ragforge generate \
 - `client.ts` - Type-safe RAG client
 - `types.ts` - TypeScript types
 - `queries/*.ts` - Entity-specific query builders
-- `scripts/*.js` - Embedding management scripts
+- `scripts/*.ts` - Embedding management scripts
 - `embeddings/load-config.ts` - Runtime config loader
 - `docs/client-reference.md` - API documentation
 - `agent.ts` - MCP agent template
@@ -324,8 +324,9 @@ await rag.close();
 
 ```bash
 # Try the generated examples
-npm run examples:basic
-npm run examples:semantic
+# (one npm script per generated file – use the filename without .ts)
+npm run examples:01-semantic-search-content
+npm run examples:02-llm-reranking
 
 # Or create your own
 tsx ./my-query.ts
@@ -352,8 +353,8 @@ my-rag-project/
 │   │   └── ...                   # One per entity
 │   │
 │   ├── scripts/                   # Maintenance scripts
-│   │   ├── create-vector-indexes.js    # Setup Neo4j vector indexes
-│   │   ├── generate-embeddings.js      # Generate/update embeddings
+│   │   ├── create-vector-indexes.ts    # Setup Neo4j vector indexes
+│   │   ├── generate-embeddings.ts      # Generate/update embeddings
 │   │   └── rebuild-agent.ts            # Rebuild MCP agent docs
 │   │
 │   ├── embeddings/                # Embedding configuration
@@ -404,7 +405,7 @@ const results = await rag
 - Relationship filters based on your graph
 - Type-safe parameters with autocomplete
 
-**Embedding Scripts** (`scripts/*.js`):
+**Embedding Scripts** (`scripts/*.ts`):
 ```bash
 # Create vector indexes in Neo4j
 npm run embeddings:index
@@ -434,9 +435,9 @@ RagForge introspects your actual database and generates working examples with re
 
 **How to run examples**:
 ```bash
-# Using npm scripts (available: basic, semantic)
-npm run examples:basic
-npm run examples:semantic
+# Using npm scripts (one per generated file – same name as the .ts file)
+npm run examples:01-semantic-search-content
+npm run examples:02-llm-reranking
 
 # Or run any generated example directly
 tsx examples/01-semantic-search-content.ts

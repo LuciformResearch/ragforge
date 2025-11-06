@@ -110,8 +110,8 @@ Generated artefacts (all derived from the YAML):
 
 - `generated/client.ts` – type-safe runtime client + vector index registration
 - `generated/queries/scope.ts` – fluent helpers (`semanticSearchBySource`, `semanticSearchBySignature`, `whereConsumesScope`, …)
-- `generated/scripts/*` – `create-vector-indexes.js` & `generate-embeddings.js` using the YAML loader
-- `generated/embeddings/load-config.{js,d.ts}` – runtime loader around `ragforge.config.yaml`
+- `generated/scripts/*` – `create-vector-indexes.ts` & `generate-embeddings.ts` using the YAML loader
+- `generated/embeddings/load-config.ts` – runtime loader around `ragforge.config.yaml`
 - `generated/docs/client-reference.md` – full API reference (also consumed by the agent template)
 - `generated/agent.ts` – factory that wires the runtime client into the iterative MCP agent
 
