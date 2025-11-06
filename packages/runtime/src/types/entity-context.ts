@@ -25,6 +25,11 @@ export interface EntityField {
   maxLength?: number;
 
   /**
+   * Maximum number of array items to show (for list-valued fields)
+   */
+  maxItems?: number;
+
+  /**
    * Always show this field (included in entity header)
    */
   required?: boolean;
@@ -74,6 +79,25 @@ export interface EntityContext {
   displayName: string;
 
   /**
+   * Unique field name used to identify entities (e.g., "id", "uuid", "scopeId")
+   * This field should contain a stable unique identifier for each entity.
+   * Fallback: if not specified or if entity doesn't have this field, numeric index is used.
+   */
+  uniqueField?: string;
+
+  /**
+   * Query field name used for semantic queries (e.g., "name", "title", "description")
+   * This indicates the primary field to search against.
+   */
+  queryField?: string;
+
+  /**
+   * Example display fields to show in results
+   * These are the most important fields to display when showing entity information.
+   */
+  exampleDisplayFields?: string[];
+
+  /**
    * Fields to show in LLM prompt
    */
   fields: EntityField[];
@@ -91,6 +115,7 @@ export interface EntityContext {
 export const DEFAULT_SCOPE_CONTEXT: EntityContext = {
   type: 'Scope',
   displayName: 'code scopes',
+  uniqueField: 'uuid',  // For backward compatibility with existing code analysis
   fields: [
     { name: 'name', required: true },
     { name: 'type', required: true },

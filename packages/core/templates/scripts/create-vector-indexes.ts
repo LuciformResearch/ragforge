@@ -7,7 +7,7 @@ import neo4j from 'neo4j-driver';
 import { EMBEDDINGS_CONFIG } from '../embeddings/load-config.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-dotenv.config({ path: path.resolve(__dirname, '../.env') });
+dotenv.config({ path: path.resolve(__dirname, '../.env'), override: true });
 
 async function main(): Promise<void> {
   const client = new Neo4jClient({

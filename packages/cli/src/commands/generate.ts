@@ -48,7 +48,7 @@ export function printGenerateHelp(): void {
 Options:
   --config <file>         Path to RagForge YAML config (default: ./ragforge.config.yaml)
   --schema <file>         Optional schema snapshot to skip live introspection
-  --out <dir>             Output directory for generated client (default: ./generated)
+  --out <dir>             Output directory for ragforge.config.yaml + client (default: ./generated)
   --uri <bolt-uri>        Neo4j Bolt URI (required when --schema is omitted)
   --username <user>       Neo4j username (used when --schema is absent)
   --password <password>   Neo4j password (used when --schema is absent)
@@ -57,6 +57,8 @@ Options:
   --rewrite-config        Regenerate ragforge.config.yaml from the current schema before emitting code
   --auto-detect-fields    Ask the LLM to refine display/query/embedding fields before generation
   -h, --help              Show this message
+
+Note: The CLI copies ragforge.config.yaml + schema.json into \`--out\` so embeddings scripts can run in isolation.
 
 Common flows:
   ragforge generate --config ./ragforge.config.yaml --out ./generated
@@ -276,6 +278,7 @@ export async function runGenerate(options: GenerateOptions): Promise<void> {
     options.rootDir,
     config.name
   );
+  await syncProjectConfigArtifacts(options.outDir, options.configPath, schema, options.schemaPath);
 
   console.log(`\n✨  Generation complete. Artifacts available in ${options.outDir}`);
   console.log(`   - Client: ${path.join(options.outDir, 'client.ts')}`);
@@ -330,6 +333,25 @@ function createVectorIndexFromField(entityName: string, field: string): VectorIn
     provider: 'gemini',
     model: 'gemini-embedding-001'
   };
+}
+
+async function syncProjectConfigArtifacts(
+  outDir: string,
+  sourceConfigPath: string,
+  schema: GraphSchema,
+  schemaPath?: string
+): Promise<void> {
+  const targetConfig = path.join(outDir, 'ragforge.config.yaml');
+  if (path.resolve(targetConfig) !== path.resolve(sourceConfigPath)) {
+    await fs.copyFile(sourceConfigPath, targetConfig);
+  }
+
+  const targetSchema = path.join(outDir, 'schema.json');
+  if (schemaPath && path.resolve(schemaPath) !== path.resolve(targetSchema)) {
+    await fs.copyFile(schemaPath, targetSchema);
+  } else if (!schemaPath) {
+    await fs.writeFile(targetSchema, JSON.stringify(schema, null, 2));
+  }
 }
 
 function slugifyIdentifier(value: string): string {

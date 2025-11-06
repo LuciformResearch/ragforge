@@ -390,7 +390,7 @@ export class SchemaIntrospector {
       const label = node.label;
 
       // Fields we want to collect examples for (commonly used in queries and filters)
-      const fieldsToSample = ['name', 'fileName', 'source', 'signature', 'title', 'label', 'type'];
+      const fieldsToSample = ['name', 'fileName', 'source', 'signature', 'title', 'label', 'type', 'description', 'summary', 'content'];
 
       for (const fieldName of fieldsToSample) {
         try {

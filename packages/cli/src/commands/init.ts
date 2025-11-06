@@ -57,6 +57,8 @@ Options:
   --force                 Recreate the entire project tree even if files already exist
   -h, --help              Show this help
 
+Note: All artefacts—including ragforge.config.yaml and the TypeScript client—are written directly to \`--out\`.
+
 Examples:
   ragforge init --uri bolt://localhost:7687 --username neo4j --password secret \\
                 --project my-rag --out ./ragforge-my-rag
@@ -163,8 +165,6 @@ export async function runInit(options: InitOptions): Promise<void> {
   console.log('🚀  RagForge init starting...\n');
 
   const outputDir = path.resolve(options.outDir);
-  const generatedDir = path.join(outputDir, 'generated');
-
   await prepareOutputDirectory(outputDir, options.force);
 
   console.log(`🔌  Connecting to Neo4j at ${options.uri}...`);
@@ -191,14 +191,14 @@ export async function runInit(options: InitOptions): Promise<void> {
   const generated = CodeGenerator.generate(config, schema);
 
   await persistGeneratedArtifacts(
-    generatedDir,
+    outputDir,
     generated,
     typesContent,
     options.rootDir,
     options.project
   );
-  console.log(`📦  Generated client written to ${generatedDir}`);
-  await writeGeneratedEnv(generatedDir, {
+  console.log(`📦  Generated client written to ${outputDir}`);
+  await writeGeneratedEnv(outputDir, {
     uri: options.uri,
     username: options.username,
     password: options.password,
@@ -206,14 +206,14 @@ export async function runInit(options: InitOptions): Promise<void> {
   }, options.geminiKey);
 
   console.log('📥  Installing dependencies in generated project...');
-  await installDependencies(generatedDir);
+  await installDependencies(outputDir);
   console.log('✅  Dependencies installed.');
 
   console.log('\n✨  Init complete! Next steps:');
   console.log(`   - Review config: ${path.join(outputDir, 'ragforge.config.yaml')}`);
-  console.log(`   - Inspect generated client: ${path.join(outputDir, 'generated/client.ts')}`);
-  console.log(`   - Explore documentation: ${path.join(outputDir, 'generated/docs/client-reference.md')}`);
-  console.log(`   - Use the iterative agent helper: ${path.join(outputDir, 'generated/agent.ts')}`);
-  console.log(`   - Neo4j env: ${path.join(outputDir, 'generated/.env')}`);
+  console.log(`   - Inspect generated client: ${path.join(outputDir, 'client.ts')}`);
+  console.log(`   - Explore documentation: ${path.join(outputDir, 'docs/client-reference.md')}`);
+  console.log(`   - Use the iterative agent helper: ${path.join(outputDir, 'agent.ts')}`);
+  console.log(`   - Neo4j env: ${path.join(outputDir, '.env')}`);
   console.log('   - Update Neo4j credentials in your runtime config before running generated code.');
 }

@@ -6,7 +6,6 @@
 
 import { Neo4jClient } from './dist/client/neo4j-client.js';
 import { QueryBuilder } from './dist/query/query-builder.js';
-import { VectorSearch } from './dist/vector/vector-search.js';
 
 async function main() {
   console.log('🧪 Direct Pipeline Test\n');
@@ -19,8 +18,7 @@ async function main() {
       database: 'neo4j'
     });
 
-    const vectorSearch = new VectorSearch(client);
-    const queryBuilder = new QueryBuilder(client, 'Scope', vectorSearch);
+    const queryBuilder = new QueryBuilder(client, 'Scope');
 
     console.log('='.repeat(80));
     console.log('TEST: Double Semantic Search');

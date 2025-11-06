@@ -124,13 +124,31 @@ async function runSinglePipeline(params: {
     RETURN elementId(n) AS id, n
   `;
 
+  // DEBUG: Log the query
+  console.log(`DEBUG: Running query for ${entity}.${sourceField}:`, query.trim());
+
   const result = await neo4j.run(query);
+
+  // DEBUG: Check what we got from the query
+  console.log(`DEBUG: Query returned ${result.records.length} records for entity ${entity}`);
+  if (result.records.length > 0) {
+    console.log(`DEBUG: First record:`, result.records[0]);
+  }
 
   const baseRows: Array<{ id: string; parts: string[]; index: number }> = [];
 
   result.records.forEach((record, index) => {
     const id = record.get('id') as string;
     const node = record.get('n');
+
+    // DEBUG: Log what we're getting from Neo4j
+    if (index === 0) {
+      console.log('DEBUG: First node from Neo4j:', JSON.stringify(node, null, 2));
+      console.log('DEBUG: node.properties:', node.properties);
+      console.log('DEBUG: typeof node:', typeof node);
+      console.log('DEBUG: node keys:', Object.keys(node));
+    }
+
     const props = node.properties ?? {};
 
     const base = props[sourceField];

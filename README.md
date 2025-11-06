@@ -117,7 +117,7 @@ Generated artefacts (all derived from the YAML):
 
 ```typescript
 // Generated API usage (compiled just after `generate`)
-import { createRagClient } from './generated/client.js';
+import { createRagClient } from './client.js';
 
 const rag = createRagClient({
   neo4j: {
@@ -187,21 +187,22 @@ node packages/cli/dist/index.js introspect \
 node packages/cli/dist/index.js generate \
   --config ./ragforge-my-project/ragforge.config.yaml \
   --schema ./ragforge-my-project/schema.json \
-  --out ./ragforge-my-project/generated \
+  --out ./ragforge-my-project \
   --force
 
 # 3. Embedding maintenance (derived from YAML)
 node packages/cli/dist/index.js embeddings:index \
-  --config ./ragforge-my-project/ragforge.config.yaml \
-  --out ./ragforge-my-project/generated
+  --config ./ragforge-my-project/ragforge.config.yaml
 
 node packages/cli/dist/index.js embeddings:generate \
-  --config ./ragforge-my-project/ragforge.config.yaml \
-  --out ./ragforge-my-project/generated
+  --config ./ragforge-my-project/ragforge.config.yaml
+
+> The directory passed to `--out` becomes the home for both `ragforge.config.yaml` and the generated TypeScript artifacts—no extra subfolder is created automatically.
 ```
 
-What land in `ragforge-my-project/generated/`:
+What lands in `ragforge-my-project/`:
 
+- `ragforge.config.yaml` + `schema.json` (from introspection or --rewrite-config)
 - Runtime artefacts (`client.ts`, `index.ts`, `types.ts`, `queries/*`)
 - Embedding loader (`embeddings/load-config.{js,d.ts}`) and scripts
 - Documentation (`docs/client-reference.md`)
@@ -216,14 +217,14 @@ What land in `ragforge-my-project/generated/`:
 
 ```typescript
 // Example: wire the generated client into the iterative agent template
-import { createIterativeAgent } from './generated/agent.js';
+import { createIterativeAgent } from './agent.js';
 import type { LLMClient } from '@ragforge/runtime';
 
 const llm: LLMClient = /* ... */;
 const agent = createIterativeAgent({
   llm,
   workDir: './tmp',
-  ragClientPath: './generated/client.js'
+  ragClientPath: './client.js'
 });
 ```
 

@@ -54,7 +54,7 @@ ragforge introspect --project my-rag --out ./my-rag-project
 # (add vector indexes, configure searchable fields, etc.)
 
 # Step 3: Generate the client from your customized config
-ragforge generate --config ./my-rag-project/ragforge.config.yaml --out ./my-rag-project/generated
+ragforge generate --config ./my-rag-project/ragforge.config.yaml --out ./my-rag-project
 ```
 
 ### 3. From Existing Config
@@ -86,21 +86,23 @@ ragforge init \
   [--username neo4j] \
   [--password password] \
   [--force]
+
+> All artefacts (ragforge.config.yaml, schema.json, client files) are written directly into \`--out\`.
 ```
 
 **Options:**
 - `--project <name>` - Project name
-- `--out <dir>` - Output directory
+- `--out <dir>` - Output directory (ragforge.config.yaml + client files)
 - `--uri` - Neo4j URI (or set `NEO4J_URI` env)
 - `--username` - Neo4j username (or set `NEO4J_USERNAME` env)
 - `--password` - Neo4j password (or set `NEO4J_PASSWORD` env)
 - `--force` - Overwrite existing files
 - `--auto-detect-fields` - Auto-detect searchable fields using LLM
 
-**Generates:**
+**Generates (inside \`--out\`):**
 - `ragforge.config.yaml` - Configuration file
 - `schema.json` - Introspected Neo4j schema
-- `generated/` - Type-safe client and utilities
+- `client.ts`, `types.ts`, `queries/*`, `docs/*`, `scripts/*`, `embeddings/*`
 - `.env` - Environment variables template
 
 ---
@@ -291,7 +293,7 @@ npm run embeddings:generate
 
 ```typescript
 // Import the generated client
-import { createRagClient } from './generated/client.js';
+import { createRagClient } from './client.js';
 
 // Initialize
 const rag = createRagClient({
@@ -338,50 +340,29 @@ When you run `ragforge init` or `ragforge generate`, a complete RAG framework is
 
 ```
 my-rag-project/
-├── ragforge.config.yaml           # Your RAG configuration
+├── ragforge.config.yaml            # Your RAG configuration
 ├── schema.json                     # Introspected Neo4j schema
 ├── .env                            # Environment variables
 ├── package.json                    # Ready to use with npm scripts
-├── generated/
-│   ├── client.ts                  # Type-safe RAG client
-│   ├── index.ts                   # Main exports
-│   ├── types.ts                   # TypeScript type definitions
-│   │
-│   ├── queries/                   # Entity-specific query builders
-│   │   ├── scope.ts              # Example: Scope query builder
-│   │   ├── file.ts               # Example: File query builder
-│   │   └── ...                   # One per entity
-│   │
-│   ├── scripts/                   # Maintenance scripts
-│   │   ├── create-vector-indexes.ts    # Setup Neo4j vector indexes
-│   │   ├── generate-embeddings.ts      # Generate/update embeddings
-│   │   └── rebuild-agent.ts            # Rebuild MCP agent docs
-│   │
-│   ├── embeddings/                # Embedding configuration
-│   │   └── load-config.ts        # Runtime config loader
-│   │
-│   ├── docs/                      # Generated documentation
-│   │   ├── client-reference.md   # Complete API reference
-│   │   └── agent-reference.md    # Agent integration guide
-│   │
-│   ├── examples/                  # Ready-to-run examples
-│   │   ├── 01-semantic-search-*.ts      # Semantic search demos
-│   │   ├── 02-relationship-*.ts         # Relationship traversal
-│   │   ├── 03-llm-reranking.ts          # LLM-based reranking
-│   │   └── ...                          # Many more examples
-│   │
-│   ├── agent.ts                   # MCP agent factory
-│   ├── documentation.ts           # Embedded documentation
-│   └── packages/runtime/          # Standalone runtime copy
-│
-└── node_modules/                  # Dependencies (auto-installed)
+├── client.ts                       # Type-safe RAG client
+├── index.ts                        # Main exports
+├── types.ts                        # TypeScript type definitions
+├── queries/                        # Entity-specific query builders
+├── scripts/                        # Maintenance scripts
+├── embeddings/                     # Embedding configuration + loader
+├── docs/                           # Generated documentation
+├── examples/                       # Ready-to-run examples
+├── agent.ts                        # MCP agent factory
+├── documentation.ts                # Embedded documentation
+├── packages/runtime/               # Standalone runtime copy (dev mode)
+└── node_modules/                   # Dependencies (auto-installed)
 ```
 
 ### What You Get
 
 **Type-Safe Client** (`client.ts`):
 ```typescript
-import { createRagClient } from './generated/client.js';
+import { createRagClient } from './client.js';
 
 const rag = createRagClient({
   neo4j: {

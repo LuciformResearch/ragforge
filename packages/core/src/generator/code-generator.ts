@@ -118,7 +118,7 @@ export class CodeGenerator {
     }
 
     // Generate main client
-    const client = this.generateClient(config);
+    const client = this.generateClient(config, schema);
 
     // Generate index exports
     const index = this.generateIndex(config);
@@ -355,11 +355,19 @@ export class CodeGenerator {
   /**
    * Generate main client class
    */
-  private static generateClient(config: RagForgeConfig): string {
+  private static generateClient(config: RagForgeConfig, schema: GraphSchema): string {
     const lines: string[] = [];
 
-    // Imports
-    lines.push(`import 'dotenv/config';`);
+    // Imports with dotenv override for local development
+    lines.push(`import dotenv from 'dotenv';`);
+    lines.push(`import path from 'path';`);
+    lines.push(`import { fileURLToPath } from 'url';`);
+    lines.push(``);
+    lines.push(`// Load .env with override to ensure local config takes precedence`);
+    lines.push(`const __filename = fileURLToPath(import.meta.url);`);
+    lines.push(`const __dirname = path.dirname(__filename);`);
+    lines.push(`dotenv.config({ path: path.resolve(__dirname, '.env'), override: true });`);
+    lines.push(``);
     const hasEmbeddings = Boolean(config.embeddings && config.embeddings.entities && config.embeddings.entities.length);
     if (hasEmbeddings) {
       lines.push(`import { createClient, VectorSearch, LLMReranker, GeminiAPIProvider } from '@luciformresearch/ragforge-runtime';`);
@@ -401,7 +409,7 @@ export class CodeGenerator {
         lines.push(``);
       }
 
-      const entityContext = this.generateEntityContext(entity);
+      const entityContext = this.generateEntityContext(entity, schema);
       lines.push(`  // Entity context for LLM reranker (generated from YAML config)`);
       lines.push(`  private ${this.camelCase(entity.name)}EntityContext = ${entityContext};`);
       lines.push(``);
@@ -456,9 +464,9 @@ export class CodeGenerator {
       lines.push(`  ${this.camelCase(entity.name)}(): ${entity.name}Query {`);
 
       if (hasEnrichment) {
-        lines.push(`    return new ${entity.name}Query(this.neo4jClient, '${entity.name}', this.${this.camelCase(entity.name)}EnrichmentConfig);`);
+        lines.push(`    return new ${entity.name}Query(this.neo4jClient, '${entity.name}', this.${this.camelCase(entity.name)}EnrichmentConfig, this.${this.camelCase(entity.name)}EntityContext);`);
       } else {
-        lines.push(`    return new ${entity.name}Query(this.neo4jClient, '${entity.name}');`);
+        lines.push(`    return new ${entity.name}Query(this.neo4jClient, '${entity.name}', undefined, this.${this.camelCase(entity.name)}EntityContext);`);
       }
 
       lines.push(`  }`);
@@ -1360,34 +1368,74 @@ export class CodeGenerator {
   /**
    * Generate entity context for LLM reranker from entity config
    */
-  private static generateEntityContext(entity: EntityConfig): string {
-    // Generate fields from searchable_fields
-    const fields = entity.searchable_fields.slice(0, 5).map((field, idx) => {
-      const required = idx < 3; // First 3 fields are required (typically name, type, file)
-      const maxLength = field.type === 'string' && idx >= 3 ? 200 : undefined;
-      const label = field.name === 'source' ? 'Code' : undefined;
+  private static generateEntityContext(entity: EntityConfig, schema: GraphSchema): string {
+    const fields: string[] = [];
+    const seen = new Set<string>();
+    const addField = (name?: string, opts: { required?: boolean; label?: string; maxLength?: number; maxItems?: number } = {}) => {
+      if (!name) return;
+      if (seen.has(name)) return;
+      seen.add(name);
+      const parts = [`name: '${name}'`];
+      if (opts.required) parts.push('required: true');
+      const label = opts.label ?? this.formatFieldLabel(name);
+      if (label) {
+        parts.push(`label: '${label}'`);
+      }
+      if (opts.maxLength) parts.push(`maxLength: ${opts.maxLength}`);
+      if (opts.maxItems) parts.push(`maxItems: ${opts.maxItems}`);
+      fields.push(`{ ${parts.join(', ')} }`);
+    };
 
-      let fieldDef = `{ name: '${field.name}', required: ${required}`;
-      if (maxLength) fieldDef += `, maxLength: ${maxLength}`;
-      if (label) fieldDef += `, label: '${label}'`;
-      fieldDef += ' }';
+    const displayField = this.getDisplayNameField(entity);
+    addField(displayField, { required: true, maxLength: this.getDefaultFieldLength(displayField) });
 
-      return fieldDef;
-    });
+    if (entity.unique_field && entity.unique_field !== displayField) {
+      addField(entity.unique_field, { required: fields.length < 2, maxLength: this.getDefaultFieldLength(entity.unique_field) });
+    }
 
-    // Generate enrichments from relationships with enrich: true
+    for (const fieldName of entity.example_display_fields || []) {
+      addField(fieldName, { maxLength: this.getDefaultFieldLength(fieldName) });
+    }
+
+    for (const vectorIndex of entity.vector_indexes || (entity.vector_index ? [entity.vector_index] : [])) {
+      addField(vectorIndex.source_field, { maxLength: this.getDefaultFieldLength(vectorIndex.source_field) });
+    }
+
+    const schemaFieldCandidates = this.collectSchemaFieldCandidates(schema, entity.name);
+    const searchableCandidates = entity.searchable_fields.map(f => f.name);
+    const combinedCandidates = [...searchableCandidates, ...schemaFieldCandidates];
+
+    for (const candidate of combinedCandidates) {
+      addField(candidate, { maxLength: this.getDefaultFieldLength(candidate) });
+      if (fields.length >= 6) break;
+    }
+
+    if (fields.length === 0) {
+      addField('name', { required: true, maxLength: 80 });
+      addField('description', { maxLength: 400 });
+    }
+
     const enrichments = (entity.relationships?.filter(r => r.enrich) || []).map(rel => {
       const fieldName = rel.enrich_field || rel.type.toLowerCase();
       const label = this.generateEnrichmentLabel(rel.type);
       return `{ fieldName: '${fieldName}', label: '${label}', maxItems: 10 }`;
     });
 
-    // Generate displayName (pluralize entity name)
     const displayName = this.generateDisplayName(entity.name);
+
+    // Add optional metadata fields if specified in config
+    const uniqueFieldLine = entity.unique_field ? `uniqueField: '${entity.unique_field}',` : '';
+    const queryFieldLine = entity.query_field ? `queryField: '${entity.query_field}',` : '';
+    const exampleDisplayFieldsLine = entity.example_display_fields && entity.example_display_fields.length > 0
+      ? `exampleDisplayFields: [${entity.example_display_fields.map(f => `'${f}'`).join(', ')}],`
+      : '';
 
     return `{
     type: '${entity.name}',
     displayName: '${displayName}',
+    ${uniqueFieldLine}
+    ${queryFieldLine}
+    ${exampleDisplayFieldsLine}
     fields: [
       ${fields.join(',\n      ')}
     ],
@@ -1974,6 +2022,14 @@ if (import.meta.url.startsWith('file://')) {
 
     const displayCode = `console.log(${parts.join(' + ')});`;
 
+    const highlightFields = [displayNameField, ...displayFields];
+    const highlightExpr = highlightFields.length > 0
+      ? `  const highlights = [${highlightFields.map(field => `entity.${field} ? '${field}: ' + entity.${field} : null`).join(', ')}]
+    .filter(Boolean)
+    .join(' | ');
+  console.log(\`    Why: matches "${semanticQuery}" → \${highlights || 'high semantic similarity'}\`);`
+      : `  console.log('    Why: high semantic similarity to "${semanticQuery}"');`;
+
     // Build dynamic comment showing available methods
     const filtersList = filterMethods.length > 0
       ? `\n  //   - Filters: ${filterMethods.join(', ')}`
@@ -2000,8 +2056,12 @@ if (import.meta.url.startsWith('file://')) {
   results.forEach(r => {
     const entity = r.entity as any;
     ${displayCode}
+${highlightExpr}
     if (r.scoreBreakdown?.llmReasoning) {
-      console.log(\`    Why: \${r.scoreBreakdown.llmReasoning}\`);
+      console.log(\`    Why (LLM): \${r.scoreBreakdown.llmReasoning}\`);
+    }
+    if (typeof r.scoreBreakdown?.llmScore === 'number') {
+      console.log(\`    LLM score contribution: \${r.scoreBreakdown.llmScore.toFixed(3)}\`);
     }
   });`;
 
@@ -2284,5 +2344,46 @@ ${relCalls}
     }
 
     return undefined;
+  }
+
+  private static formatFieldLabel(fieldName: string): string {
+    const words = fieldName
+      .replace(/[_-]+/g, ' ')
+      .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+      .split(' ')
+      .filter(Boolean)
+      .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase());
+    return words.join(' ');
+  }
+
+  private static getDefaultFieldLength(fieldName: string): number {
+    const lower = fieldName.toLowerCase();
+    if (lower.includes('description') || lower.includes('content') || lower.includes('summary')) {
+      return 400;
+    }
+    if (lower.includes('source') || lower.includes('body') || lower.includes('code')) {
+      return 300;
+    }
+    return 120;
+  }
+
+  private static collectSchemaFieldCandidates(schema: GraphSchema, entityName: string): string[] {
+    const candidates: string[] = [];
+    if (!schema.fieldExamples) {
+      return candidates;
+    }
+
+    for (const [key, values] of Object.entries(schema.fieldExamples)) {
+      if (!key.startsWith(`${entityName}.`)) {
+        continue;
+      }
+      const [, fieldName] = key.split('.');
+      if (!fieldName || values.length === 0) {
+        continue;
+      }
+      candidates.push(fieldName);
+    }
+
+    return candidates;
   }
 }

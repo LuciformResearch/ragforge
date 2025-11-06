@@ -14,7 +14,7 @@
 import { LuciformXMLParser } from '@luciformresearch/xmlparser';
 import type { LLMProvider } from './llm-provider.js';
 import type { SearchResult } from '../types/index.js';
-import type { EntityContext } from '../types/entity-context.js';
+import type { EntityContext, EntityField } from '../types/entity-context.js';
 import { DEFAULT_SCOPE_CONTEXT } from '../types/entity-context.js';
 
 export interface LLMRerankOptions {
@@ -71,6 +71,12 @@ export interface LLMRerankOptions {
   debugPrompt?: boolean;
 
   /**
+   * Debug: skip LLM call and return mock evaluations
+   * Default: false
+   */
+  mockup?: boolean;
+
+  /**
    * Optional intention supplied by an agent orchestrating the search
    * (e.g., "Collect supporting evidence for OAuth flow")
    */
@@ -117,6 +123,26 @@ export interface RerankInput {
 export class LLMReranker {
   private static defaultProvider?: LLMProvider;
   private entityContext: EntityContext;
+  private static readonly DEFAULT_FIELD_MAX = 400;
+  private static readonly DEFAULT_HEADER_MAX = 120;
+  private static readonly DEFAULT_ARRAY_ITEMS = 5;
+
+  /**
+   * Get unique identifier for an entity
+   * Uses configured uniqueField, falls back to numeric index
+   */
+  private getEntityId(entity: any, index: number): string {
+    const uniqueField = this.entityContext.uniqueField;
+
+    if (uniqueField) {
+      const value = entity[uniqueField];
+      if (value !== undefined && value !== null) {
+        return String(value);
+      }
+    }
+    // Fallback to numeric index
+    return `__idx_${index}`;
+  }
 
   /**
    * Set default LLM provider for all reranking operations
@@ -205,6 +231,13 @@ export class LLMReranker {
         const responses = await this.llmProvider.generateBatch(prompts);
 
         responses.forEach((response, idx) => {
+          if (this.options.debugPrompt) {
+            console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+            console.log('🤖 LLM RERANKER RESPONSE (Batch)');
+            console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+            console.log(response);
+            console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+          }
           const { evaluations, queryFeedback: feedback } = this.parseResponse(response, promptMetas[idx].batch);
           allEvaluations.push(...evaluations);
           if (!queryFeedback && feedback) {
@@ -262,6 +295,18 @@ export class LLMReranker {
     withSuggestions: boolean = false,
     agentIntention?: string
   ): Promise<LLMRerankResult> {
+    // Mockup mode: skip LLM call and return mock evaluations for debugging
+    if (this.options.mockup) {
+      console.log('⚠️  MOCKUP MODE: Skipping LLM call, returning mock evaluations');
+      const evaluations: ScopeEvaluation[] = batch.map((result, idx) => ({
+        scopeId: this.getEntityId(result.entity, idx),
+        relevant: true,
+        score: 0.9 - (idx * 0.05), // Decreasing scores
+        reasoning: `MOCK: This is mock reasoning for item ${idx}`
+      }));
+      return { evaluations };
+    }
+
     const prompt = this.buildPrompt(batch, userQuestion, queryContext, withSuggestions, agentIntention);
 
     // Debug: log prompt if enabled
@@ -274,6 +319,16 @@ export class LLMReranker {
     }
 
     const response = await this.llmProvider.generateContent(prompt);
+
+    // Debug: log response if enabled
+    if (this.options.debugPrompt) {
+      console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      console.log('🤖 LLM RERANKER RESPONSE');
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      console.log(response);
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+    }
+
     return this.parseResponse(response, batch);
   }
 
@@ -308,11 +363,12 @@ ${this.entityContext.displayName} to evaluate:
       // Render required fields (typically in header line)
       const requiredFields = this.entityContext.fields.filter(f => f.required);
       const headerParts = requiredFields.map(field => {
-        const value = (entity as any)[field.name];
-        if (this.shouldSkipField(field.name, value)) {
+        const rawValue = (entity as any)[field.name];
+        if (this.shouldSkipField(field.name, rawValue)) {
           return field.name;
         }
-        return value || field.name;
+        const headerValue = this.formatValue(rawValue, field, LLMReranker.DEFAULT_HEADER_MAX);
+        return headerValue ?? field.name;
       });
       prompt += `[${idx}] ${headerParts.join(' - ')}
 `;
@@ -327,17 +383,10 @@ ${this.entityContext.displayName} to evaluate:
 
         const label = field.label || field.name;
 
-        if (typeof value === 'string') {
-          prompt += `${label}: ${value}
+        const printable = this.formatArrayOrValue(value, field);
+        if (printable) {
+          prompt += `${label}: ${printable}
 `;
-        } else if (Array.isArray(value)) {
-          const printable = value
-            .filter(item => typeof item === 'string')
-            .join(', ');
-          if (printable) {
-            prompt += `${label}: ${printable}
-`;
-          }
         }
       });
 
@@ -366,14 +415,16 @@ Instructions:
 - For the "reason" attribute: BE SPECIFIC! Reference concrete details from BOTH:
   1. The user's question (specific keywords, concepts they asked about)
   2. The item being evaluated (specific names, properties, context)
+- Each reason must mention at least one property unique to that item (title, description, id, etc.). Do NOT repeat the exact same sentence for multiple items.
+- Explicitly refer to the item by its own name/title from the list (e.g., "[2] Harry Potter"). Do not describe different items when scoring a given entry.
 - AVOID generic phrases like "directly related" or "addresses the question"
 - INSTEAD, explain HOW and WHY using specific details
 - Output raw XML without any formatting or wrapping
 
 Example XML format (notice how reasons are SPECIFIC):
 <evaluations>
-  <item id="0" score="0.9" reason="implements TypeScriptParser class which is exactly what the user asked for when searching for 'parser libraries'" />
-  <item id="1" score="0.3" reason="only tangentially related - handles file I/O operations but doesn't perform any TypeScript parsing" />
+  <item id="0" score="0.9" reason="references the same keywords the user asked about and explains the overlap" />
+  <item id="1" score="0.2" reason="discusses an unrelated topic; the user query keywords never appear here" />
 </evaluations>
 
 Your XML response:`;
@@ -413,6 +464,36 @@ Include query feedback in the same XML:
     return false;
   }
 
+  private truncate(value: string, maxLength?: number): string {
+    const limit = maxLength ?? LLMReranker.DEFAULT_FIELD_MAX;
+    if (value.length <= limit) {
+      return value;
+    }
+    return value.slice(0, limit - 1) + '…';
+  }
+
+  private formatValue(value: unknown, field: EntityField, fallbackMax: number = LLMReranker.DEFAULT_FIELD_MAX): string | null {
+    if (typeof value === 'string') {
+      return this.truncate(value, field.maxLength ?? fallbackMax);
+    }
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      return String(value);
+    }
+    return null;
+  }
+
+  private formatArrayOrValue(value: unknown, field: EntityField): string | null {
+    if (Array.isArray(value)) {
+      const printable = value
+        .filter(item => typeof item === 'string')
+        .slice(0, field.maxItems ?? LLMReranker.DEFAULT_ARRAY_ITEMS)
+        .map(item => this.truncate(item as string, field.maxLength))
+        .join(', ');
+      return printable || null;
+    }
+    return this.formatValue(value, field);
+  }
+
   private parseResponse(response: string, batch: SearchResult[]): LLMRerankResult {
     try {
       // Extract XML from response (remove markdown code blocks if present)
@@ -446,7 +527,7 @@ Include query feedback in the same XML:
       ) || [];
 
       // Parse evaluations
-      const evaluations: ScopeEvaluation[] = itemElements.map((itemEl: any) => {
+      const evaluations: ScopeEvaluation[] = itemElements.map((itemEl: any, idx) => {
         // Attributes are stored in a Map, use .get() to access them
         const attrs = itemEl.attributes as Map<string, string>;
         const id = parseInt(attrs.get('id') || '0');
@@ -468,12 +549,17 @@ Include query feedback in the same XML:
           return null;
         }
 
-        return {
-          scopeId: batch[id].entity.uuid,
+        // Use the getEntityId helper to get a stable unique identifier
+        const entityId = this.getEntityId(batch[id].entity, id);
+
+        const evaluation = {
+          scopeId: entityId,
           relevant: score > 0.5,
           score: score,
           reasoning: reason
         };
+
+        return evaluation;
       }).filter(Boolean) as ScopeEvaluation[];
 
       // Parse feedback if present
@@ -544,9 +630,13 @@ Include query feedback in the same XML:
 
     // Only keep results that have an LLM evaluation
     return results
-      .filter(result => evalMap.has(result.entity.uuid))
-      .map(result => {
-        const evaluation = evalMap.get(result.entity.uuid)!;
+      .map((result, index) => {
+        const entityId = this.getEntityId(result.entity, index);
+        return { result, entityId, index };
+      })
+      .filter(({ entityId }) => evalMap.has(entityId))
+      .map(({ result, entityId, index }) => {
+        const evaluation = evalMap.get(entityId)!;
 
         let finalScore: number;
 

@@ -284,8 +284,8 @@ async function writeGeneratedPackageJson(
   pkg.scripts = {
       build: 'echo "Nothing to build"',
       start: 'tsx ./client.ts',
-      regen: 'node ../../ragforge/packages/cli/dist/index.js generate --config ../ragforge.config.yaml --out . --force',
-      'regen:auto': 'node ../../ragforge/packages/cli/dist/index.js generate --config ../ragforge.config.yaml --out . --force --auto-detect-fields',
+      regen: 'node ../../ragforge/packages/cli/dist/index.js generate --config ./ragforge.config.yaml --out . --force',
+      'regen:auto': 'node ../../ragforge/packages/cli/dist/index.js generate --config ./ragforge.config.yaml --out . --force --auto-detect-fields',
       'rebuild:agent': 'tsx ./scripts/rebuild-agent.ts',
       'embeddings:index': 'tsx ./scripts/create-vector-indexes.ts',
       'embeddings:generate': 'tsx ./scripts/generate-embeddings.ts',

@@ -57,7 +57,8 @@ export { runEmbeddingPipelines } from './embedding/pipeline.js';
 // Main factory function
 import { Neo4jClient } from './client/neo4j-client.js';
 import { QueryBuilder } from './query/query-builder.js';
-import type { RuntimeConfig } from './types/index.js';
+import type { RuntimeConfig, RelationshipConfig } from './types/index.js';
+import type { EntityContext } from './types/entity-context.js';
 
 /**
  * Create a RAG client
@@ -83,8 +84,8 @@ export function createClient(config: RuntimeConfig) {
     /**
      * Create a query builder for an entity type
      */
-    query<T = any>(entityType: string): QueryBuilder<T> {
-      return new QueryBuilder<T>(neo4jClient, entityType);
+    query<T = any>(entityType: string, options?: { enrichment?: RelationshipConfig[]; context?: EntityContext }): QueryBuilder<T> {
+      return new QueryBuilder<T>(neo4jClient, entityType, options?.enrichment, options?.context);
     },
 
     /**

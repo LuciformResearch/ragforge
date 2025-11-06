@@ -10,7 +10,7 @@ import {
 import { EMBEDDINGS_CONFIG } from '../embeddings/load-config.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-dotenv.config({ path: path.resolve(__dirname, '../.env') });
+dotenv.config({ path: path.resolve(__dirname, '../.env'), override: true });
 
 async function main(): Promise<void> {
   const apiKey = process.env.GEMINI_API_KEY;

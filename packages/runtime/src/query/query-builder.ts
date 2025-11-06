@@ -28,6 +28,7 @@ import type {
   LLMRerankOperation,
   FilterOperation
 } from './operations.js';
+import type { EntityContext } from '../types/entity-context.js';
 
 export class QueryBuilder<T = any> {
   // Pipeline-based architecture
@@ -50,6 +51,7 @@ export class QueryBuilder<T = any> {
     options?: LLMRerankOptions;
   };
   private enrichmentConfig: RelationshipConfig[] = []; // Config-driven relationship enrichment
+  private entityContext?: EntityContext;
 
   // Metadata tracking
   private trackMetadata: boolean = false;
@@ -58,10 +60,12 @@ export class QueryBuilder<T = any> {
   constructor(
     protected client: Neo4jClient,
     protected entityType: string,
-    enrichmentConfig?: RelationshipConfig[]
+    enrichmentConfig?: RelationshipConfig[],
+    entityContext?: EntityContext
   ) {
     this.vectorSearch = new VectorSearch(client);
     this.enrichmentConfig = enrichmentConfig || [];
+    this.entityContext = entityContext;
   }
 
   /**
@@ -950,8 +954,8 @@ export class QueryBuilder<T = any> {
 
     const { userQuestion, llmProvider, options } = operation.config;
 
-    // Create reranker
-    const reranker = new LLMReranker(llmProvider, options);
+    // Create reranker with entity context
+    const reranker = new LLMReranker(llmProvider, options, this.entityContext);
 
     // Build query context
     const queryContext = `// Pipeline operations executed: ${this.operations.length}`;
@@ -1095,7 +1099,7 @@ export class QueryBuilder<T = any> {
 
     try {
       // Create reranker
-      const reranker = new LLMReranker(llmProvider, options);
+      const reranker = new LLMReranker(llmProvider, options, this.entityContext);
 
       // Build query context
       const queryContext = `// Pipeline operations executed: ${this.operations.length}`;
@@ -1637,8 +1641,8 @@ export class QueryBuilder<T = any> {
     const { userQuestion, llmProvider, options } = this.llmRerankConfig;
 
     try {
-      // Create reranker
-      const reranker = new LLMReranker(llmProvider, options);
+      // Create reranker with entity context
+      const reranker = new LLMReranker(llmProvider, options, this.entityContext);
 
       // Get the query context (show the user what query was used)
       const cypherQuery = this.buildCypher();
