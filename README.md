@@ -2,7 +2,7 @@
 
 **Meta-framework for generating domain-specific RAG frameworks from Neo4j schemas**
 
-> ⚠️ **Work In Progress** - This is an early-stage project being developed alongside LR_CodeRag
+> ⚠️ **Work In Progress** - This is an early-stage project under active development
 
 ### ⚖️ License – Luciform Research Source License (LRSL) v1.1
 
@@ -128,10 +128,10 @@ ragforge/
 
 - 🔭 **Mini Roadmap**: voir [`docs/mini-roadmap.md`](docs/mini-roadmap.md) pour le plan court terme.
 
-- [ ] Phase 0: Proof of Concept
-  - [x] Manual implementation (LR_CodeRag)
-  - [ ] Identify reusable patterns
-  - [ ] Extract generic logic
+- [x] Phase 0: Proof of Concept
+  - [x] Manual implementation
+  - [x] Identify reusable patterns
+  - [x] Extract generic logic
 - [ ] Phase 1: Generator MVP
   - [ ] Config schema
   - [ ] Schema analyzer
@@ -204,10 +204,12 @@ const agent = createIterativeAgent({
 });
 ```
 
-## Related Projects
+## Future Roadmap
 
-- **LR_CodeRag**: The original code RAG implementation that inspired RagForge
-- **Weaver** (future): Conversational agent that helps create RagForge configs
+- **Weaver**: Conversational agent that helps create RagForge configs
+- **More embedding providers**: OpenAI, Cohere, Ollama
+- **More LLM providers**: OpenAI, Anthropic, Ollama
+- **GraphQL API generation**: Auto-generate GraphQL schemas and resolvers
 
 ## License
 
@@ -215,5 +217,5 @@ TBD (will be open-sourced)
 
 ## Links
 
-- [Vision Document](../docs/17-code-rag-framework.md)
-- [LR_CodeRag](../)
+- [GitHub Repository](https://github.com/LuciformResearch/ragforge)
+- [npm Packages](https://www.npmjs.com/search?q=%40luciformresearch%2Fragforge)
