@@ -1,0 +1,64 @@
+{
+  "name": "@luciformresearch/ragforge-cli",
+  "version": "0.1.0",
+  "description": "Command-line interface for RagForge. Introspect Neo4j schemas, generate type-safe clients, manage embeddings, and bootstrap RAG projects from YAML configs.",
+  "license": "LRSL-1.1 (See LICENSE file for more information)",
+  "author": "Lucie Defraiteur <luciedefraiteur@luciformresearch.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LuciformResearch/ragforge.git",
+    "directory": "packages/cli"
+  },
+  "bugs": {
+    "url": "https://github.com/LuciformResearch/ragforge/issues"
+  },
+  "homepage": "https://github.com/LuciformResearch/ragforge/tree/main/packages/cli#readme",
+  "type": "module",
+  "main": "./dist/esm/index.js",
+  "types": "./dist/types/index.d.ts",
+  "bin": {
+    "ragforge": "./dist/esm/index.js"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build:esm": "tsc -p tsconfig.esm.json",
+    "build:types": "tsc -p tsconfig.types.json",
+    "build": "npm run clean && npm run build:esm && npm run build:types",
+    "prepublishOnly": "npm run build",
+    "dev": "tsc --watch",
+    "test": "vitest run",
+    "test:watch": "vitest watch",
+    "lint": "eslint . --ext .ts --max-warnings=0",
+    "format": "prettier -w ."
+  },
+  "keywords": [
+    "rag",
+    "neo4j",
+    "cli",
+    "code-generation",
+    "typescript",
+    "tooling",
+    "developer-tools"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@luciformresearch/ragforge-core": "file:../core",
+    "@luciformresearch/ragforge-runtime": "file:../runtime",
+    "dotenv": "^16.3.1",
+    "yaml": "^2.3.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.3.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

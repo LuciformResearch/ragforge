@@ -1,0 +1,26 @@
+Evaluate products relevance to user question.
+
+User question: "Looking for a gaming laptop under $1500 with good GPU"
+
+products to evaluate:
+
+[0] Dell XPS 15 - Laptop - $1299
+description: High-performance laptop with RTX 3050 GPU, 16GB RAM, 512GB SSD. Perfect for gaming and productivity. 15.6" FHD display with excellent color accuracy.
+features: RTX 3050 GPU, 16GB RAM, 512GB NVMe SSD, FHD Display, Backlit Keyboard
+Often bought with: Gaming Mouse, Laptop Cooling Pad, External SSD, USB-C Hub
+Similar to: Lenovo Legion 5, HP Omen 15, ASUS ROG Zephyrus
+
+[1] MacBook Pro 14" - Laptop - $1999
+description: Apple M2 Pro chip with 10-core CPU and 16-core GPU. 16GB unified memory, 512GB SSD. Stunning Liquid Retina XDR display.
+features: M2 Pro chip, 16GB memory, 512GB SSD, XDR Display, Touch ID
+Often bought with: Magic Mouse, USB-C Hub, AppleCare+
+Similar to: MacBook Air M2, Surface Laptop Studio
+
+
+Output XML with evaluations (score must be a single number from 0.0 to 1.0):
+
+<evaluations>
+  <scope id="0" score="0.8" reason="brief explanation" />
+  <scope id="1" score="0.3" reason="brief explanation" />
+  ...
+</evaluations>

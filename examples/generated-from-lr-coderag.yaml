@@ -1,0 +1,147 @@
+name: lr-coderag
+version: 1.0.0
+description: Generated RAG framework for code
+neo4j:
+  uri: ${NEO4J_URI}
+  database: neo4j
+  username: ${NEO4J_USER}
+  password: ${NEO4J_PASSWORD}
+entities:
+  - name: Scope
+    description: Scope entity (516 nodes)
+    searchable_fields:
+      - name: signature
+        type: string
+        indexed: false
+        description: signature of Scope
+      - name: type
+        type: string
+        indexed: false
+        description: type of Scope
+      - name: file
+        type: string
+        indexed: false
+        description: file of Scope
+      - name: uuid
+        type: string
+        indexed: false
+        description: uuid of Scope
+      - name: name
+        type: string
+        indexed: false
+        description: name of Scope
+    vector_index:
+      name: scopeEmbeddings
+      dimension: 1536
+      similarity: cosine
+      provider: openai
+      model: text-embedding-ada-002
+    relationships:
+      - type: DEFINED_IN
+        direction: outgoing
+        target: File
+        description: Scope DEFINED_IN File
+      - type: CONSUMES
+        direction: outgoing
+        target: Scope
+        description: Scope CONSUMES Scope
+      - type: CONSUMED_BY
+        direction: outgoing
+        target: Scope
+        description: Scope CONSUMED_BY Scope
+      - type: USES_LIBRARY
+        direction: outgoing
+        target: ExternalLibrary
+        description: Scope USES_LIBRARY ExternalLibrary
+      - type: BELONGS_TO
+        direction: outgoing
+        target: Project
+        description: Scope BELONGS_TO Project
+  - name: File
+    description: File entity (49 nodes)
+    searchable_fields:
+      - name: name
+        type: string
+        indexed: false
+        description: name of File
+    relationships:
+      - type: DEFINED_IN
+        direction: incoming
+        target: Scope
+        description: Scope DEFINED_IN File
+      - type: IN_DIRECTORY
+        direction: outgoing
+        target: Directory
+        description: File IN_DIRECTORY Directory
+  - name: ExternalLibrary
+    description: ExternalLibrary entity (24 nodes)
+    searchable_fields:
+      - name: name
+        type: string
+        indexed: false
+        description: name of ExternalLibrary
+    relationships:
+      - type: USES_LIBRARY
+        direction: incoming
+        target: Scope
+        description: Scope USES_LIBRARY ExternalLibrary
+  - name: Directory
+    description: Directory entity (15 nodes)
+    searchable_fields: []
+    relationships:
+      - type: IN_DIRECTORY
+        direction: incoming
+        target: File
+        description: File IN_DIRECTORY Directory
+      - type: PARENT_OF
+        direction: outgoing
+        target: Directory
+        description: Directory PARENT_OF Directory
+reranking:
+  strategies:
+    - name: topology-centrality
+      description: Rank by graph centrality (importance)
+      type: builtin
+      algorithm: pagerank
+    - name: code-quality
+      description: Prefer well-documented, concise code
+      type: custom
+      scorer: |-
+        (scope) => {
+          let score = 0;
+          if (scope.docstring) score += 0.4;
+          const loc = scope.endLine - scope.startLine;
+          if (loc < 100) score += 0.3;
+          return score;
+        }
+    - name: recency
+      description: Prefer recent items
+      type: custom
+      scorer: >-
+        (entity) => {
+          const date = entity.createdAt || entity.publishedAt || entity.updatedAt;
+          if (!date) return 0;
+          const age = Date.now() - new Date(date).getTime();
+          const daysSince = age / (1000 * 60 * 60 * 24);
+          return 1 / (1 + daysSince / 30); // Decay over 30 days
+        }
+mcp:
+  server:
+    name: code-rag
+    version: 1.0.0
+  tools:
+    - name: search
+      description: Search entities using natural language
+      expose: true
+    - name: get_dependencies
+      description: Get dependencies of a code scope
+      expose: true
+    - name: find_usages
+      description: Find where a scope is used
+      expose: true
+generation:
+  output_dir: ./generated
+  language: typescript
+  include_tests: true
+  include_docs: true
+  mcp_server: true

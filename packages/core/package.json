@@ -1,0 +1,74 @@
+{
+  "name": "@luciformresearch/ragforge-core",
+  "version": "0.1.0",
+  "description": "Core library for RagForge - YAML config parsing, Neo4j schema introspection, and TypeScript code generation for domain-specific RAG frameworks.",
+  "license": "LRSL-1.1 (See LICENSE file for more information)",
+  "author": "Lucie Defraiteur <luciedefraiteur@luciformresearch.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LuciformResearch/ragforge.git",
+    "directory": "packages/core"
+  },
+  "bugs": {
+    "url": "https://github.com/LuciformResearch/ragforge/issues"
+  },
+  "homepage": "https://github.com/LuciformResearch/ragforge/tree/main/packages/core#readme",
+  "type": "module",
+  "main": "./dist/esm/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/types/index.d.ts",
+      "import": "./dist/esm/index.js",
+      "default": "./dist/esm/index.js"
+    }
+  },
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build:esm": "tsc -p tsconfig.esm.json",
+    "build:types": "tsc -p tsconfig.types.json",
+    "build": "npm run clean && npm run build:esm && npm run build:types",
+    "prepublishOnly": "npm run build",
+    "dev": "tsc --watch",
+    "test": "vitest run",
+    "test:watch": "vitest watch",
+    "lint": "eslint . --ext .ts --max-warnings=0",
+    "format": "prettier -w ."
+  },
+  "keywords": [
+    "rag",
+    "neo4j",
+    "code-generation",
+    "typescript",
+    "yaml",
+    "schema",
+    "meta-framework",
+    "compiler"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@luciformresearch/codeparsers": "^0.1.2",
+    "neo4j-driver": "^5.14.0",
+    "yaml": "^2.3.4",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "eslint": "^9.0.0",
+    "prettier": "^3.3.0",
+    "typescript": "^5.3.0",
+    "vitest": "^1.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

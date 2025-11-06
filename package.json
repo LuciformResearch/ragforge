@@ -1,0 +1,61 @@
+{
+  "name": "ragforge-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Meta-framework for generating domain-specific RAG frameworks from Neo4j schemas",
+  "license": "LRSL-1.1 (See LICENSE file for more information)",
+  "author": "Lucie Defraiteur <luciedefraiteur@luciformresearch.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LuciformResearch/ragforge.git"
+  },
+  "bugs": {
+    "url": "https://github.com/LuciformResearch/ragforge/issues"
+  },
+  "homepage": "https://github.com/LuciformResearch/ragforge#readme",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "test": "turbo run test",
+    "lint": "turbo run lint",
+    "format": "turbo run format",
+    "clean": "turbo run clean",
+    "cli:build": "npm run build --workspace=@luciformresearch/ragforge-cli",
+    "cli:init": "node packages/cli/dist/index.js init",
+    "test:vertex": "tsx test-vertex-ai.ts",
+    "test:gemini": "tsx test-gemini-complete.ts",
+    "create-indexes": "tsx scripts/create-vector-indexes.ts",
+    "reindex": "tsx scripts/reindex-embeddings.ts",
+    "generate-client": "tsx examples/generate-dual-client.ts",
+    "test:semantic": "tsx examples/test-dual-semantic-search.ts",
+    "test:vector-direct": "tsx examples/test-vector-search-direct.ts",
+    "full-rebuild": "tsx scripts/full-rebuild.ts",
+    "check:js-files": "tsx scripts/check-js-files.ts",
+    "delete:js-scopes": "tsx scripts/delete-js-scopes.ts"
+  },
+  "dependencies": {
+    "@google-cloud/aiplatform": "^3.9.0",
+    "@google-cloud/vertexai": "^1.1.0",
+    "@google/genai": "^1.28.0",
+    "@luciformresearch/xmlparser": "^0.2.4",
+    "@luciformresearch/ragforge-runtime": "^0.1.0",
+    "dotenv": "^16.3.1",
+    "google-auth-library": "^9.0.0"
+  },
+  "devDependencies": {
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
+    "eslint": "^9.0.0",
+    "prettier": "^3.3.0",
+    "turbo": "^1.10.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.0.0",
+    "vitest": "^2.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

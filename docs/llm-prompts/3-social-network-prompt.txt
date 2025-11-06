@@ -1,0 +1,26 @@
+Evaluate users relevance to user question.
+
+User question: "Find data science experts in AI/ML"
+
+users to evaluate:
+
+[0] johndoe - John Doe - San Francisco, CA
+bio: Data Scientist @OpenAI. Passionate about deep learning, NLP, and building AI systems that make a difference. PhD in ML from Stanford.
+interests: Machine Learning, Neural Networks, Python, Research, AI Safety
+Follows: andrew_ng, ylecun, kaparthy, goodfellow, hinton, bengio
+Followed by: ai_researcher, ml_enthusiast, data_scientist
+
+[1] alice_ml - Alice Chen - New York, NY
+bio: ML Engineer @Google Brain. Working on large language models and transformer architectures. Love teaching and mentoring aspiring AI engineers.
+interests: LLMs, Transformers, PyTorch, Open Source, Teaching
+Follows: attentionisallyouneed, google_ai, pytorch, huggingface
+Followed by: student1, ml_learner
+
+
+Output XML with evaluations (score must be a single number from 0.0 to 1.0):
+
+<evaluations>
+  <scope id="0" score="0.8" reason="brief explanation" />
+  <scope id="1" score="0.3" reason="brief explanation" />
+  ...
+</evaluations>

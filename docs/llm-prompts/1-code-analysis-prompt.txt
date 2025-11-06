@@ -1,0 +1,32 @@
+Evaluate code scopes relevance to user question.
+
+User question: "How do I connect to Neo4j database?"
+
+code scopes to evaluate:
+
+[0] createNeo4jDriver - function - src/database/neo4j-client.ts
+signature: function createNeo4jDriver(config: Neo4jConfig): Driver
+Code: export function createNeo4jDriver(config: Neo4jConfig): Driver {
+  return neo4j.driver(config.uri, neo4j.auth.basic(config.username, config.password));
+}
+Uses: neo4j, auth
+
+[1] Neo4jClient - class - src/database/neo4j-client.ts
+signature: class Neo4jClient
+Code: export class Neo4jClient {
+  private driver: Driver;
+  
+  constructor(config: Neo4jConfig) {
+    this.driver = createNeo4jDriver(config);
+  }
+}
+Uses: createNeo4jDriver, Driver
+
+
+Output XML with evaluations (score must be a single number from 0.0 to 1.0):
+
+<evaluations>
+  <scope id="0" score="0.8" reason="brief explanation" />
+  <scope id="1" score="0.3" reason="brief explanation" />
+  ...
+</evaluations>

@@ -1,0 +1,208 @@
+# RagForge Configuration for Code RAG
+# This is our first use case - code search and analysis
+
+name: code-rag
+version: 1.0.0
+description: RAG framework for code search and analysis
+
+# Neo4j connection
+neo4j:
+  uri: bolt://localhost:7687
+  database: neo4j
+  # Credentials from env: NEO4J_USER, NEO4J_PASSWORD
+
+# Searchable entities
+entities:
+  - name: Scope
+    description: Code scope (function, class, method, etc.)
+
+    # Properties available for filtering
+    searchable_fields:
+      - name: name
+        type: string
+        indexed: true
+        description: Scope name (e.g., "handleLogin")
+
+      - name: type
+        type: enum
+        values: [function, class, method, variable, interface, type]
+        indexed: true
+        description: Type of code scope
+
+      - name: file
+        type: string
+        indexed: true
+        description: File path relative to project root
+
+      - name: signature
+        type: string
+        description: Function/method signature
+
+      - name: language
+        type: enum
+        values: [typescript, python, javascript]
+        description: Programming language
+
+      - name: startLine
+        type: number
+        description: Start line number
+
+      - name: endLine
+        type: number
+        description: End line number
+
+    # Vector index for semantic search
+    vector_index:
+      name: scopeEmbeddings
+      dimension: 1536
+      similarity: cosine
+      provider: openai  # or vertex, custom
+      model: text-embedding-ada-002
+
+    # Important relationships
+    relationships:
+      - type: CONSUMES
+        direction: outgoing
+        target: Scope
+        description: Dependencies of this scope
+
+      - type: CONSUMED_BY
+        direction: incoming
+        target: Scope
+        description: Scopes that depend on this one
+
+      - type: BELONGS_TO
+        direction: outgoing
+        target: Project
+        description: Project membership
+
+      - type: DEFINED_IN
+        direction: outgoing
+        target: File
+        description: File where scope is defined
+
+  - name: File
+    description: Source code file
+
+    searchable_fields:
+      - name: path
+        type: string
+        indexed: true
+
+      - name: extension
+        type: string
+        indexed: true
+
+      - name: directory
+        type: string
+        indexed: true
+
+  - name: Project
+    description: Code project
+
+    searchable_fields:
+      - name: name
+        type: string
+        indexed: true
+
+# Reranking strategies
+reranking:
+  strategies:
+    - name: topology-popularity
+      description: Rank by number of consumers (how widely used)
+      type: custom
+      scorer: |
+        (scope, context) => {
+          // Count CONSUMED_BY relationships
+          const consumersCount = scope.consumedByCount || 0;
+          return Math.log10(consumersCount + 1) / 10; // Log scale, normalized
+        }
+
+    - name: topology-centrality
+      description: Rank by graph centrality (importance in dependency graph)
+      type: builtin
+      algorithm: pagerank
+
+    - name: code-quality
+      description: Prefer well-documented, concise code
+      type: custom
+      scorer: |
+        (scope, context) => {
+          let score = 0;
+
+          // Has documentation
+          if (scope.docstring && scope.docstring.length > 20) {
+            score += 0.3;
+          }
+
+          // Reasonable size (not too long)
+          const loc = scope.endLine - scope.startLine;
+          if (loc < 100) {
+            score += 0.2;
+          } else if (loc > 500) {
+            score -= 0.2;
+          }
+
+          // Has tests (TODO: detect via naming conventions)
+          if (scope.hasTests) {
+            score += 0.5;
+          }
+
+          return Math.max(0, Math.min(1, score));
+        }
+
+    - name: file-locality
+      description: Prefer results from same file or directory
+      type: custom
+      scorer: |
+        (scope, context) => {
+          if (!context.queryScope) return 0;
+
+          const queryFile = context.queryScope.file;
+          const resultFile = scope.file;
+
+          // Same file
+          if (queryFile === resultFile) return 1.0;
+
+          // Same directory
+          const queryDir = queryFile.split('/').slice(0, -1).join('/');
+          const resultDir = resultFile.split('/').slice(0, -1).join('/');
+          if (queryDir === resultDir) return 0.5;
+
+          return 0;
+        }
+
+# MCP server configuration
+mcp:
+  server:
+    name: code-rag
+    version: 1.0.0
+
+  tools:
+    - name: search_code
+      description: Search for code using natural language or filters
+      expose: true
+
+    - name: get_dependencies
+      description: Get all dependencies of a scope (transitive)
+      expose: true
+
+    - name: find_usages
+      description: Find where a scope is used (reverse dependencies)
+      expose: true
+
+    - name: get_file_scopes
+      description: Get all scopes defined in a file
+      expose: true
+
+    - name: hybrid_search
+      description: Advanced search with custom filters and reranking
+      expose: true
+
+# Generation options
+generation:
+  output_dir: ./generated
+  language: typescript
+  include_tests: true
+  include_docs: true
+  mcp_server: true
