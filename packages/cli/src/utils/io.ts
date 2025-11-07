@@ -52,6 +52,9 @@ export async function persistGeneratedArtifacts(
   const queriesDir = path.join(outDir, 'queries');
   await fs.mkdir(queriesDir, { recursive: true });
 
+  const mutationsDir = path.join(outDir, 'mutations');
+  await fs.mkdir(mutationsDir, { recursive: true });
+
   await writeFileIfChanged(path.join(outDir, 'client.ts'), generated.client);
   await writeFileIfChanged(path.join(outDir, 'index.ts'), generated.index);
   await writeFileIfChanged(path.join(outDir, 'types.ts'), typesContent);
@@ -65,6 +68,10 @@ export async function persistGeneratedArtifacts(
 
   for (const [entity, code] of generated.queries.entries()) {
     await writeFileIfChanged(path.join(queriesDir, `${entity}.ts`), code);
+  }
+
+  for (const [entity, code] of generated.mutations.entries()) {
+    await writeFileIfChanged(path.join(mutationsDir, `${entity}.ts`), code);
   }
 
   // Create scripts directory (always needed for rebuild-agent script)

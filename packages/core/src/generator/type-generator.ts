@@ -30,6 +30,10 @@ export class TypeGenerator {
       lines.push('');
       lines.push(...this.generateFilterType(entity, nodeSchema));
       lines.push('');
+      lines.push(...this.generateCreateType(entity, nodeSchema));
+      lines.push('');
+      lines.push(...this.generateUpdateType(entity, nodeSchema));
+      lines.push('');
     }
 
     // Generate search result type
@@ -194,6 +198,73 @@ export class TypeGenerator {
       lines.push("  | 'semantic'");
     }
     lines.push('  | { strategy: string; weights?: Record<string, number> };');
+
+    return lines;
+  }
+
+  /**
+   * Generate Create type for entity
+   * All fields are optional except the unique field
+   */
+  private static generateCreateType(entity: EntityConfig, node: NodeSchema): string[] {
+    const lines: string[] = [];
+    const uniqueField = entity.unique_field || 'uuid';
+
+    lines.push(`/**`);
+    lines.push(` * Input type for creating ${entity.name} entities`);
+    lines.push(` * All fields are optional except '${uniqueField}' which is required for uniqueness`);
+    lines.push(` */`);
+    lines.push(`export interface ${entity.name}Create {`);
+
+    // Add all properties from config
+    for (const field of entity.searchable_fields) {
+      const property = node.properties.find(p => p.name === field.name);
+      const tsType = this.mapToTypeScript(field.type);
+      // Unique field is required, all others are optional
+      const optional = field.name === uniqueField ? '' : '?';
+
+      if (field.description) {
+        lines.push(`  /** ${field.description} */`);
+      }
+      lines.push(`  ${field.name}${optional}: ${tsType};`);
+    }
+
+    lines.push('}');
+
+    return lines;
+  }
+
+  /**
+   * Generate Update type for entity
+   * All fields are optional (partial update)
+   * Unique field is excluded (cannot be updated)
+   */
+  private static generateUpdateType(entity: EntityConfig, node: NodeSchema): string[] {
+    const lines: string[] = [];
+    const uniqueField = entity.unique_field || 'uuid';
+
+    lines.push(`/**`);
+    lines.push(` * Input type for updating ${entity.name} entities`);
+    lines.push(` * All fields are optional for partial updates`);
+    lines.push(` * The unique field '${uniqueField}' cannot be updated`);
+    lines.push(` */`);
+    lines.push(`export interface ${entity.name}Update {`);
+
+    // Add all properties except unique field
+    for (const field of entity.searchable_fields) {
+      // Skip unique field (cannot be updated)
+      if (field.name === uniqueField) continue;
+
+      const property = node.properties.find(p => p.name === field.name);
+      const tsType = this.mapToTypeScript(field.type);
+
+      if (field.description) {
+        lines.push(`  /** ${field.description} */`);
+      }
+      lines.push(`  ${field.name}?: ${tsType};`);
+    }
+
+    lines.push('}');
 
     return lines;
   }

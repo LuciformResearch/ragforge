@@ -10,6 +10,14 @@ export { Neo4jClient } from './client/neo4j-client.js';
 // Query
 export { QueryBuilder } from './query/query-builder.js';
 
+// Mutations
+export { MutationBuilder } from './mutations/mutation-builder.js';
+export type {
+  EntityMutationConfig,
+  AddRelationshipConfig,
+  RemoveRelationshipConfig
+} from './mutations/mutation-builder.js';
+
 // Vector Search
 export { VectorSearch } from './vector/vector-search.js';
 

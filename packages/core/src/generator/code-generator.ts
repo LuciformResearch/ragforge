@@ -42,6 +42,7 @@ function loadTemplate(relativePath: string): string {
 
 export interface GeneratedCode {
   queries: Map<string, string>;  // entity name -> query builder code
+  mutations: Map<string, string>; // entity name -> mutation builder code (NEW)
   client: string;                // main client code
   index: string;                 // index.ts exports
   agent: string;                 // iterative agent wrapper
@@ -110,11 +111,15 @@ export class CodeGenerator {
    */
   static generate(config: RagForgeConfig, schema: GraphSchema): GeneratedCode {
     const queries = new Map<string, string>();
+    const mutations = new Map<string, string>();
 
-    // Generate query builder for each entity
+    // Generate query builder and mutation builder for each entity
     for (const entity of config.entities) {
-      const code = this.generateQueryBuilder(entity, config);
-      queries.set(entity.name.toLowerCase(), code);
+      const queryCode = this.generateQueryBuilder(entity, config);
+      queries.set(entity.name.toLowerCase(), queryCode);
+
+      const mutationCode = this.generateMutationBuilder(entity, config);
+      mutations.set(entity.name.toLowerCase(), mutationCode);
     }
 
     // Generate main client
@@ -139,6 +144,7 @@ export class CodeGenerator {
 
     return {
       queries,
+      mutations,
       client,
       index,
       agent,
@@ -207,6 +213,136 @@ export class CodeGenerator {
     if (config.reranking?.strategies) {
       for (const strategy of config.reranking.strategies) {
         lines.push(...this.generateRerankMethod(strategy));
+      }
+    }
+
+    lines.push(`}`);
+
+    return lines.join('\n');
+  }
+
+  /**
+   * Generate mutation builder class for an entity
+   */
+  private static generateMutationBuilder(entity: EntityConfig, config: RagForgeConfig): string {
+    const lines: string[] = [];
+    const className = `${entity.name}Mutations`;
+    const uniqueField = entity.unique_field || 'uuid';
+    const displayNameField = entity.display_name_field || 'name';
+
+    // Imports
+    lines.push(`import { MutationBuilder } from '@luciformresearch/ragforge-runtime';`);
+    lines.push(`import type { ${entity.name}, ${entity.name}Create, ${entity.name}Update } from '../types.js';`);
+    lines.push(``);
+
+    // Class declaration
+    lines.push(`/**`);
+    lines.push(` * Mutation operations for ${entity.name} entities`);
+    if (entity.description) {
+      lines.push(` * ${entity.description}`);
+    }
+    lines.push(` */`);
+    lines.push(`export class ${className} extends MutationBuilder<${entity.name}> {`);
+    lines.push(``);
+
+    // Override create() with entity-specific types
+    lines.push(`  /**`);
+    lines.push(`   * Create a new ${entity.name}`);
+    lines.push(`   * @param data - ${entity.name} data (must include ${uniqueField})`);
+    lines.push(`   * @returns The created ${entity.name}`);
+    lines.push(`   */`);
+    lines.push(`  async create(data: ${entity.name}Create): Promise<${entity.name}> {`);
+    lines.push(`    return super.create(data);`);
+    lines.push(`  }`);
+    lines.push(``);
+
+    // Override createBatch()
+    lines.push(`  /**`);
+    lines.push(`   * Create multiple ${entity.name} entities in a single transaction`);
+    lines.push(`   * @param items - Array of ${entity.name} data`);
+    lines.push(`   * @returns Array of created ${entity.name} entities`);
+    lines.push(`   */`);
+    lines.push(`  async createBatch(items: ${entity.name}Create[]): Promise<${entity.name}[]> {`);
+    lines.push(`    return super.createBatch(items);`);
+    lines.push(`  }`);
+    lines.push(``);
+
+    // Override update()
+    lines.push(`  /**`);
+    lines.push(`   * Update an existing ${entity.name}`);
+    lines.push(`   * @param ${uniqueField} - Unique identifier`);
+    lines.push(`   * @param data - Fields to update`);
+    lines.push(`   * @returns The updated ${entity.name}`);
+    lines.push(`   */`);
+    lines.push(`  async update(${uniqueField}: string, data: ${entity.name}Update): Promise<${entity.name}> {`);
+    lines.push(`    return super.update(${uniqueField}, data);`);
+    lines.push(`  }`);
+    lines.push(``);
+
+    // Override delete()
+    lines.push(`  /**`);
+    lines.push(`   * Delete a ${entity.name} by ${uniqueField}`);
+    lines.push(`   * @param ${uniqueField} - Unique identifier`);
+    lines.push(`   */`);
+    lines.push(`  async delete(${uniqueField}: string): Promise<void> {`);
+    lines.push(`    return super.delete(${uniqueField});`);
+    lines.push(`  }`);
+    lines.push(``);
+
+    // Generate typed relationship methods
+    if (entity.relationships && entity.relationships.length > 0) {
+      for (const rel of entity.relationships) {
+        const methodName = this.camelCase(`add_${rel.type}`);
+        const removeMethodName = this.camelCase(`remove_${rel.type}`);
+        const targetType = rel.target;
+        const targetUniqueField = 'uuid'; // Default, could be made configurable per relationship
+
+        // Add relationship method
+        lines.push(`  /**`);
+        lines.push(`   * Add ${rel.type} relationship to ${targetType}`);
+        if (rel.description) {
+          lines.push(`   * ${rel.description}`);
+        }
+        lines.push(`   * @param ${uniqueField} - Source ${entity.name} unique identifier`);
+        lines.push(`   * @param target${targetType}${this.capitalize(targetUniqueField)} - Target ${targetType} unique identifier`);
+        if (rel.properties && rel.properties.length > 0) {
+          lines.push(`   * @param properties - Relationship properties`);
+        }
+        lines.push(`   */`);
+
+        const hasProperties = rel.properties && rel.properties.length > 0;
+        const propertiesParam = hasProperties ? `, properties?: Record<string, any>` : '';
+
+        lines.push(`  async ${methodName}(${uniqueField}: string, target${targetType}${this.capitalize(targetUniqueField)}: string${propertiesParam}): Promise<void> {`);
+        lines.push(`    return this.addRelationship(${uniqueField}, {`);
+        lines.push(`      type: '${rel.type}',`);
+        lines.push(`      target: target${targetType}${this.capitalize(targetUniqueField)},`);
+
+        // Only add targetLabel if different from source entity
+        if (targetType !== entity.name) {
+          lines.push(`      targetLabel: '${targetType}',`);
+        }
+
+        if (hasProperties) {
+          lines.push(`      properties`);
+        }
+        lines.push(`    });`);
+        lines.push(`  }`);
+        lines.push(``);
+
+        // Remove relationship method
+        lines.push(`  /**`);
+        lines.push(`   * Remove ${rel.type} relationship to ${targetType}`);
+        lines.push(`   * @param ${uniqueField} - Source ${entity.name} unique identifier`);
+        lines.push(`   * @param target${targetType}${this.capitalize(targetUniqueField)} - Target ${targetType} unique identifier`);
+        lines.push(`   */`);
+        lines.push(`  async ${removeMethodName}(${uniqueField}: string, target${targetType}${this.capitalize(targetUniqueField)}: string): Promise<void> {`);
+        lines.push(`    return this.removeRelationship(${uniqueField}, {`);
+        lines.push(`      type: '${rel.type}',`);
+        lines.push(`      target: target${targetType}${this.capitalize(targetUniqueField)}${targetType !== entity.name ? `,\n      targetLabel: '${targetType}'` : ''}`);
+        lines.push(`    });`);
+        lines.push(`  }`);
+        lines.push(``);
       }
     }
 
