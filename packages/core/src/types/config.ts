@@ -14,6 +14,7 @@ export interface RagForgeConfig {
   embeddings?: EmbeddingsConfig;
   summarization_strategies?: Record<string, SummarizationStrategyConfig>;
   summarization_llm?: SummarizationLLMConfig;
+  source?: SourceConfig;
 }
 
 /**
@@ -247,4 +248,27 @@ export interface EmbeddingRelationshipConfig {
   fields?: string[];
   depth?: number;
   max_items?: number;
+}
+
+/**
+ * Configuration for source code ingestion
+ */
+export interface SourceConfig {
+  /** Type of source to ingest (only 'code' is supported currently) */
+  type: 'code';
+
+  /** Adapter to use for parsing (e.g., 'typescript', 'python') */
+  adapter: 'typescript' | 'python';
+
+  /** Base path for resolving relative paths (optional, defaults to project root) */
+  root?: string;
+
+  /** Glob patterns to include (relative to root) */
+  include: string[];
+
+  /** Glob patterns to exclude (optional) */
+  exclude?: string[];
+
+  /** Additional options passed to the adapter */
+  options?: Record<string, any>;
 }

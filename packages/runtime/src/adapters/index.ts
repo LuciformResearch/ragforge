@@ -6,3 +6,4 @@
 
 export * from './types.js';
 export * from './code-source-adapter.js';
+export * from './incremental-ingestion.js';

@@ -144,6 +144,15 @@ const SummarizationLLMConfigSchema = z.object({
   api_key: z.string().optional()
 });
 
+const SourceConfigSchema = z.object({
+  type: z.literal('code'),
+  adapter: z.enum(['typescript', 'python']),
+  root: z.string().optional(),
+  include: z.array(z.string()).min(1, 'source.include must contain at least one pattern'),
+  exclude: z.array(z.string()).optional(),
+  options: z.record(z.any()).optional()
+});
+
 const RagForgeConfigSchema = z.object({
   name: z.string(),
   version: z.string(),
@@ -155,6 +164,7 @@ const RagForgeConfigSchema = z.object({
   generation: GenerationConfigSchema.optional(),
   summarization_strategies: z.record(SummarizationStrategyConfigSchema).optional(),
   summarization_llm: SummarizationLLMConfigSchema.optional(),
+  source: SourceConfigSchema.optional(),
   embeddings: z
     .object({
       provider: z.literal('gemini'),

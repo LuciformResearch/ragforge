@@ -9,6 +9,7 @@
 import { promises as fs } from 'fs';
 import path from 'path';
 import process from 'process';
+import { spawn } from 'child_process';
 import {
   ConfigLoader,
   TypeGenerator,
@@ -212,6 +213,29 @@ async function loadSchema(
   }
 }
 
+async function installDependencies(outDir: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn('npm', ['install'], {
+      cwd: outDir,
+      stdio: 'inherit',
+      shell: true
+    });
+
+    proc.on('exit', code => {
+      if (code === 0) {
+        console.log('✅ Dependencies installed successfully\n');
+        resolve();
+      } else {
+        reject(new Error(`npm install failed with code ${code}`));
+      }
+    });
+
+    proc.on('error', error => {
+      reject(new Error(`Failed to run npm install: ${error.message}`));
+    });
+  });
+}
+
 export async function runGenerate(options: GenerateOptions): Promise<void> {
   ensureEnvLoaded(import.meta.url);
 
@@ -301,6 +325,10 @@ export async function runGenerate(options: GenerateOptions): Promise<void> {
     console.log('   - Neo4j env: skipped (credentials not available)');
   }
 
+  // Auto-install dependencies
+  console.log('\n📦 Installing dependencies...');
+  await installDependencies(options.outDir);
+
   // Show next steps
   printNextSteps(config, generated, connectionForEnv !== null);
 }
@@ -325,12 +353,6 @@ function printNextSteps(config: RagForgeConfig, generated: any, hasConnection: b
     console.log('');
     step++;
   }
-
-  // Step 2: Install dependencies
-  console.log(`${step}. Install dependencies:`);
-  console.log('   npm install');
-  console.log('');
-  step++;
 
   // Step 3: Vector indexes (if embeddings configured)
   if (generated.embeddings) {

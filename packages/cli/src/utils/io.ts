@@ -185,6 +185,33 @@ export async function persistGeneratedArtifacts(
     console.log('    ℹ️  Add "summarization:" config to entity fields to enable field summarization');
   }
 
+  // Write source ingestion scripts (if source config exists)
+  if (generated.scripts) {
+    if (generated.scripts.ingestFromSource) {
+      await writeFileIfChanged(
+        path.join(scriptsDir, 'ingest-from-source.ts'),
+        generated.scripts.ingestFromSource
+      );
+      logGenerated('scripts/ingest-from-source.ts');
+    }
+
+    if (generated.scripts.setup) {
+      await writeFileIfChanged(
+        path.join(scriptsDir, 'setup.ts'),
+        generated.scripts.setup
+      );
+      logGenerated('scripts/setup.ts');
+    }
+
+    if (generated.scripts.cleanDb) {
+      await writeFileIfChanged(
+        path.join(scriptsDir, 'clean-db.ts'),
+        generated.scripts.cleanDb
+      );
+      logGenerated('scripts/clean-db.ts');
+    }
+  }
+
   // Write rebuild-agent script
   await writeFileIfChanged(path.join(scriptsDir, 'rebuild-agent.ts'), generated.rebuildAgentScript);
   logGenerated('scripts/rebuild-agent.ts');
@@ -401,6 +428,20 @@ async function writeGeneratedPackageJson(
   // Add summarization script if enabled
   if (generated.summarization) {
     baseScripts['summaries:generate'] = 'tsx ./scripts/generate-summaries.ts';
+  }
+
+  // Add source ingestion scripts if source config exists
+  if (generated.scripts) {
+    if (generated.scripts.ingestFromSource) {
+      baseScripts['ingest'] = 'tsx ./scripts/ingest-from-source.ts';
+      baseScripts['ingest:clean'] = 'npm run clean:db && npm run ingest';
+    }
+    if (generated.scripts.setup) {
+      baseScripts['setup'] = 'tsx ./scripts/setup.ts';
+    }
+    if (generated.scripts.cleanDb) {
+      baseScripts['clean:db'] = 'tsx ./scripts/clean-db.ts';
+    }
   }
 
   pkg.scripts = {
