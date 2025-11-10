@@ -481,6 +481,45 @@ export class QueryBuilder<T = any> {
   }
 
   /**
+   * Execute query and return flat entities (without score wrapper)
+   *
+   * This is a convenience method for simple queries where you don't need
+   * the score, scoreBreakdown, or context metadata. It returns just the
+   * entity objects directly.
+   *
+   * Use this for:
+   * - Simple WHERE queries without semantic search
+   * - When you don't need to inspect scores
+   * - Cleaner code for basic data retrieval
+   *
+   * Use execute() instead when:
+   * - Using semantic search (need scores)
+   * - Using LLM reranking (need reasoning)
+   * - Need to debug/inspect scores
+   *
+   * @example
+   * // Simple query - get entities directly
+   * const classes = await rag.scope()
+   *   .whereType('class')
+   *   .executeFlat();
+   *
+   * classes.forEach(c => {
+   *   console.log(c.name, c.extends); // Direct property access
+   * });
+   *
+   * @example
+   * // Compare with execute()
+   * const results = await rag.scope().whereType('class').execute();
+   * results.forEach(r => {
+   *   console.log(r.entity.name, r.score); // Need .entity prefix
+   * });
+   */
+  async executeFlat(): Promise<T[]> {
+    const results = await this.execute();
+    return results.map(r => r.entity);
+  }
+
+  /**
    * Execute query and return results with detailed metadata
    *
    * This method provides insight into the query execution pipeline,

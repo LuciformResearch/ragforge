@@ -61,6 +61,7 @@ export async function persistGeneratedArtifacts(
   await writeFileIfChanged(path.join(outDir, 'types.ts'), typesContent);
   await writeFileIfChanged(path.join(outDir, 'agent.ts'), generated.agent);
   await writeFileIfChanged(path.join(outDir, 'documentation.ts'), generated.agentDocumentation.module);
+  await writeFileIfChanged(path.join(outDir, 'load-config.ts'), generated.configLoader);
 
   const docsDir = path.join(outDir, 'docs');
   await fs.mkdir(docsDir, { recursive: true });
@@ -118,6 +119,23 @@ export async function persistGeneratedArtifacts(
         }
       }
     }
+  }
+
+  // Write summarization artifacts (prompts + script)
+  if (generated.summarization) {
+    const promptsDir = path.join(outDir, 'prompts');
+    await fs.mkdir(promptsDir, { recursive: true });
+
+    // Write custom prompt templates
+    for (const [filename, content] of generated.summarization.prompts.entries()) {
+      await writeFileIfChanged(path.join(promptsDir, filename), content);
+    }
+
+    // Write generate-summaries script
+    await writeFileIfChanged(
+      path.join(scriptsDir, 'generate-summaries.ts'),
+      generated.summarization.generateSummariesScript
+    );
   }
 
   // Write rebuild-agent script
@@ -296,16 +314,25 @@ async function writeGeneratedPackageJson(
     ])
   );
 
+  const baseScripts: Record<string, string> = {
+    build: 'echo "Nothing to build"',
+    start: 'tsx ./client.ts',
+    regen: 'node ../../ragforge/packages/cli/dist/index.js generate --config ./ragforge.config.yaml --out . --force',
+    'regen:auto': 'node ../../ragforge/packages/cli/dist/index.js generate --config ./ragforge.config.yaml --out . --force --auto-detect-fields',
+    'rebuild:agent': 'tsx ./scripts/rebuild-agent.ts',
+    'embeddings:index': 'tsx ./scripts/create-vector-indexes.ts',
+    'embeddings:generate': 'tsx ./scripts/generate-embeddings.ts'
+  };
+
+  // Add summarization script if enabled
+  if (generated.summarization) {
+    baseScripts['summaries:generate'] = 'tsx ./scripts/generate-summaries.ts';
+  }
+
   pkg.scripts = {
-      build: 'echo "Nothing to build"',
-      start: 'tsx ./client.ts',
-      regen: 'node ../../ragforge/packages/cli/dist/index.js generate --config ./ragforge.config.yaml --out . --force',
-      'regen:auto': 'node ../../ragforge/packages/cli/dist/index.js generate --config ./ragforge.config.yaml --out . --force --auto-detect-fields',
-      'rebuild:agent': 'tsx ./scripts/rebuild-agent.ts',
-      'embeddings:index': 'tsx ./scripts/create-vector-indexes.ts',
-      'embeddings:generate': 'tsx ./scripts/generate-embeddings.ts',
-      ...exampleScripts
-    };
+    ...baseScripts,
+    ...exampleScripts
+  };
 
   await writeFileIfChanged(path.join(outDir, 'package.json'), JSON.stringify(pkg, null, 2) + '\n');
 

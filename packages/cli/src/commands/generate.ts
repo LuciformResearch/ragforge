@@ -39,6 +39,7 @@ export interface GenerateOptions {
   rootDir: string;
   geminiKey?: string;
   autoDetectFields: boolean;
+  dev: boolean;
 }
 
 export function printGenerateHelp(): void {
@@ -56,6 +57,7 @@ Options:
   --force                 Recreate files managed by the generator even if they exist
   --rewrite-config        Regenerate ragforge.config.yaml from the current schema before emitting code
   --auto-detect-fields    Ask the LLM to refine display/query/embedding fields before generation
+  --dev                   Development mode: use local file: dependencies instead of npm versions
   -h, --help              Show this message
 
 Note: The CLI copies ragforge.config.yaml + schema.json into \`--out\` so embeddings scripts can run in isolation.
@@ -85,7 +87,8 @@ export function parseGenerateOptions(args: string[]): GenerateOptions {
   const opts: Partial<GenerateOptions> = {
     force: false,
     rewriteConfig: false,
-    autoDetectFields: false
+    autoDetectFields: false,
+    dev: false
   };
 
   for (let i = 0; i < args.length; i += 1) {
@@ -121,6 +124,9 @@ export function parseGenerateOptions(args: string[]): GenerateOptions {
       case '--auto-detect-fields':
         opts.autoDetectFields = true;
         break;
+      case '--dev':
+        opts.dev = true;
+        break;
       case '-h':
       case '--help':
         printGenerateHelp();
@@ -147,7 +153,8 @@ export function parseGenerateOptions(args: string[]): GenerateOptions {
     database: opts.database,
     rootDir,
     geminiKey,
-    autoDetectFields: opts.autoDetectFields ?? false
+    autoDetectFields: opts.autoDetectFields ?? false,
+    dev: opts.dev ?? false
   };
 }
 
@@ -276,7 +283,8 @@ export async function runGenerate(options: GenerateOptions): Promise<void> {
     generated,
     typesContent,
     options.rootDir,
-    config.name
+    config.name,
+    options.dev
   );
   await syncProjectConfigArtifacts(options.outDir, options.configPath, schema, options.schemaPath);
 

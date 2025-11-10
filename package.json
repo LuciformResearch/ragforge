@@ -19,6 +19,8 @@
   "scripts": {
     "build": "turbo run build",
     "dev": "turbo run dev",
+    "dev:link": "node scripts/use-local-deps.js",
+    "dev:unlink": "node scripts/use-npm-deps.js",
     "test": "turbo run test",
     "lint": "turbo run lint",
     "format": "turbo run format",

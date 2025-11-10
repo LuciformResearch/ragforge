@@ -56,10 +56,14 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
-    "neo4j-driver": "^5.14.0",
-    "dotenv": "^16.3.1",
     "@google/genai": "^1.28.0",
-    "p-limit": "^4.0.0"
+    "@luciformresearch/codeparsers": "^0.1.2",
+    "dotenv": "^16.3.1",
+    "fast-xml-parser": "^4.3.0",
+    "globby": "^14.0.0",
+    "neo4j-driver": "^5.14.0",
+    "p-limit": "^4.0.0",
+    "strip-json-comments": "^5.0.3"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

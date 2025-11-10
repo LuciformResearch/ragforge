@@ -20,6 +20,11 @@ import {
   type RagForgeConfig,
   type GraphSchema
 } from '@luciformresearch/ragforge-core';
+import {
+  CodeSourceAdapter,
+  type SourceConfig,
+  Neo4jClient
+} from '@luciformresearch/ragforge-runtime';
 import { ensureEnvLoaded, getEnv } from '../utils/env.js';
 import {
   prepareOutputDirectory,
@@ -245,10 +250,273 @@ async function persistConfig(outDir: string, project: string, config: RagForgeCo
   console.log(`🧩  Schema snapshot saved to ${schemaPath}`);
 }
 
+/**
+ * Check for existing config file and extract source configuration
+ */
+async function checkForSourceConfig(cwd: string): Promise<SourceConfig | null> {
+  const configPath = path.join(cwd, 'ragforge.config.yaml');
+
+  try {
+    const configContent = await fs.readFile(configPath, 'utf-8');
+    const config = YAML.parse(configContent);
+
+    if (config?.source) {
+      console.log('📦  Found source configuration in ragforge.config.yaml');
+      return config.source as SourceConfig;
+    }
+  } catch (error) {
+    // Config file doesn't exist or can't be read - this is fine
+    return null;
+  }
+
+  return null;
+}
+
+/**
+ * Parse source code and populate Neo4j graph
+ */
+async function parseAndIngestSource(
+  sourceConfig: SourceConfig,
+  neo4jUri: string,
+  neo4jUser: string,
+  neo4jPassword: string,
+  neo4jDatabase?: string
+): Promise<void> {
+  console.log(`\n🔍  Parsing source: ${sourceConfig.type}/${sourceConfig.adapter}`);
+  console.log(`📁  Root: ${sourceConfig.root || process.cwd()}`);
+
+  // Create appropriate adapter
+  let adapter;
+  if (sourceConfig.type === 'code' && (sourceConfig.adapter === 'typescript' || sourceConfig.adapter === 'python')) {
+    adapter = new CodeSourceAdapter(sourceConfig.adapter);
+  } else {
+    throw new Error(`Unsupported source adapter: ${sourceConfig.type}/${sourceConfig.adapter}`);
+  }
+
+  // Validate config
+  const validation = await adapter.validate(sourceConfig);
+  if (!validation.valid) {
+    throw new Error(`Source config validation failed: ${validation.errors?.join(', ')}`);
+  }
+
+  if (validation.warnings && validation.warnings.length > 0) {
+    validation.warnings.forEach(warning => console.warn(`⚠️  ${warning}`));
+  }
+
+  // Parse source with progress reporting
+  const parseResult = await adapter.parse({
+    source: sourceConfig,
+    onProgress: (progress) => {
+      const percent = Math.round(progress.percentComplete);
+      if (progress.phase === 'discovering') {
+        console.log(`🔎  Discovering files...`);
+      } else if (progress.phase === 'parsing') {
+        console.log(`📄  Parsing ${progress.filesProcessed}/${progress.totalFiles} files (${percent}%)`);
+      } else if (progress.phase === 'building_graph') {
+        console.log(`🏗️  Building graph structure...`);
+      }
+    }
+  });
+
+  const { graph } = parseResult;
+  console.log(`✅  Parsed ${graph.metadata.filesProcessed} files → ${graph.metadata.nodesGenerated} nodes, ${graph.metadata.relationshipsGenerated} relationships`);
+
+  // Connect to Neo4j and ingest graph
+  console.log(`💾  Ingesting graph into Neo4j...`);
+  const client = new Neo4jClient({
+    uri: neo4jUri,
+    username: neo4jUser,
+    password: neo4jPassword,
+    database: neo4jDatabase
+  });
+
+  try {
+    // Verify connectivity
+    await client.verifyConnectivity();
+
+    // Clear existing data (for now - later we'll support incremental updates)
+    console.log(`🗑️  Clearing existing graph data...`);
+    await client.run('MATCH (n) WHERE n:Scope OR n:File OR n:Directory OR n:ExternalLibrary OR n:Project DETACH DELETE n');
+
+    // Create schema (indexes and constraints) before ingestion
+    console.log(`📋  Creating indexes and constraints...`);
+    await client.run('CREATE CONSTRAINT scope_uuid IF NOT EXISTS FOR (s:Scope) REQUIRE s.uuid IS UNIQUE');
+    await client.run('CREATE CONSTRAINT file_path IF NOT EXISTS FOR (f:File) REQUIRE f.path IS UNIQUE');
+    await client.run('CREATE CONSTRAINT directory_path IF NOT EXISTS FOR (d:Directory) REQUIRE d.path IS UNIQUE');
+    await client.run('CREATE CONSTRAINT external_library_name IF NOT EXISTS FOR (e:ExternalLibrary) REQUIRE e.name IS UNIQUE');
+    await client.run('CREATE CONSTRAINT project_name IF NOT EXISTS FOR (p:Project) REQUIRE p.name IS UNIQUE');
+    await client.run('CREATE INDEX scope_name IF NOT EXISTS FOR (s:Scope) ON (s.name)');
+    await client.run('CREATE INDEX scope_type IF NOT EXISTS FOR (s:Scope) ON (s.type)');
+    await client.run('CREATE INDEX scope_file IF NOT EXISTS FOR (s:Scope) ON (s.file)');
+    console.log(`✓ Schema created`);
+
+    // Create nodes with MERGE (idempotent) - batched with UNWIND
+    console.log(`📝  Creating ${graph.nodes.length} nodes...`);
+    const BATCH_SIZE = 500;
+
+    // Separate nodes by type (different unique keys)
+    const scopeNodes = graph.nodes.filter(n => n.labels.includes('Scope'));
+    const fileNodes = graph.nodes.filter(n => n.labels.includes('File'));
+    const directoryNodes = graph.nodes.filter(n => n.labels.includes('Directory'));
+    const externalLibraryNodes = graph.nodes.filter(n => n.labels.includes('ExternalLibrary'));
+    const projectNodes = graph.nodes.filter(n => n.labels.includes('Project'));
+
+    // Batch create Scope nodes
+    for (let i = 0; i < scopeNodes.length; i += BATCH_SIZE) {
+      const batch = scopeNodes.slice(i, i + BATCH_SIZE);
+      await client.run(
+        `UNWIND $nodes AS node
+         MERGE (n:Scope {uuid: node.uuid})
+         SET n += node`,
+        { nodes: batch.map(n => n.properties) }
+      );
+      console.log(`  ↳ ${Math.min(i + BATCH_SIZE, scopeNodes.length)}/${scopeNodes.length} scopes created`);
+    }
+
+    // Batch create File nodes
+    for (let i = 0; i < fileNodes.length; i += BATCH_SIZE) {
+      const batch = fileNodes.slice(i, i + BATCH_SIZE);
+      await client.run(
+        `UNWIND $nodes AS node
+         MERGE (n:File {path: node.path})
+         SET n += node`,
+        { nodes: batch.map(n => n.properties) }
+      );
+      console.log(`  ↳ ${Math.min(i + BATCH_SIZE, fileNodes.length)}/${fileNodes.length} files created`);
+    }
+
+    // Batch create Directory nodes
+    for (let i = 0; i < directoryNodes.length; i += BATCH_SIZE) {
+      const batch = directoryNodes.slice(i, i + BATCH_SIZE);
+      await client.run(
+        `UNWIND $nodes AS node
+         MERGE (n:Directory {path: node.path})
+         SET n += node`,
+        { nodes: batch.map(n => n.properties) }
+      );
+      console.log(`  ↳ ${Math.min(i + BATCH_SIZE, directoryNodes.length)}/${directoryNodes.length} directories created`);
+    }
+
+    // Batch create ExternalLibrary nodes
+    for (let i = 0; i < externalLibraryNodes.length; i += BATCH_SIZE) {
+      const batch = externalLibraryNodes.slice(i, i + BATCH_SIZE);
+      await client.run(
+        `UNWIND $nodes AS node
+         MERGE (n:ExternalLibrary {name: node.name})
+         SET n += node`,
+        { nodes: batch.map(n => n.properties) }
+      );
+      console.log(`  ↳ ${Math.min(i + BATCH_SIZE, externalLibraryNodes.length)}/${externalLibraryNodes.length} external libraries created`);
+    }
+
+    // Batch create Project nodes
+    for (let i = 0; i < projectNodes.length; i += BATCH_SIZE) {
+      const batch = projectNodes.slice(i, i + BATCH_SIZE);
+      await client.run(
+        `UNWIND $nodes AS node
+         MERGE (n:Project {name: node.name})
+         SET n += node`,
+        { nodes: batch.map(n => n.properties) }
+      );
+      console.log(`  ↳ ${Math.min(i + BATCH_SIZE, projectNodes.length)}/${projectNodes.length} projects created`);
+    }
+
+    // Create relationships with precise MATCH (no cartesian product!) - batched
+    console.log(`🔗  Creating ${graph.relationships.length} relationships...`);
+
+    // Helper to determine node type from ID
+    const getNodeType = (id: string): string => {
+      if (id.startsWith('file:')) return 'file';
+      if (id.startsWith('dir:')) return 'dir';
+      if (id.startsWith('lib:')) return 'lib';
+      if (id.startsWith('project:')) return 'project';
+      return 'scope'; // UUID-based Scope nodes
+    };
+
+    // Helper to get label and key for each node type
+    const getNodeInfo = (type: string): { label: string; key: string } => {
+      switch (type) {
+        case 'file': return { label: 'File', key: 'path' };
+        case 'dir': return { label: 'Directory', key: 'path' };
+        case 'lib': return { label: 'ExternalLibrary', key: 'name' };
+        case 'project': return { label: 'Project', key: 'name' };
+        default: return { label: 'Scope', key: 'uuid' };
+      }
+    };
+
+    // Helper to strip prefix from ID
+    const stripPrefix = (id: string): string => {
+      return id.replace(/^(file:|dir:|lib:|project:)/, '');
+    };
+
+    // Group relationships by type for batching
+    const relsByType = new Map<string, typeof graph.relationships>();
+    for (const rel of graph.relationships) {
+      const fromType = getNodeType(rel.from);
+      const toType = getNodeType(rel.to);
+      const key = `${rel.type}:${fromType}:${toType}`;
+      if (!relsByType.has(key)) {
+        relsByType.set(key, []);
+      }
+      relsByType.get(key)!.push(rel);
+    }
+
+    // Batch create relationships by type
+    let totalRelsCreated = 0;
+    for (const [key, rels] of relsByType) {
+      const [relType, fromType, toType] = key.split(':');
+
+      for (let i = 0; i < rels.length; i += BATCH_SIZE) {
+        const batch = rels.slice(i, i + BATCH_SIZE);
+
+        // Prepare batch data
+        const batchData = batch.map(rel => ({
+          from: stripPrefix(rel.from),
+          to: stripPrefix(rel.to),
+          props: rel.properties || {}
+        }));
+
+        // Build query based on source/target types
+        const fromInfo = getNodeInfo(fromType);
+        const toInfo = getNodeInfo(toType);
+
+        await client.run(
+          `UNWIND $batch AS rel
+           MATCH (a:${fromInfo.label} {${fromInfo.key}: rel.from})
+           MATCH (b:${toInfo.label} {${toInfo.key}: rel.to})
+           MERGE (a)-[r:${relType}]->(b)
+           SET r += rel.props`,
+          { batch: batchData }
+        );
+
+        totalRelsCreated += batch.length;
+        console.log(`  ↳ ${totalRelsCreated}/${graph.relationships.length} relationships created`);
+      }
+    }
+
+    console.log(`✅  Graph ingestion complete!`);
+  } finally {
+    await client.close();
+  }
+}
+
 export async function runInit(options: InitOptions): Promise<void> {
   ensureEnvLoaded(import.meta.url);
 
   console.log('🚀  RagForge init starting...\n');
+
+  // Check for source config and parse if present
+  const sourceConfig = await checkForSourceConfig(process.cwd());
+  if (sourceConfig) {
+    await parseAndIngestSource(
+      sourceConfig,
+      options.uri,
+      options.username,
+      options.password,
+      options.database
+    );
+    console.log(''); // Empty line for spacing
+  }
 
   console.log(`🔌  Connecting to Neo4j at ${options.uri}...`);
   const introspector = new SchemaIntrospector(options.uri, options.username, options.password);

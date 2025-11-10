@@ -1,0 +1,26 @@
+{
+  "name": "test-code-rag",
+  "private": true,
+  "type": "module",
+  "version": "0.0.1",
+  "dependencies": {
+    "@luciformresearch/ragforge-runtime": "file:packages/runtime",
+    "@google/genai": "^1.28.0",
+    "dotenv": "^16.3.1",
+    "tsx": "^4.20.0",
+    "js-yaml": "^4.1.0"
+  },
+  "devDependencies": {
+    "@luciformresearch/codeparsers": "file:../../packages/codeparsers"
+  },
+  "scripts": {
+    "build": "echo \"Nothing to build\"",
+    "start": "tsx ./client.ts",
+    "regen": "node ../../ragforge/packages/cli/dist/index.js generate --config ./ragforge.config.yaml --out . --force",
+    "regen:auto": "node ../../ragforge/packages/cli/dist/index.js generate --config ./ragforge.config.yaml --out . --force --auto-detect-fields",
+    "rebuild:agent": "tsx ./scripts/rebuild-agent.ts",
+    "embeddings:index": "tsx ./scripts/create-vector-indexes.ts",
+    "embeddings:generate": "tsx ./scripts/generate-embeddings.ts",
+    "summaries:generate": "tsx ./scripts/generate-summaries.ts"
+  }
+}

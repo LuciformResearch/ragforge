@@ -1,0 +1,1196 @@
+{
+  "nodes": [
+    {
+      "label": "Scope",
+      "properties": [
+        {
+          "name": "source_summary_concept",
+          "type": "String",
+          "nullable": true
+        },
+        {
+          "name": "source_summary_hash",
+          "type": "String",
+          "nullable": true
+        },
+        {
+          "name": "source_summary_operation",
+          "type": "String",
+          "nullable": true
+        },
+        {
+          "name": "source_summarized_at",
+          "type": "String",
+          "nullable": true
+        },
+        {
+          "name": "source_summary_dependency",
+          "type": "String",
+          "nullable": true
+        },
+        {
+          "name": "source_summary_complexity",
+          "type": "String",
+          "nullable": true
+        },
+        {
+          "name": "source_summary_purpose",
+          "type": "String",
+          "nullable": true
+        },
+        {
+          "name": "source_summary_suggestion",
+          "type": "String",
+          "nullable": true
+        },
+        {
+          "name": "depth",
+          "type": "Integer",
+          "nullable": true
+        },
+        {
+          "name": "hash",
+          "type": "String",
+          "nullable": true
+        },
+        {
+          "name": "source",
+          "type": "String",
+          "nullable": true
+        },
+        {
+          "name": "linesOfCode",
+          "type": "Integer",
+          "nullable": true
+        },
+        {
+          "name": "parameters",
+          "type": "String",
+          "nullable": true
+        },
+        {
+          "name": "startLine",
+          "type": "Integer",
+          "nullable": true
+        },
+        {
+          "name": "language",
+          "type": "String",
+          "nullable": true
+        },
+        {
+          "name": "endLine",
+          "type": "Integer",
+          "nullable": true
+        },
+        {
+          "name": "complexity",
+          "type": "Integer",
+          "nullable": true
+        },
+        {
+          "name": "type",
+          "type": "String",
+          "nullable": true
+        },
+        {
+          "name": "file",
+          "type": "String",
+          "nullable": true
+        },
+        {
+          "name": "uuid",
+          "type": "String",
+          "nullable": true
+        },
+        {
+          "name": "name",
+          "type": "String",
+          "nullable": true
+        },
+        {
+          "name": "signature",
+          "type": "String",
+          "nullable": true
+        },
+        {
+          "name": "implements",
+          "type": "String",
+          "nullable": true
+        },
+        {
+          "name": "heritageClauses",
+          "type": "String",
+          "nullable": true
+        },
+        {
+          "name": "extends",
+          "type": "String",
+          "nullable": true
+        },
+        {
+          "name": "parent",
+          "type": "String",
+          "nullable": true
+        },
+        {
+          "name": "parentUUID",
+          "type": "String",
+          "nullable": true
+        },
+        {
+          "name": "returnType",
+          "type": "String",
+          "nullable": true
+        },
+        {
+          "name": "genericParameters",
+          "type": "String",
+          "nullable": true
+        },
+        {
+          "name": "generics",
+          "type": "String",
+          "nullable": true
+        }
+      ],
+      "count": 268
+    },
+    {
+      "label": "File",
+      "properties": [
+        {
+          "name": "path",
+          "type": "String",
+          "nullable": true
+        },
+        {
+          "name": "name",
+          "type": "String",
+          "nullable": true
+        },
+        {
+          "name": "extension",
+          "type": "String",
+          "nullable": true
+        },
+        {
+          "name": "directory",
+          "type": "String",
+          "nullable": true
+        },
+        {
+          "name": "contentHash",
+          "type": "String",
+          "nullable": true
+        }
+      ],
+      "count": 26
+    },
+    {
+      "label": "Directory",
+      "properties": [
+        {
+          "name": "depth",
+          "type": "Integer",
+          "nullable": true
+        },
+        {
+          "name": "path",
+          "type": "String",
+          "nullable": true
+        }
+      ],
+      "count": 10
+    },
+    {
+      "label": "ExternalLibrary",
+      "properties": [
+        {
+          "name": "name",
+          "type": "String",
+          "nullable": true
+        }
+      ],
+      "count": 13
+    },
+    {
+      "label": "Project",
+      "properties": [
+        {
+          "name": "name",
+          "type": "String",
+          "nullable": true
+        },
+        {
+          "name": "rootPath",
+          "type": "String",
+          "nullable": true
+        },
+        {
+          "name": "gitRemote",
+          "type": "String",
+          "nullable": true
+        },
+        {
+          "name": "indexedAt",
+          "type": "String",
+          "nullable": true
+        }
+      ],
+      "count": 1
+    }
+  ],
+  "relationships": [
+    {
+      "type": "BELONGS_TO",
+      "startNode": "Scope",
+      "endNode": "Project",
+      "properties": [],
+      "count": 0
+    },
+    {
+      "type": "BELONGS_TO",
+      "startNode": "File",
+      "endNode": "Project",
+      "properties": [],
+      "count": 0
+    },
+    {
+      "type": "DEFINED_IN",
+      "startNode": "Scope",
+      "endNode": "File",
+      "properties": [],
+      "count": 0
+    },
+    {
+      "type": "HAS_PARENT",
+      "startNode": "Scope",
+      "endNode": "Scope",
+      "properties": [],
+      "count": 0
+    },
+    {
+      "type": "IN_DIRECTORY",
+      "startNode": "File",
+      "endNode": "Directory",
+      "properties": [],
+      "count": 0
+    },
+    {
+      "type": "CONSUMES",
+      "startNode": "Scope",
+      "endNode": "Scope",
+      "properties": [],
+      "count": 0
+    },
+    {
+      "type": "USES_LIBRARY",
+      "startNode": "Scope",
+      "endNode": "ExternalLibrary",
+      "properties": [],
+      "count": 0
+    },
+    {
+      "type": "INHERITS_FROM",
+      "startNode": "Scope",
+      "endNode": "Scope",
+      "properties": [],
+      "count": 0
+    }
+  ],
+  "indexes": [
+    {
+      "name": "directory_path",
+      "type": "BTREE",
+      "entityType": "NODE",
+      "labelsOrTypes": [
+        "Directory"
+      ],
+      "properties": [
+        "path"
+      ]
+    },
+    {
+      "name": "external_library_name",
+      "type": "BTREE",
+      "entityType": "NODE",
+      "labelsOrTypes": [
+        "ExternalLibrary"
+      ],
+      "properties": [
+        "name"
+      ]
+    },
+    {
+      "name": "file_path",
+      "type": "BTREE",
+      "entityType": "NODE",
+      "labelsOrTypes": [
+        "File"
+      ],
+      "properties": [
+        "path"
+      ]
+    },
+    {
+      "name": "index_343aff4e",
+      "type": "BTREE",
+      "entityType": "NODE",
+      "labelsOrTypes": null,
+      "properties": null
+    },
+    {
+      "name": "index_f7700477",
+      "type": "BTREE",
+      "entityType": "RELATIONSHIP",
+      "labelsOrTypes": null,
+      "properties": null
+    },
+    {
+      "name": "project_name",
+      "type": "BTREE",
+      "entityType": "NODE",
+      "labelsOrTypes": [
+        "Project"
+      ],
+      "properties": [
+        "name"
+      ]
+    },
+    {
+      "name": "scope_file",
+      "type": "BTREE",
+      "entityType": "NODE",
+      "labelsOrTypes": [
+        "Scope"
+      ],
+      "properties": [
+        "file"
+      ]
+    },
+    {
+      "name": "scope_name",
+      "type": "BTREE",
+      "entityType": "NODE",
+      "labelsOrTypes": [
+        "Scope"
+      ],
+      "properties": [
+        "name"
+      ]
+    },
+    {
+      "name": "scope_type",
+      "type": "BTREE",
+      "entityType": "NODE",
+      "labelsOrTypes": [
+        "Scope"
+      ],
+      "properties": [
+        "type"
+      ]
+    },
+    {
+      "name": "scope_uuid",
+      "type": "BTREE",
+      "entityType": "NODE",
+      "labelsOrTypes": [
+        "Scope"
+      ],
+      "properties": [
+        "uuid"
+      ]
+    }
+  ],
+  "constraints": [
+    {
+      "name": "directory_path",
+      "type": "UNIQUE",
+      "entityType": "NODE",
+      "labelsOrTypes": [
+        "Directory"
+      ],
+      "properties": [
+        "path"
+      ]
+    },
+    {
+      "name": "external_library_name",
+      "type": "UNIQUE",
+      "entityType": "NODE",
+      "labelsOrTypes": [
+        "ExternalLibrary"
+      ],
+      "properties": [
+        "name"
+      ]
+    },
+    {
+      "name": "file_path",
+      "type": "UNIQUE",
+      "entityType": "NODE",
+      "labelsOrTypes": [
+        "File"
+      ],
+      "properties": [
+        "path"
+      ]
+    },
+    {
+      "name": "project_name",
+      "type": "UNIQUE",
+      "entityType": "NODE",
+      "labelsOrTypes": [
+        "Project"
+      ],
+      "properties": [
+        "name"
+      ]
+    },
+    {
+      "name": "scope_uuid",
+      "type": "UNIQUE",
+      "entityType": "NODE",
+      "labelsOrTypes": [
+        "Scope"
+      ],
+      "properties": [
+        "uuid"
+      ]
+    }
+  ],
+  "vectorIndexes": [],
+  "relationshipExamples": {
+    "BELONGS_TO": "ragforge",
+    "DEFINED_IN": "index.ts",
+    "HAS_PARENT": "CodeSourceAdapter",
+    "IN_DIRECTORY": "611",
+    "CONSUMES": "createClient",
+    "USES_LIBRARY": "fs/promises",
+    "INHERITS_FROM": "SourceConfig"
+  },
+  "fieldExamples": {
+    "Scope.name": [
+      "AddRelationshipConfig",
+      "AgentConfig",
+      "AgentResult",
+      "AggregateResult",
+      "Clear",
+      "CodeSourceAdapter",
+      "CodeSourceConfig",
+      "CypherQuery",
+      "DEFAULT_BATCH_SIZE",
+      "DEFAULT_CONCURRENCY"
+    ],
+    "Scope.source": [
+      "function createClient(config: RuntimeConfig) {\n  const neo4jClient = new Neo4jClient(config.neo4j);\n\n  return {\n    /**\n     * Create a query builder for an entity type\n     */\n    query<T = any>(entityType: string, options?: { enrichment?: RelationshipConfig[]; context?: EntityContext }): QueryBuilder<T> {\n      return new QueryBuilder<T>(neo4jClient, entityType, options?.enrichment, options?.context);\n    },\n\n    /**\n     * Execute raw Cypher query\n     */\n    async raw(cypher: string, params?: Record<string, any>) {\n      return neo4jClient.run(cypher, params);\n    },\n\n    /**\n     * Close connection\n     */\n    async close() {\n      return neo4jClient.close();\n    },\n\n    /**\n     * Verify connectivity\n     */\n    async ping() {\n      return neo4jClient.verifyConnectivity();\n    },\n\n    /**\n     * Get internal Neo4j client (for generated code)\n     */\n    _getClient() {\n      return neo4jClient;\n    }\n  };\n}",
+      "type RagClient = ReturnType<typeof createClient>;",
+      "execAsync = promisify(exec)",
+      "interface CodeSourceConfig extends SourceConfig {\n  type: 'code';\n  adapter: 'typescript' | 'python';\n  options?: {\n    /** Export XML for debugging */\n    exportXml?: boolean;\n    /** XML export directory */\n    xmlDir?: string;\n    /** Parse comments/docstrings */\n    parseComments?: boolean;\n    /** Resolve imports */\n    resolveImports?: boolean;\n    /** Extract type definitions */\n    extractTypes?: boolean;\n  };\n}",
+      "export class CodeSourceAdapter extends SourceAdapter {",
+      "constructor(adapterName: 'typescript' | 'python') {\n    super();\n    this.adapterName = adapterName;\n    this.registry = this.initializeRegistry();\n    this.uuidCache = new Map();\n  }",
+      "private initializeRegistry(): ParserRegistry {\n    const registry = new ParserRegistry();\n    registry.register(new TypeScriptLanguageParser());\n    registry.register(new PythonLanguageParser());\n    return registry;\n  }",
+      "async validate(config: SourceConfig): Promise<ValidationResult> {\n    const errors: string[] = [];\n    const warnings: string[] = [];\n\n    if (config.type !== 'code') {\n      errors.push(`Invalid source type: ${config.type}. Expected 'code'`);\n    }\n\n    if (!config.root) {\n      warnings.push('No root directory specified. Will use current working directory');\n    }\n\n    if (!config.include || config.include.length === 0) {\n      warnings.push('No include patterns specified. Will parse all files in root directory');\n    }\n\n    return {\n      valid: errors.length === 0,\n      errors: errors.length > 0 ? errors : undefined,\n      warnings: warnings.length > 0 ? warnings : undefined\n    };\n  }",
+      "async parse(options: ParseOptions): Promise<ParseResult> {\n    const startTime = Date.now();\n    const config = options.source as CodeSourceConfig;\n\n    // Detect project information\n    const projectRoot = config.root || process.cwd();\n    const projectInfo = await this.detectProjectInfo(projectRoot);\n    console.log(`  ✓ Project: ${projectInfo.name}${projectInfo.gitRemote ? ' (' + projectInfo.gitRemote + ')' : ''}`);\n\n    // Initialize ImportResolver for TypeScript projects\n    const resolver = new ImportResolver(projectRoot);\n    if (config.adapter === 'typescript') {\n      try {\n        await resolver.loadTsConfig();\n        console.log('  ✓ Import resolver initialized with tsconfig.json');\n      } catch (error) {\n        console.warn('  ⚠️  No tsconfig.json found, continuing without import resolution');\n      }\n    }\n\n    // Report progress: discovering files\n    options.onProgress?.({\n      phase: 'discovering',\n      filesProcessed: 0,\n      totalFiles: 0,\n      percentComplete: 0\n    });\n\n    // Discover files to parse\n    const files = await this.discoverFiles(config);\n\n    if (files.length === 0) {\n      return {\n        graph: {\n          nodes: [],\n          relationships: [],\n          metadata: {\n            filesProcessed: 0,\n            nodesGenerated: 0,\n            relationshipsGenerated: 0,\n            parseTimeMs: Date.now() - startTime,\n            warnings: ['No files found matching include/exclude patterns']\n          }\n        },\n        isIncremental: false\n      };\n    }\n\n    // Report progress: parsing\n    options.onProgress?.({\n      phase: 'parsing',\n      filesProcessed: 0,\n      totalFiles: files.length,\n      percentComplete: 0\n    });\n\n    // Parse all files\n    const parsedFiles = await this.parseFiles(files, config, (current) => {\n      options.onProgress?.({\n        phase: 'parsing',\n        currentFile: current,\n        filesProcessed: files.indexOf(current) + 1,\n        totalFiles: files.length,\n        percentComplete: ((files.indexOf(current) + 1) / files.length) * 100\n      });\n    });\n\n    // Report progress: building graph\n    options.onProgress?.({\n      phase: 'building_graph',\n      filesProcessed: files.length,\n      totalFiles: files.length,\n      percentComplete: 100\n    });\n\n    // Build graph structure\n    const graph = await this.buildGraph(parsedFiles, config, resolver, projectInfo);\n\n    // Export XML if requested\n    if (config.options?.exportXml) {\n      await this.exportXml(parsedFiles, config);\n    }\n\n    // Report progress: complete\n    options.onProgress?.({\n      phase: 'complete',\n      filesProcessed: files.length,\n      totalFiles: files.length,\n      percentComplete: 100\n    });\n\n    return {\n      graph,\n      isIncremental: false // TODO: Implement incremental updates\n    };\n  }",
+      "private async discoverFiles(config: CodeSourceConfig): Promise<string[]> {\n    const patterns = config.include || ['**/*.ts', '**/*.tsx', '**/*.py'];\n    const ignore = config.exclude || [\n      '**/node_modules/**',\n      '**/dist/**',\n      '**/.git/**',\n      '**/*.test.ts',\n      '**/*.spec.ts'\n    ];\n\n    return await globby(patterns, {\n      cwd: config.root || process.cwd(),\n      ignore,\n      absolute: true\n    });\n  }"
+    ],
+    "Scope.signature": [
+      "function createClient(config: RuntimeConfig)",
+      "type_alias RagClient()",
+      "const execAsync",
+      "interface CodeSourceConfig()",
+      "class CodeSourceAdapter()",
+      "method constructor(adapterName: 'typescript' | 'python')",
+      "accessibility_modifier method initializeRegistry(): ParserRegistry",
+      "method validate(config: SourceConfig): Promise<ValidationResult>",
+      "method parse(options: ParseOptions): Promise<ParseResult>",
+      "accessibility_modifier method discoverFiles(config: CodeSourceConfig): Promise<string[]>"
+    ],
+    "Scope.type": [
+      "class",
+      "function",
+      "interface",
+      "method",
+      "type_alias",
+      "variable"
+    ],
+    "File.name": [
+      "index.ts",
+      "code-source-adapter.ts",
+      "types.ts",
+      "iterative-code-agent.ts",
+      "gemini-provider.ts",
+      "pipeline.ts",
+      "preprocessors.ts",
+      "neo4j-client.ts",
+      "mutation-builder.ts",
+      "operations.ts"
+    ],
+    "ExternalLibrary.name": [
+      "@google/genai",
+      "@luciformresearch/codeparsers",
+      "@luciformresearch/xmlparser",
+      "child_process",
+      "crypto",
+      "fs",
+      "fs/promises",
+      "globby",
+      "neo4j-driver",
+      "p-limit"
+    ],
+    "Project.name": [
+      "ragforge"
+    ]
+  },
+  "workingExamples": {
+    "Scope.entitiesWithRelationships": [
+      {
+        "name": "buildGraph",
+        "uuid": "528BA028-070D-4000-B396-E3328B2D88F4",
+        "relationships": [
+          {
+            "count": {
+              "low": 2,
+              "high": 0
+            },
+            "type": "USES_LIBRARY"
+          },
+          {
+            "count": {
+              "low": 10,
+              "high": 0
+            },
+            "type": "CONSUMES"
+          },
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": "HAS_PARENT"
+          },
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": "DEFINED_IN"
+          },
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": "BELONGS_TO"
+          }
+        ]
+      },
+      {
+        "name": "generateQueryCode",
+        "uuid": "F1093622-4F46-4A8A-B6C5-AB73D7DE9995",
+        "relationships": [
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": "USES_LIBRARY"
+          },
+          {
+            "count": {
+              "low": 4,
+              "high": 0
+            },
+            "type": "CONSUMES"
+          },
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": "HAS_PARENT"
+          },
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": "DEFINED_IN"
+          },
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": "BELONGS_TO"
+          }
+        ]
+      },
+      {
+        "name": "discoverFiles",
+        "uuid": "00C79587-D408-4991-BC4E-8728A5CF946A",
+        "relationships": [
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": "USES_LIBRARY"
+          },
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": "CONSUMES"
+          },
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": "HAS_PARENT"
+          },
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": "DEFINED_IN"
+          },
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": "BELONGS_TO"
+          }
+        ]
+      },
+      {
+        "name": "CodeSourceAdapter",
+        "uuid": "E67C34C4-6DE4-45C7-A271-36D2BE309D4A",
+        "relationships": [
+          {
+            "count": {
+              "low": 4,
+              "high": 0
+            },
+            "type": "USES_LIBRARY"
+          },
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": "INHERITS_FROM"
+          },
+          {
+            "count": {
+              "low": 21,
+              "high": 0
+            },
+            "type": "CONSUMES"
+          },
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": "DEFINED_IN"
+          },
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": "BELONGS_TO"
+          }
+        ]
+      },
+      {
+        "name": "executeCode",
+        "uuid": "AC194760-3AF2-4F10-9347-AE9992F79740",
+        "relationships": [
+          {
+            "count": {
+              "low": 3,
+              "high": 0
+            },
+            "type": "USES_LIBRARY"
+          },
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": "CONSUMES"
+          },
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": "HAS_PARENT"
+          },
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": "DEFINED_IN"
+          },
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": "BELONGS_TO"
+          }
+        ]
+      }
+    ],
+    "Scope.relationshipExamplesWithTargets": [
+      {
+        "relType": "BELONGS_TO",
+        "sourceName": "constructor",
+        "targetName": "ragforge",
+        "targetLabel": "Project",
+        "count": 11
+      },
+      {
+        "relType": "BELONGS_TO",
+        "sourceName": "generateContent",
+        "targetName": "ragforge",
+        "targetLabel": "Project",
+        "count": 2
+      },
+      {
+        "relType": "BELONGS_TO",
+        "sourceName": "parse",
+        "targetName": "ragforge",
+        "targetLabel": "Project",
+        "count": 2
+      },
+      {
+        "relType": "USES_LIBRARY",
+        "sourceName": "constructor",
+        "targetName": "@google/genai",
+        "targetLabel": "ExternalLibrary",
+        "count": 2
+      },
+      {
+        "relType": "BELONGS_TO",
+        "sourceName": "explain",
+        "targetName": "ragforge",
+        "targetLabel": "Project",
+        "count": 2
+      },
+      {
+        "relType": "BELONGS_TO",
+        "sourceName": "rerank",
+        "targetName": "ragforge",
+        "targetLabel": "Project",
+        "count": 2
+      },
+      {
+        "relType": "BELONGS_TO",
+        "sourceName": "formatValue",
+        "targetName": "ragforge",
+        "targetLabel": "Project",
+        "count": 2
+      },
+      {
+        "relType": "BELONGS_TO",
+        "sourceName": "validate",
+        "targetName": "ragforge",
+        "targetLabel": "Project",
+        "count": 2
+      },
+      {
+        "relType": "BELONGS_TO",
+        "sourceName": "mergeResults",
+        "targetName": "ragforge",
+        "targetLabel": "Project",
+        "count": 2
+      },
+      {
+        "relType": "CONSUMES",
+        "sourceName": "generateBatch",
+        "targetName": "generateContent",
+        "targetLabel": "Scope",
+        "count": 2
+      }
+    ],
+    "File.entitiesWithRelationships": [
+      {
+        "name": "index.ts",
+        "uuid": null,
+        "relationships": [
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": "BELONGS_TO"
+          },
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": "IN_DIRECTORY"
+          },
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": "BELONGS_TO"
+          },
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": "IN_DIRECTORY"
+          },
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": "BELONGS_TO"
+          }
+        ]
+      },
+      {
+        "name": "types.ts",
+        "uuid": null,
+        "relationships": [
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": "IN_DIRECTORY"
+          },
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": "BELONGS_TO"
+          },
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": "IN_DIRECTORY"
+          },
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": "BELONGS_TO"
+          }
+        ]
+      },
+      {
+        "name": "iterative-code-agent.ts",
+        "uuid": null,
+        "relationships": [
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": "IN_DIRECTORY"
+          },
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": "BELONGS_TO"
+          }
+        ]
+      },
+      {
+        "name": "gemini-provider.ts",
+        "uuid": null,
+        "relationships": [
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": "IN_DIRECTORY"
+          },
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": "BELONGS_TO"
+          }
+        ]
+      },
+      {
+        "name": "code-source-adapter.ts",
+        "uuid": null,
+        "relationships": [
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": "IN_DIRECTORY"
+          },
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": "BELONGS_TO"
+          }
+        ]
+      }
+    ],
+    "File.relationshipExamplesWithTargets": [
+      {
+        "relType": "BELONGS_TO",
+        "sourceName": "index.ts",
+        "targetName": "ragforge",
+        "targetLabel": "Project",
+        "count": 3
+      },
+      {
+        "relType": "BELONGS_TO",
+        "sourceName": "types.ts",
+        "targetName": "ragforge",
+        "targetLabel": "Project",
+        "count": 2
+      },
+      {
+        "relType": "IN_DIRECTORY",
+        "sourceName": "types.ts",
+        "targetName": null,
+        "targetLabel": "Directory",
+        "count": 2
+      },
+      {
+        "relType": "IN_DIRECTORY",
+        "sourceName": "index.ts",
+        "targetName": null,
+        "targetLabel": "Directory",
+        "count": 2
+      },
+      {
+        "relType": "BELONGS_TO",
+        "sourceName": "code-source-adapter.ts",
+        "targetName": "ragforge",
+        "targetLabel": "Project",
+        "count": 1
+      },
+      {
+        "relType": "IN_DIRECTORY",
+        "sourceName": "iterative-code-agent.ts",
+        "targetName": null,
+        "targetLabel": "Directory",
+        "count": 1
+      },
+      {
+        "relType": "BELONGS_TO",
+        "sourceName": "gemini-provider.ts",
+        "targetName": "ragforge",
+        "targetLabel": "Project",
+        "count": 1
+      },
+      {
+        "relType": "IN_DIRECTORY",
+        "sourceName": "gemini-provider.ts",
+        "targetName": null,
+        "targetLabel": "Directory",
+        "count": 1
+      },
+      {
+        "relType": "BELONGS_TO",
+        "sourceName": "iterative-code-agent.ts",
+        "targetName": "ragforge",
+        "targetLabel": "Project",
+        "count": 1
+      },
+      {
+        "relType": "IN_DIRECTORY",
+        "sourceName": "code-source-adapter.ts",
+        "targetName": null,
+        "targetLabel": "Directory",
+        "count": 1
+      }
+    ],
+    "Directory.entitiesWithRelationships": [
+      {
+        "name": null,
+        "uuid": null,
+        "relationships": [
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": null
+          },
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": null
+          },
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": null
+          },
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": null
+          },
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": null
+          },
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": null
+          },
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": null
+          },
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": null
+          },
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": null
+          },
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": null
+          }
+        ]
+      }
+    ],
+    "ExternalLibrary.entitiesWithRelationships": [
+      {
+        "name": "child_process",
+        "uuid": null,
+        "relationships": [
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": null
+          }
+        ]
+      },
+      {
+        "name": "@luciformresearch/codeparsers",
+        "uuid": null,
+        "relationships": [
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": null
+          }
+        ]
+      },
+      {
+        "name": "globby",
+        "uuid": null,
+        "relationships": [
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": null
+          }
+        ]
+      },
+      {
+        "name": "path",
+        "uuid": null,
+        "relationships": [
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": null
+          }
+        ]
+      },
+      {
+        "name": "util",
+        "uuid": null,
+        "relationships": [
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": null
+          }
+        ]
+      }
+    ],
+    "Project.entitiesWithRelationships": [
+      {
+        "name": "ragforge",
+        "uuid": null,
+        "relationships": [
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": null
+          }
+        ]
+      }
+    ]
+  }
+}

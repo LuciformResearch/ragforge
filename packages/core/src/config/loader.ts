@@ -10,12 +10,28 @@ import { z } from 'zod';
 import { RagForgeConfig } from '../types/config.js';
 
 // Zod schema for validation
+const FieldSummarizationConfigSchema = z.object({
+  enabled: z.boolean(),
+  strategy: z.string(),
+  threshold: z.number(),
+  cache: z.boolean().optional(),
+  on_demand: z.boolean().optional(),
+  prompt_template: z.string().optional(),
+  output_fields: z.array(z.string()),
+  rerank_use: z.enum(['always', 'prefer_summary', 'never']).optional(),
+  // Graph context enrichment
+  context_query: z.string().optional(),
+  // Intelligent batching
+  batch_order_query: z.string().optional()
+});
+
 const FieldConfigSchema = z.object({
   name: z.string(),
   type: z.enum(['string', 'number', 'boolean', 'datetime', 'enum', 'array<string>', 'array<number>']),
   indexed: z.boolean().optional(),
   description: z.string().optional(),
-  values: z.array(z.string()).optional()
+  values: z.array(z.string()).optional(),
+  summarization: FieldSummarizationConfigSchema.optional()
 });
 
 const VectorIndexConfigSchema = z.object({
@@ -101,6 +117,33 @@ const GenerationConfigSchema = z.object({
   mcp_server: z.boolean().optional()
 });
 
+const SummarizationStrategyConfigSchema = z.object({
+  name: z.string().optional(),
+  description: z.string().optional(),
+  system_prompt: z.string(),
+  output_schema: z.object({
+    root: z.string(),
+    fields: z.array(
+      z.object({
+        name: z.string(),
+        type: z.enum(['string', 'number', 'boolean', 'array', 'object']),
+        description: z.string(),
+        required: z.boolean().optional(),
+        nested: z.any().optional()
+      })
+    )
+  }),
+  instructions: z.string().optional()
+});
+
+const SummarizationLLMConfigSchema = z.object({
+  provider: z.string(),
+  model: z.string(),
+  temperature: z.number().optional(),
+  max_tokens: z.number().optional(),
+  api_key: z.string().optional()
+});
+
 const RagForgeConfigSchema = z.object({
   name: z.string(),
   version: z.string(),
@@ -110,6 +153,8 @@ const RagForgeConfigSchema = z.object({
   reranking: RerankingConfigSchema.optional(),
   mcp: McpConfigSchema.optional(),
   generation: GenerationConfigSchema.optional(),
+  summarization_strategies: z.record(SummarizationStrategyConfigSchema).optional(),
+  summarization_llm: SummarizationLLMConfigSchema.optional(),
   embeddings: z
     .object({
       provider: z.literal('gemini'),

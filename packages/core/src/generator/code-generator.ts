@@ -46,6 +46,7 @@ export interface GeneratedCode {
   client: string;                // main client code
   index: string;                 // index.ts exports
   agent: string;                 // iterative agent wrapper
+  configLoader: string;          // Generic config loader for scripts
   agentDocumentation: {
     markdown: string;            // Simplified markdown for agent prompt
     module: string;              // TypeScript module exporting agent documentation string
@@ -57,6 +58,10 @@ export interface GeneratedCode {
     loader: string;
     createIndexesScript: string;
     generateEmbeddingsScript: string;
+  };
+  summarization?: {
+    prompts: Map<string, string>; // template name -> template content
+    generateSummariesScript: string;
   };
   examples: Map<string, string>; // example name -> TypeScript example code
   rebuildAgentScript: string;    // Script to rebuild agent documentation
@@ -138,9 +143,11 @@ export class CodeGenerator {
 
     const agent = this.generateAgent(config);
     const embeddingsArtifacts = this.generateEmbeddingsArtifacts(config.embeddings);
+    const summarizationArtifacts = this.generateSummarizationArtifacts(config);
 
-    // Load rebuild agent script template
+    // Load templates
     const rebuildAgentScript = loadTemplate('rebuild-agent.ts');
+    const configLoader = loadTemplate('load-config.ts');
 
     return {
       queries,
@@ -148,6 +155,7 @@ export class CodeGenerator {
       client,
       index,
       agent,
+      configLoader,
       agentDocumentation: {
         markdown: agentMarkdown,
         module: agentModule
@@ -156,6 +164,7 @@ export class CodeGenerator {
         markdown: developerMarkdown
       },
       embeddings: embeddingsArtifacts,
+      summarization: summarizationArtifacts,
       examples,
       rebuildAgentScript
     };
@@ -1640,6 +1649,77 @@ export class CodeGenerator {
     return loadTemplate('scripts/generate-embeddings.ts');
   }
 
+  /**
+   * Generate summarization artifacts (prompts + script)
+   */
+  private static generateSummarizationArtifacts(config: RagForgeConfig) {
+    // Check if any field has summarization enabled
+    const hasSummarization = config.entities.some(entity =>
+      entity.searchable_fields?.some(field => field.summarization?.enabled)
+    );
+
+    if (!hasSummarization && !config.summarization_strategies) {
+      return undefined;
+    }
+
+    const prompts = new Map<string, string>();
+
+    // Generate prompt templates for custom strategies
+    if (config.summarization_strategies) {
+      for (const [strategyId, strategy] of Object.entries(config.summarization_strategies)) {
+        const promptContent = this.generatePromptTemplate(strategyId, strategy);
+        prompts.set(`${strategyId}.txt`, promptContent);
+      }
+    }
+
+    // Load generate-summaries script template
+    const generateSummariesScript = loadTemplate('scripts/generate-summaries.ts');
+
+    return {
+      prompts,
+      generateSummariesScript
+    };
+  }
+
+  /**
+   * Generate a prompt template file for a strategy
+   */
+  private static generatePromptTemplate(strategyId: string, strategy: any): string {
+    let template = '';
+
+    // System context
+    template += strategy.system_prompt || 'Analyze the content and extract structured information.';
+    template += '\n\n';
+
+    // User task section
+    template += 'Content to analyze:\n';
+    template += '{{field_value}}\n\n';
+
+    // Instructions
+    if (strategy.instructions) {
+      template += strategy.instructions;
+      template += '\n\n';
+    }
+
+    // Output format
+    template += 'IMPORTANT: Respond with XML ONLY. Do NOT use JSON or markdown.\n\n';
+    template += 'Expected format:\n\n';
+    template += `<${strategy.output_schema.root}>\n`;
+
+    for (const field of strategy.output_schema.fields) {
+      if (field.type === 'array') {
+        template += `  <${field.name}>Value 1</${field.name}>\n`;
+        template += `  <${field.name}>Value 2</${field.name}>\n`;
+      } else {
+        template += `  <${field.name}>Value</${field.name}>\n`;
+      }
+    }
+
+    template += `</${strategy.output_schema.root}>\n\n`;
+    template += 'Your XML response:';
+
+    return template;
+  }
 
   /**
    * Generate enrichment label from relationship type
@@ -2116,9 +2196,12 @@ if (import.meta.url.startsWith('file://')) {
 
     const displayCode = `console.log(${parts.join(' + ')});`;
 
-    const bodyCode = `  console.log('🔎 Semantic search for: "${query}"');
+    // Sanitize query for safe insertion into generated code
+    const sanitizedQuery = this.sanitizeQueryExample(query);
+
+    const bodyCode = `  console.log('🔎 Semantic search for: "${sanitizedQuery}"');
   const results = await rag.${entityMethod}()
-    .${searchMethod}('${query}', { topK: ${topK} })
+    .${searchMethod}('${sanitizedQuery}', { topK: ${topK} })
     .execute();
 
   console.log(\`\\nFound \${results.length} results:\`);
@@ -2221,13 +2304,17 @@ if (import.meta.url.startsWith('file://')) {
 
     const displayCode = `console.log(${parts.join(' + ')});`;
 
+    // Sanitize queries for safe insertion into generated code
+    const sanitizedSemanticQuery = this.sanitizeQueryExample(semanticQuery);
+    const sanitizedLlmQuestion = this.sanitizeQueryExample(llmQuestion);
+
     const highlightFields = [displayNameField, ...displayFields];
     const highlightExpr = highlightFields.length > 0
       ? `  const highlights = [${highlightFields.map(field => `entity.${field} ? '${field}: ' + entity.${field} : null`).join(', ')}]
     .filter(Boolean)
     .join(' | ');
-  console.log(\`    Why: matches "${semanticQuery}" → \${highlights || 'high semantic similarity'}\`);`
-      : `  console.log('    Why: high semantic similarity to "${semanticQuery}"');`;
+  console.log(\`    Why: matches "${sanitizedSemanticQuery}" → \${highlights || 'high semantic similarity'}\`);`
+      : `  console.log('    Why: high semantic similarity to "${sanitizedSemanticQuery}"');`;
 
     // Build dynamic comment showing available methods
     const filtersList = filterMethods.length > 0
@@ -2237,15 +2324,15 @@ if (import.meta.url.startsWith('file://')) {
       ? `\n  //   - Relationships: ${relationshipMethods.join(', ')}`
       : '';
 
-    const bodyCode = `  console.log('🔎 Semantic search: "${semanticQuery}"');
-  console.log('🤖 Then reranking with LLM: "${llmQuestion}"');
+    const bodyCode = `  console.log('🔎 Semantic search: "${sanitizedSemanticQuery}"');
+  console.log('🤖 Then reranking with LLM: "${sanitizedLlmQuestion}"');
 
   // NOTE: llmRerank() can be used after ANY operation that returns results.
   // In this example, we use it after .${searchMethod}(), but you can also use it after:${filtersList}${relationshipsList}
   //   - Or even directly without prior operations
   const results = await rag.${entityMethod}()
-    .${searchMethod}('${semanticQuery}', { topK: 50 })
-    .llmRerank('${llmQuestion}', {
+    .${searchMethod}('${sanitizedSemanticQuery}', { topK: 50 })
+    .llmRerank('${sanitizedLlmQuestion}', {
       topK: 10,
       minScore: 0.7
     })
@@ -2280,9 +2367,12 @@ ${highlightExpr}
     query: string,
     entityDisplayName: string
   ): string {
+    // Sanitize query for safe insertion into generated code
+    const sanitizedQuery = this.sanitizeQueryExample(query);
+
     const bodyCode = `  const { results, metadata } = await rag.${entityMethod}()
-    .${searchMethod}('${query}', { topK: 50 })
-    .llmRerank('find ${entityDisplayName} related to: ${query}', { topK: 10 })
+    .${searchMethod}('${sanitizedQuery}', { topK: 50 })
+    .llmRerank('find ${entityDisplayName} related to: ${sanitizedQuery}', { topK: 10 })
     .executeWithMetadata();
 
   console.log(\`Pipeline executed in \${metadata.totalDuration}ms\`);
@@ -2323,6 +2413,9 @@ ${highlightExpr}
     entityDisplayName: string,
     exampleTarget: string
   ): string {
+    // Sanitize query for safe insertion into generated code
+    const sanitizedSemanticQuery = this.sanitizeQueryExample(semanticQuery);
+
     const bodyCode = `  // Multi-stage pipeline:
   // 1. Semantic search (broad)
   // 2. Filter (focus)
@@ -2330,7 +2423,7 @@ ${highlightExpr}
   // 4. Expand relationships (complete context)
   // 5. Track metadata (observe)
   const { results, metadata } = await rag.${entityMethod}()
-    .${searchMethod}('${semanticQuery}', { topK: 100 })
+    .${searchMethod}('${sanitizedSemanticQuery}', { topK: 100 })
     .${whereMethod}('${exampleTarget}')
     .llmRerank('find the most relevant ${entityDisplayName}', { topK: 20 })
     .${withMethod}(1)
@@ -2719,6 +2812,67 @@ ${cleanupSections}
     }
 
     return undefined;
+  }
+
+  /**
+   * Sanitize and truncate query examples for generated code
+   *
+   * Ensures query strings are safe to use in TypeScript code by:
+   * - Removing newlines and collapsing whitespace
+   * - Escaping quotes
+   * - Intelligently truncating long queries
+   * - Extracting signatures from code patterns
+   *
+   * @param query - Raw query string (may contain newlines, code, etc.)
+   * @returns Sanitized query safe for insertion into generated code
+   */
+  private static sanitizeQueryExample(query: string | null | undefined): string {
+    if (!query) return '';
+
+    // Remove newlines and extra spaces
+    let sanitized = query
+      .replace(/\r?\n/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    // Escape single quotes (since generated code uses single quotes)
+    sanitized = sanitized.replace(/'/g, "\\'");
+
+    // Intelligent truncation
+    const SOFT_LIMIT = 100;
+    const HARD_LIMIT = 150;
+
+    if (sanitized.length <= SOFT_LIMIT) {
+      // Perfect length, keep as-is
+      return sanitized;
+    }
+
+    if (sanitized.length <= HARD_LIMIT) {
+      // Acceptable length, but prefer to truncate at word boundary
+      const lastSpace = sanitized.lastIndexOf(' ', SOFT_LIMIT);
+      if (lastSpace > 60) {  // Don't truncate too early
+        return sanitized.substring(0, lastSpace) + '...';
+      }
+      return sanitized;  // Keep full if we can't find good boundary
+    }
+
+    // Too long - intelligent extraction
+    // If it looks like code (has 'function', 'class', etc.), extract just the signature
+    if (sanitized.match(/^(function|class|interface|const|let|var|export)\s+\w+/)) {
+      const match = sanitized.match(/^[^{(]+/);  // Get everything before { or (
+      if (match && match[0].length < HARD_LIMIT) {
+        return match[0].trim() + '...';
+      }
+    }
+
+    // Otherwise just truncate at word boundary
+    const truncateAt = sanitized.lastIndexOf(' ', SOFT_LIMIT);
+    if (truncateAt > 60) {
+      return sanitized.substring(0, truncateAt) + '...';
+    }
+
+    // Last resort: hard cut
+    return sanitized.substring(0, SOFT_LIMIT - 3) + '...';
   }
 
   private static formatFieldLabel(fieldName: string): string {

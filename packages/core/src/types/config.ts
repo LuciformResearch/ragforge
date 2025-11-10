@@ -12,6 +12,60 @@ export interface RagForgeConfig {
   mcp?: McpConfig;
   generation?: GenerationConfig;
   embeddings?: EmbeddingsConfig;
+  summarization_strategies?: Record<string, SummarizationStrategyConfig>;
+  summarization_llm?: SummarizationLLMConfig;
+}
+
+/**
+ * Configuration for a summarization strategy
+ */
+export interface SummarizationStrategyConfig {
+  /** Human-readable name */
+  name?: string;
+
+  /** Description of what this strategy does */
+  description?: string;
+
+  /** System prompt / context */
+  system_prompt: string;
+
+  /** Output schema definition */
+  output_schema: {
+    /** Root element name */
+    root: string;
+
+    /** Fields in the output */
+    fields: Array<{
+      name: string;
+      type: 'string' | 'number' | 'boolean' | 'array' | 'object';
+      description: string;
+      required?: boolean;
+      nested?: any[]; // For nested objects
+    }>;
+  };
+
+  /** Additional instructions (optional) */
+  instructions?: string;
+}
+
+/**
+ * LLM configuration for summarization (can differ from reranking LLM)
+ */
+export interface SummarizationLLMConfig {
+  /** Provider (e.g., 'gemini', 'openai') */
+  provider: string;
+
+  /** Model ID */
+  model: string;
+
+  /** Temperature (default: 0.3 for more deterministic summaries) */
+  temperature?: number;
+
+  /** Max tokens for response */
+  max_tokens?: number;
+
+  /** API key (optional, can use env var) */
+  api_key?: string;
 }
 
 export interface Neo4jConfig {
@@ -42,6 +96,36 @@ export interface FieldConfig {
   indexed?: boolean;
   description?: string;
   values?: string[]; // For enum types
+  summarization?: FieldSummarizationConfig;
+}
+
+/**
+ * Configuration for field-level summarization
+ */
+export interface FieldSummarizationConfig {
+  /** Enable summarization for this field */
+  enabled: boolean;
+
+  /** Strategy ID to use (references summarization_strategies) */
+  strategy: string;
+
+  /** Minimum field length (chars) to trigger summarization */
+  threshold: number;
+
+  /** Cache summaries in Neo4j (default: true) */
+  cache?: boolean;
+
+  /** Generate on-demand vs pre-generation (default: false = pre-generate) */
+  on_demand?: boolean;
+
+  /** Custom prompt template path (relative to prompts/ dir) */
+  prompt_template?: string;
+
+  /** Output fields to extract and store (must match strategy schema) */
+  output_fields: string[];
+
+  /** How to use summaries in reranking (default: 'prefer_summary') */
+  rerank_use?: 'always' | 'prefer_summary' | 'never';
 }
 
 export type FieldType =

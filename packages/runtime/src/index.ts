@@ -40,6 +40,36 @@ export type {
 export type { VertexAIConfig } from './reranking/vertex-ai-provider.js';
 export type { GeminiAPIConfig } from './reranking/gemini-api-provider.js';
 
+// Structured Prompts & LLM
+export { StructuredPromptBuilder } from './llm/structured-prompt-builder.js';
+export type {
+  PromptField,
+  StructuredPromptConfig
+} from './llm/structured-prompt-builder.js';
+
+// Summarization
+export { GenericSummarizer } from './summarization/generic-summarizer.js';
+export {
+  getDefaultStrategies,
+  getStrategy,
+  listStrategyIds,
+  CODE_ANALYSIS_STRATEGY,
+  TEXT_EXTRACTION_STRATEGY,
+  DOCUMENT_SUMMARY_STRATEGY,
+  PRODUCT_FEATURES_STRATEGY
+} from './summarization/default-strategies.js';
+export { SummaryStorage } from './summarization/summary-storage.js';
+export type { SummaryStrategy } from './summarization/default-strategies.js';
+export type {
+  SummarizationConfig,
+  FieldSummary,
+  SummarizeInput
+} from './summarization/generic-summarizer.js';
+export type {
+  CachedSummary,
+  SummaryStorageOptions
+} from './summarization/summary-storage.js';
+
 // Agents
 export {
   IterativeCodeAgent,
@@ -61,6 +91,9 @@ export type {
 } from './embedding/types.js';
 export { GeminiEmbeddingProvider } from './embedding/gemini-provider.js';
 export { runEmbeddingPipelines } from './embedding/pipeline.js';
+
+// Source Adapters
+export * from './adapters/index.js';
 
 // Main factory function
 import { Neo4jClient } from './client/neo4j-client.js';
