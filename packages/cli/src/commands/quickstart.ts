@@ -15,6 +15,7 @@
 import { promises as fs } from 'fs';
 import path from 'path';
 import process from 'process';
+import { createHash } from 'crypto';
 import YAML from 'yaml';
 import {
   CodeGenerator,
@@ -54,6 +55,7 @@ export interface QuickstartOptions {
   force?: boolean;       // Overwrite existing config
   rootDir: string;       // Root directory for the generated client
   geminiKey?: string;    // Gemini API key for embeddings/summarization
+  dev?: boolean;         // Development mode: use local file: dependencies instead of npm packages
 }
 
 export function printQuickstartHelp(): void {
@@ -89,6 +91,7 @@ Options:
   --no-ingest          Skip code ingestion (default: ingestion enabled)
   --no-embeddings      Skip embeddings generation (default: embeddings enabled)
   --force              Overwrite existing configuration
+  --dev                Development mode: use local file: dependencies (for RagForge contributors)
   -h, --help           Show this help
 
 Examples:
@@ -117,7 +120,8 @@ export async function parseQuickstartOptions(args: string[]): Promise<Quickstart
     sourceType: 'code',  // Default to code
     ingest: true,        // Default: run ingestion
     embeddings: true,    // Default: generate embeddings (can be slow but enables semantic search)
-    force: false
+    force: false,
+    dev: false           // Default: use npm packages (not local file: dependencies)
   };
 
   for (let i = 0; i < args.length; i += 1) {
@@ -153,6 +157,9 @@ export async function parseQuickstartOptions(args: string[]): Promise<Quickstart
       case '--force':
         options.force = true;
         break;
+      case '--dev':
+        options.dev = true;
+        break;
       case '-h':
       case '--help':
         printQuickstartHelp();
@@ -182,7 +189,8 @@ export async function parseQuickstartOptions(args: string[]): Promise<Quickstart
     embeddings: options.embeddings ?? true,
     force: options.force ?? false,
     rootDir,
-    geminiKey
+    geminiKey,
+    dev: options.dev ?? false
   };
 }
 
@@ -375,9 +383,27 @@ async function createMinimalConfig(
 export async function runQuickstart(options: QuickstartOptions): Promise<void> {
   ensureEnvLoaded(import.meta.url);
 
-  console.log('🚀 RagForge Quickstart');
-  console.log('═'.repeat(60));
-  console.log('');
+  // Create debug log file
+  const fs = await import('fs/promises');
+  const logPath = path.join(process.cwd(), 'quickstart-debug.log');
+  const logFile = await fs.open(logPath, 'w');
+
+  const log = async (msg: string) => {
+    await logFile.write(msg + '\n');
+    console.log(msg);
+  };
+
+  await log('🚀 RagForge Quickstart');
+  await log('═'.repeat(60));
+  await log('');
+
+  // Mask sensitive data for logging
+  const safeOptions = { ...options };
+  if (safeOptions.geminiKey) {
+    safeOptions.geminiKey = safeOptions.geminiKey.substring(0, 3) + '***';
+  }
+  await log(`🔧 DEBUG: Parsed options = ${JSON.stringify(safeOptions, null, 2)}`);
+  await log('');
 
   // Separate workspace (where RagForge project is generated) from source (code to analyze)
   const workspacePath = process.cwd(); // Current directory = RagForge workspace
@@ -459,8 +485,17 @@ export async function runQuickstart(options: QuickstartOptions): Promise<void> {
   console.log('');
 
   // Step 7: Check if Docker container already exists
-  const containerName = `ragforge-${mergedConfig.name}-neo4j`;
+  // Generate unique container name based on workspace path (with hash to avoid conflicts)
+  const containerName = generateContainerName(workspacePath);
   const containerExists = await checkContainerExists(containerName);
+
+  // If --force flag is set, remove existing container
+  if (options.force && containerExists) {
+    console.log(`🗑️  Removing existing container: ${containerName}...`);
+    await removeContainer(containerName);
+    console.log('✓ Container removed');
+    console.log('');
+  }
 
   // Step 8: Setup Neo4j credentials (smart detection)
   const envPath = path.join(workspacePath, '.env');
@@ -544,7 +579,7 @@ export async function runQuickstart(options: QuickstartOptions): Promise<void> {
   console.log(`🔍 DEBUG: Using password: ${neo4jPassword.substring(0, 3)}*** from ${envPassword ? 'env' : 'variable'}`);
 
   // Step 9: Setup Docker container (reuse existing or create new)
-  const dockerInfo = await setupDockerContainer(workspacePath, mergedConfig.name);
+  const dockerInfo = await setupDockerContainer(workspacePath, containerName);
 
   // Update .env with correct URI if ports changed
   if (dockerInfo.uri !== neo4jUri) {
@@ -588,6 +623,7 @@ export async function runQuickstart(options: QuickstartOptions): Promise<void> {
   }
 
   // Step 12: Generate TypeScript client
+  await log(`🔧 DEBUG: About to call generateClient with options.dev = ${options.dev}`);
   const generatedPath = await generateClient(
     mergedConfig,
     workspacePath,
@@ -595,8 +631,10 @@ export async function runQuickstart(options: QuickstartOptions): Promise<void> {
     neo4jUsername,
     neo4jPassword,
     neo4jDatabase,
-    geminiKey
+    geminiKey,
+    options.dev
   );
+  await log(`🔧 DEBUG: generateClient returned path: ${generatedPath}`);
 
   // Step 13: Copy config to generated folder with absolute paths
   const generatedConfigPath = path.join(generatedPath, 'ragforge.config.yaml');
@@ -674,6 +712,25 @@ export async function runQuickstart(options: QuickstartOptions): Promise<void> {
   console.log('📚 Neo4j Browser: http://localhost:' + dockerInfo.http);
   console.log(`🔌 Neo4j Bolt:    ${neo4jUri}`);
   console.log('');
+
+  // Close debug log
+  await logFile.close();
+  console.log(`📋 Debug log written to: ${logPath}`);
+}
+
+/**
+ * Generate a unique container name based on workspace path
+ * Format: ragforge-<workspaceName>-<shortHash>-neo4j
+ * Example: ragforge-myproject-a1b2c3d4-neo4j
+ */
+function generateContainerName(workspacePath: string): string {
+  const workspaceName = path.basename(workspacePath);
+  // Generate 8-character hash from absolute path
+  const hash = createHash('sha256')
+    .update(workspacePath)
+    .digest('hex')
+    .substring(0, 8);
+  return `ragforge-${workspaceName}-${hash}-neo4j`;
 }
 
 /**
@@ -693,11 +750,10 @@ function generatePassword(): string {
  */
 async function generateDockerCompose(
   projectPath: string,
-  projectName: string,
+  containerName: string,
   boltPort: number,
   httpPort: number
 ): Promise<void> {
-  const containerName = `ragforge-${projectName}-neo4j`;
 
   const dockerComposeContent = `version: '3.8'
 
@@ -715,8 +771,8 @@ services:
       - "${boltPort}:7687"  # Bolt
       - "${httpPort}:7474"  # HTTP Browser
     volumes:
-      - ${projectName}_neo4j_data:/data
-      - ${projectName}_neo4j_logs:/logs
+      - ${containerName.replace(/-neo4j$/, '')}_neo4j_data:/data
+      - ${containerName.replace(/-neo4j$/, '')}_neo4j_logs:/logs
     healthcheck:
       test: ["CMD", "cypher-shell", "-u", "\${NEO4J_USERNAME:-neo4j}", "-p", "\${NEO4J_PASSWORD}", "RETURN 1"]
       interval: 10s
@@ -724,8 +780,8 @@ services:
       retries: 10
 
 volumes:
-  ${projectName}_neo4j_data:
-  ${projectName}_neo4j_logs:
+  ${containerName.replace(/-neo4j$/, '')}_neo4j_data:
+  ${containerName.replace(/-neo4j$/, '')}_neo4j_logs:
 `;
 
   const dockerComposePath = path.join(projectPath, 'docker-compose.yml');
@@ -812,6 +868,13 @@ async function checkContainerRunning(containerName: string): Promise<boolean> {
 }
 
 /**
+ * Remove a Docker container
+ */
+async function removeContainer(containerName: string): Promise<void> {
+  await execAsync(`docker rm -f ${containerName}`);
+}
+
+/**
  * Get container ports from Docker
  */
 async function getContainerPorts(containerName: string): Promise<{ bolt: number; http: number } | null> {
@@ -857,7 +920,7 @@ async function checkDockerAvailable(): Promise<boolean> {
  */
 async function setupDockerContainer(
   projectPath: string,
-  projectName: string
+  containerName: string
 ): Promise<{ bolt: number; http: number; uri: string }> {
   console.log('🐳 Setting up Neo4j container...');
 
@@ -866,8 +929,6 @@ async function setupDockerContainer(
   if (!dockerAvailable) {
     throw new Error('Docker is not installed or not running. Please install Docker and try again.');
   }
-
-  const containerName = `ragforge-${projectName}-neo4j`;
 
   // Check if container already exists
   const containerExists = await checkContainerExists(containerName);
@@ -905,7 +966,7 @@ async function setupDockerContainer(
         } catch {
           // Ignore
         }
-        return setupDockerContainer(projectPath, projectName); // Retry
+        return setupDockerContainer(projectPath, containerName); // Retry
       }
     } else {
       console.log('✓ Container already running');
@@ -919,7 +980,7 @@ async function setupDockerContainer(
     console.log(`✓ Found available ports: ${boltPort} (Bolt), ${httpPort} (HTTP)`);
 
     // Generate docker-compose with these ports
-    await generateDockerCompose(projectPath, projectName, boltPort, httpPort);
+    await generateDockerCompose(projectPath, containerName, boltPort, httpPort);
     console.log('✓ Generated docker-compose.yml');
 
     // Start Docker Compose with explicit env vars
@@ -1251,9 +1312,11 @@ async function generateClient(
   username: string,
   password: string,
   database?: string,
-  geminiKey?: string
+  geminiKey?: string,
+  devMode?: boolean
 ): Promise<string> {
   console.log('\n🛠️  Generating TypeScript client...');
+  console.log(`🔧 generateClient() called with devMode=${devMode}`);
 
   // Introspect schema
   const introspector = new SchemaIntrospector(uri, username, password);
@@ -1274,18 +1337,21 @@ async function generateClient(
   // Prepare directory
   await prepareOutputDirectory(outputDir, true);
 
-  // Calculate ragforge root for dev mode
+  // Dev mode: use local file: dependencies instead of npm packages
   let ragforgeRoot: string | undefined;
-  let devMode = false;
+  let dev = devMode || false;
 
-  // Check if we're running from dist/esm (development mode)
-  const currentFileUrl = import.meta.url;
-  const currentFilePath = new URL(currentFileUrl).pathname;
-  if (currentFilePath.includes('/dist/esm/')) {
-    const distEsmDir = path.dirname(currentFilePath);
+  // If --dev flag is set, calculate path to ragforge monorepo (same logic as init.ts)
+  if (dev) {
+    // Get the CLI dist/esm directory from import.meta.url
+    const pathname = new URL(import.meta.url).pathname;
+    const distEsmDir = path.dirname(path.dirname(pathname));
+    // Go up 4 levels: dist/esm -> dist -> cli -> packages -> ragforge
     ragforgeRoot = path.resolve(distEsmDir, '../../../..');
-    devMode = true;
-    console.log('✓ Development mode detected, using local dependencies');
+    console.log(`🔧 Dev mode - pathname: ${pathname}`);
+    console.log(`🔧 Dev mode - distEsmDir: ${distEsmDir}`);
+    console.log(`🔧 Dev mode - ragforgeRoot: ${ragforgeRoot}`);
+    console.log('✓ Development mode: using local dependencies from', ragforgeRoot);
   }
 
   // Generate types and code
@@ -1299,7 +1365,7 @@ async function generateClient(
     typesContent,
     ragforgeRoot,
     config.name,
-    devMode
+    dev
   );
 
   // Write .env

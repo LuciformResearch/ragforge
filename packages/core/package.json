@@ -1,6 +1,6 @@
 {
   "name": "@luciformresearch/ragforge-core",
-  "version": "0.1.7",
+  "version": "0.2.0",
   "description": "Core library for RagForge - YAML config parsing, Neo4j schema introspection, and TypeScript code generation for domain-specific RAG frameworks.",
   "license": "LRSL-1.1 (See LICENSE file for more information)",
   "author": "Lucie Defraiteur <luciedefraiteur@luciformresearch.com>",
@@ -58,7 +58,7 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
-    "@luciformresearch/codeparsers": "^0.1.2",
+    "@luciformresearch/codeparsers": "^0.1.3",
     "neo4j-driver": "^5.14.0",
     "yaml": "^2.3.4",
     "zod": "^3.22.4"

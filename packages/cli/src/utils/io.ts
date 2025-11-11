@@ -369,10 +369,11 @@ async function writeGeneratedPackageJson(
     .replace(/--+/g, '-')
     .replace(/^-|-$/g, '') || 'ragforge-client';
 
-  // Calculate relative path to runtime package when in dev mode
-  let runtimeDependency = '^0.1.2';
-  let codeparsersDependency = 'file:../../packages/codeparsers';
+  // Default: use published npm packages
+  let runtimeDependency = '^0.2.0';
+  let codeparsersDependency = '^0.1.3';
 
+  // In dev mode, use local file: dependencies instead of npm packages
   if (dev && rootDir) {
     // Find the monorepo root by looking for packages/runtime
     let monorepoRoot = rootDir;
@@ -431,11 +432,23 @@ async function writeGeneratedPackageJson(
     ])
   );
 
+  // Calculate CLI path for dev mode scripts
+  let cliCommand = 'ragforge';
+  if (dev && rootDir) {
+    const cliPath = path.join(rootDir, 'packages/cli/dist/esm/index.js');
+    const relativeCli = path.relative(outDir, cliPath);
+    cliCommand = `node ${relativeCli}`;
+  }
+
   const baseScripts: Record<string, string> = {
     build: 'echo "Nothing to build"',
     start: 'tsx ./client.ts',
-    regen: 'node ../../ragforge/packages/cli/dist/index.js generate --config ./ragforge.config.yaml --out . --force',
-    'regen:auto': 'node ../../ragforge/packages/cli/dist/index.js generate --config ./ragforge.config.yaml --out . --force --auto-detect-fields',
+    regen: dev
+      ? `${cliCommand} generate --config ./ragforge.config.yaml --out . --force`
+      : 'ragforge generate --config ./ragforge.config.yaml --out . --force',
+    'regen:auto': dev
+      ? `${cliCommand} generate --config ./ragforge.config.yaml --out . --force --auto-detect-fields`
+      : 'ragforge generate --config ./ragforge.config.yaml --out . --force --auto-detect-fields',
     'rebuild:agent': 'tsx ./scripts/rebuild-agent.ts',
     'embeddings:index': 'tsx ./scripts/create-vector-indexes.ts',
     'embeddings:generate': 'tsx ./scripts/generate-embeddings.ts'
