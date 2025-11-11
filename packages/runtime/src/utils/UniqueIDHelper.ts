@@ -3,6 +3,8 @@
  * Adapted from lr_webgpu_rendering_library
  */
 
+import { createHash } from 'crypto';
+
 export class UniqueIDHelper {
   private static _ObjById: Record<string, any> = {};
   private static _Lut: string[] | undefined = undefined;
@@ -19,7 +21,29 @@ export class UniqueIDHelper {
   }
 
   /**
-   * Generate a RFC4122 v4 compliant UUID
+   * Generate a deterministic UUID from input string
+   * Uses SHA-256 hash to ensure the same input always produces the same UUID
+   * @param input String to hash (e.g., "file.ts:MyClass:class:10")
+   * @returns A deterministic UUID string
+   */
+  public static GenerateDeterministicUUID(input: string): string {
+    const hash = createHash('sha256')
+      .update(input)
+      .digest('hex')
+      .substring(0, 32);
+
+    // Format as UUID: XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
+    return (
+      hash.substring(0, 8) + '-' +
+      hash.substring(8, 12) + '-' +
+      hash.substring(12, 16) + '-' +
+      hash.substring(16, 20) + '-' +
+      hash.substring(20, 32)
+    ).toUpperCase();
+  }
+
+  /**
+   * Generate a RFC4122 v4 compliant UUID (random)
    * @returns A UUID string (e.g., "A3F2B9C1-D4E5-46F7-8A9B-0C1D2E3F4A5B")
    */
   public static GenerateUUID(): string {

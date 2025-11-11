@@ -210,6 +210,22 @@ export async function persistGeneratedArtifacts(
       );
       logGenerated('scripts/clean-db.ts');
     }
+
+    if (generated.scripts.watch) {
+      await writeFileIfChanged(
+        path.join(scriptsDir, 'watch.ts'),
+        generated.scripts.watch
+      );
+      logGenerated('scripts/watch.ts');
+    }
+
+    if (generated.scripts.changeStats) {
+      await writeFileIfChanged(
+        path.join(scriptsDir, 'change-stats.ts'),
+        generated.scripts.changeStats
+      );
+      logGenerated('scripts/change-stats.ts');
+    }
   }
 
   // Write rebuild-agent script
@@ -441,6 +457,9 @@ async function writeGeneratedPackageJson(
     }
     if (generated.scripts.cleanDb) {
       baseScripts['clean:db'] = 'tsx ./scripts/clean-db.ts';
+    }
+    if (generated.scripts.watch) {
+      baseScripts['watch'] = 'tsx ./scripts/watch.ts';
     }
   }
 

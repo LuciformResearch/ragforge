@@ -17,7 +17,7 @@ async function crudOperationsWithMutations() {
   const newScope: ScopeCreate = {
     uuid: 'scope-test-001',
     name: 'Sample name 1',
-    source: 'Sample source 2'
+    file: 'Sample file 2'
   };
 
   const createdScope = await rag.scopeMutations().create(newScope);
@@ -29,7 +29,8 @@ async function crudOperationsWithMutations() {
   const newScope: ScopeCreate = {
     uuid: 'scope-test-001',
     name: 'Sample name 1',
-    source: 'Sample source 2'
+    file: 'Sample file 2',
+    source: 'Sample source 3'
   };
 
   const createdScope = await rag.scopeMutations().create(newScope);
@@ -45,7 +46,7 @@ async function crudOperationsWithMutations() {
   // 4. Update the scope
   console.log('4️⃣ Updating scope...');
   const scopeUpdate: ScopeUpdate = {
-    source: 'Updated source'
+    file: 'Updated file'
   };
 
   const updatedScope = await rag.scopeMutations().update('scope-test-001', scopeUpdate);

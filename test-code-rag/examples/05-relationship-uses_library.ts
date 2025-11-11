@@ -12,7 +12,7 @@ async function filterAndExpandByUsesLibrary() {
 
   console.log('🔍 Filtering by USES_LIBRARY relationship...');
   const filtered = await rag.scope()
-    .whereUsesLibrary('@google/genai')
+    .whereUsesLibrary('TargetName')
     .execute();
 
   console.log(`\nFound ${filtered.length} items with USES_LIBRARY relationship:`);
@@ -24,9 +24,9 @@ async function filterAndExpandByUsesLibrary() {
     console.log(`  ... and ${filtered.length - 5} more`);
   }
 
-  console.log('\n🔗 Expanding relationships from "buildGraph"...');
+  console.log('\n🔗 Expanding relationships from "needsSummary"...');
   const expanded = await rag.scope()
-    .whereName('buildGraph')
+    .whereName('needsSummary')
     .withUsesLibrary(2)  // Get relationships 2 levels deep
     .execute();
 

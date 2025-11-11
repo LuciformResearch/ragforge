@@ -28,6 +28,7 @@ import {
 } from './types.js';
 import { UniqueIDHelper } from '../utils/UniqueIDHelper.js';
 import { ImportResolver } from '../utils/ImportResolver.js';
+import { getLocalTimestamp } from '../utils/timestamp.js';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 
@@ -367,7 +368,7 @@ export class CodeSourceAdapter extends SourceAdapter {
         name: projectInfo.name,
         gitRemote: projectInfo.gitRemote || null,
         rootPath: projectInfo.rootPath,
-        indexedAt: new Date().toISOString()
+        indexedAt: getLocalTimestamp()
       }
     });
 
@@ -792,18 +793,30 @@ export class CodeSourceAdapter extends SourceAdapter {
       return fileCache.get(cacheKey)!;
     }
 
-    // Generate new UUID
-    const uuid = UniqueIDHelper.GenerateUUID();
+    // Generate deterministic UUID based on file path + scope signature
+    // This ensures the same scope always gets the same UUID across ingestions
+    const deterministicInput = `${filePath}:${scope.name}:${scope.type}:${scope.startLine}`;
+    const uuid = UniqueIDHelper.GenerateDeterministicUUID(deterministicInput);
+
     fileCache.set(cacheKey, uuid);
     return uuid;
   }
 
   /**
    * Hash scope content for incremental updates
+   * Uses full content to detect ANY changes in the scope
    */
   private hashScope(scope: ScopeInfo): string {
-    // Use same hash as signature for consistency
-    return this.getSignatureHash(scope);
+    // Hash the full content to detect changes in implementation
+    // Not just the signature which would miss body changes
+    const content = scope.contentDedented || scope.content || '';
+    const parentPrefix = scope.parent ? `${scope.parent}.` : '';
+    const hashInput = `${parentPrefix}${scope.name}:${scope.type}:${content}`;
+
+    return createHash('sha256')
+      .update(hashInput)
+      .digest('hex')
+      .substring(0, 8);
   }
 
   /**

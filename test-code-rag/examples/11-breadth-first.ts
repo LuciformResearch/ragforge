@@ -12,7 +12,7 @@ async function breadthFirstContextExploration() {
 
   // Find entry point
   const entry = await rag.scope()
-    .whereName('buildGraph')
+    .whereName('needsSummary')
     .execute();
 
   if (entry.length === 0) {
@@ -22,7 +22,7 @@ async function breadthFirstContextExploration() {
 
   // Breadth-first: Get immediate neighborhood
   const context = await rag.scope()
-    .whereName('buildGraph')
+    .whereName('needsSummary')
     .withDefinedIn(1)
     .withConsumes(1)
     .withHasParent(1)

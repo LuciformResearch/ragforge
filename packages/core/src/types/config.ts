@@ -15,6 +15,7 @@ export interface RagForgeConfig {
   summarization_strategies?: Record<string, SummarizationStrategyConfig>;
   summarization_llm?: SummarizationLLMConfig;
   source?: SourceConfig;
+  watch?: WatchConfig;
 }
 
 /**
@@ -89,6 +90,24 @@ export interface EntityConfig {
   unique_field?: string;        // Field for deduplication (default: 'uuid')
   query_field?: string;         // Field used in WHERE clauses (default: 'name')
   example_display_fields?: string[];  // Additional fields to display in examples (default: [])
+
+  // Change tracking configuration
+  track_changes?: boolean;      // Enable change tracking for this entity (default: false)
+  change_tracking?: ChangeTrackingConfig;  // Change tracking configuration
+}
+
+/**
+ * Configuration for entity-level change tracking
+ */
+export interface ChangeTrackingConfig {
+  /** Field containing the content to track (e.g., 'source' for code, 'content' for documents) */
+  content_field: string;
+
+  /** Metadata fields to include in Change node (e.g., ['name', 'file'] for Scope) */
+  metadata_fields?: string[];
+
+  /** Field containing the content hash for change detection (default: 'hash') */
+  hash_field?: string;
 }
 
 export interface FieldConfig {
@@ -269,6 +288,26 @@ export interface SourceConfig {
   /** Glob patterns to exclude (optional) */
   exclude?: string[];
 
+  /** Track changes and store diffs in Neo4j (default: false) */
+  track_changes?: boolean;
+
   /** Additional options passed to the adapter */
   options?: Record<string, any>;
+}
+
+/**
+ * Configuration for file watching and automatic incremental ingestion
+ */
+export interface WatchConfig {
+  /** Enable file watching (default: false) */
+  enabled: boolean;
+
+  /** Batch interval in milliseconds - collect changes before processing (default: 1000) */
+  batch_interval?: number;
+
+  /** Enable verbose logging for watch events (default: false) */
+  verbose?: boolean;
+
+  /** Auto-generate embeddings after ingestion (default: false) */
+  auto_embed?: boolean;
 }

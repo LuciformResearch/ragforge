@@ -24,9 +24,9 @@ async function filterAndExpandByHasParent() {
     console.log(`  ... and ${filtered.length - 5} more`);
   }
 
-  console.log('\n🔗 Expanding relationships from "buildGraph"...');
+  console.log('\n🔗 Expanding relationships from "needsSummary"...');
   const expanded = await rag.scope()
-    .whereName('buildGraph')
+    .whereName('needsSummary')
     .withHasParent(2)  // Get relationships 2 levels deep
     .execute();
 

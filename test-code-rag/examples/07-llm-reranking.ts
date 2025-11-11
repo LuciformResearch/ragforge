@@ -10,17 +10,17 @@ import type { SearchResult } from '@luciformresearch/ragforge-runtime';
 async function llmRerankingForBetterRelevance() {
   const rag = createRagClient(); // Uses .env variables automatically
 
-  console.log('🔎 Semantic search: "function createClient..."');
-  console.log('🤖 Then reranking with LLM: "find the most relevant code scopes around this semantic search: function createClient(config:..."');
+  console.log('🔎 Semantic search: "public static GenerateUUID(): string { const lut = this.Lut; // Generate four random 32-bit numbers..."');
+  console.log('🤖 Then reranking with LLM: "find the most relevant code scopes around this semantic search: public static GenerateUUID(): string..."');
 
   // NOTE: llmRerank() can be used after ANY operation that returns results.
   // In this example, we use it after .semanticSearchBySource(), but you can also use it after:
-  //   - Filters: .whereFileName(), .whereName(), .whereSource()
+  //   - Filters: .whereFileName(), .whereName(), .whereFile()
   //   - Relationships: .withDefinedIn(), .withConsumes()
   //   - Or even directly without prior operations
   const results = await rag.scope()
-    .semanticSearchBySource('function createClient...', { topK: 50 })
-    .llmRerank('find the most relevant code scopes around this semantic search: function createClient(config:...', {
+    .semanticSearchBySource('public static GenerateUUID(): string { const lut = this.Lut; // Generate four random 32-bit numbers...', { topK: 50 })
+    .llmRerank('find the most relevant code scopes around this semantic search: public static GenerateUUID(): string...', {
       topK: 10,
       minScore: 0.7
     })
@@ -33,7 +33,7 @@ async function llmRerankingForBetterRelevance() {
   const highlights = [entity.name ? 'name: ' + entity.name : null]
     .filter(Boolean)
     .join(' | ');
-  console.log(`    Why: matches "function createClient..." → ${highlights || 'high semantic similarity'}`);
+  console.log(`    Why: matches "public static GenerateUUID(): string { const lut = this.Lut; // Generate four random 32-bit numbers..." → ${highlights || 'high semantic similarity'}`);
     if (r.scoreBreakdown?.llmReasoning) {
       console.log(`    Why (LLM): ${r.scoreBreakdown.llmReasoning}`);
     }

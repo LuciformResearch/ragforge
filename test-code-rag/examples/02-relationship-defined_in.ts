@@ -12,7 +12,7 @@ async function filterAndExpandByDefinedIn() {
 
   console.log('🔍 Filtering by DEFINED_IN relationship...');
   const filtered = await rag.scope()
-    .whereFileName('index.ts')
+    .whereFileName('config.ts')
     .execute();
 
   console.log(`\nFound ${filtered.length} items with DEFINED_IN relationship:`);
@@ -24,9 +24,9 @@ async function filterAndExpandByDefinedIn() {
     console.log(`  ... and ${filtered.length - 5} more`);
   }
 
-  console.log('\n🔗 Expanding relationships from "buildGraph"...');
+  console.log('\n🔗 Expanding relationships from "needsSummary"...');
   const expanded = await rag.scope()
-    .whereName('buildGraph')
+    .whereName('needsSummary')
     .withDefinedIn(2)  // Get relationships 2 levels deep
     .execute();
 

@@ -563,7 +563,12 @@ export class QueryBuilder<T = any> {
     results.sort((a, b) => b.score - a.score);
 
     // 5. Apply offset and limit
-    return results.slice(this._offset, this._offset + this._limit);
+    const finalResults = results.slice(this._offset, this._offset + this._limit);
+
+    // 6. Check for dirty embeddings and warn user
+    this.checkDirtyEmbeddings(finalResults);
+
+    return finalResults;
   }
 
   /**
@@ -749,7 +754,33 @@ export class QueryBuilder<T = any> {
     currentResults.sort((a, b) => b.score - a.score);
 
     // Apply offset and limit
-    return currentResults.slice(this._offset, this._offset + this._limit);
+    const finalResults = currentResults.slice(this._offset, this._offset + this._limit);
+
+    // Check for dirty embeddings and warn user
+    this.checkDirtyEmbeddings(finalResults);
+
+    return finalResults;
+  }
+
+  /**
+   * Check if any results have dirty embeddings and warn the user
+   */
+  private checkDirtyEmbeddings(results: SearchResult<T>[]): void {
+    const dirtyResults = results.filter(r => (r.entity as any)?.embeddingsDirty === true);
+
+    if (dirtyResults.length > 0) {
+      console.warn(`\n⚠️  WARNING: ${dirtyResults.length} of ${results.length} result(s) have stale embeddings!`);
+      console.warn(`   Code has changed but embeddings have not been regenerated.`);
+      console.warn(`   Run 'npm run embeddings:generate' to update embeddings.\n`);
+
+      if (dirtyResults.length <= 5) {
+        console.warn(`   Affected scopes:`);
+        dirtyResults.forEach(r => {
+          const entity = r.entity as any;
+          console.warn(`     - ${entity.name || entity.uuid} (${entity.file})`);
+        });
+      }
+    }
   }
 
   /**

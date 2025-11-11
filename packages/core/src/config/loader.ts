@@ -62,6 +62,12 @@ const RelationshipConfigSchema = z.object({
   filters: z.array(RelationshipFilterSchema).optional()
 });
 
+const ChangeTrackingConfigSchema = z.object({
+  content_field: z.string(),
+  metadata_fields: z.array(z.string()).optional(),
+  hash_field: z.string().optional()
+});
+
 const EntityConfigSchema = z.object({
   name: z.string(),
   description: z.string().optional(),
@@ -73,7 +79,10 @@ const EntityConfigSchema = z.object({
   display_name_field: z.string().optional(),
   unique_field: z.string().optional(),
   query_field: z.string().optional(),
-  example_display_fields: z.array(z.string()).optional()
+  example_display_fields: z.array(z.string()).optional(),
+  // Change tracking
+  track_changes: z.boolean().optional(),
+  change_tracking: ChangeTrackingConfigSchema.optional()
 });
 
 const RerankingStrategySchema = z.object({
@@ -150,7 +159,15 @@ const SourceConfigSchema = z.object({
   root: z.string().optional(),
   include: z.array(z.string()).min(1, 'source.include must contain at least one pattern'),
   exclude: z.array(z.string()).optional(),
+  track_changes: z.boolean().optional(),
   options: z.record(z.any()).optional()
+});
+
+const WatchConfigSchema = z.object({
+  enabled: z.boolean(),
+  batch_interval: z.number().optional(),
+  verbose: z.boolean().optional(),
+  auto_embed: z.boolean().optional()
 });
 
 const RagForgeConfigSchema = z.object({
@@ -165,6 +182,7 @@ const RagForgeConfigSchema = z.object({
   summarization_strategies: z.record(SummarizationStrategyConfigSchema).optional(),
   summarization_llm: SummarizationLLMConfigSchema.optional(),
   source: SourceConfigSchema.optional(),
+  watch: WatchConfigSchema.optional(),
   embeddings: z
     .object({
       provider: z.literal('gemini'),

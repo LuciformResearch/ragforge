@@ -12,7 +12,7 @@ async function filterAndExpandByConsumes() {
 
   console.log('🔍 Filtering by CONSUMES relationship...');
   const filtered = await rag.scope()
-    .whereConsumesScope('generateContent')
+    .whereConsumesScope('AddRelationshipConfig')
     .execute();
 
   console.log(`\nFound ${filtered.length} items with CONSUMES relationship:`);
@@ -24,9 +24,9 @@ async function filterAndExpandByConsumes() {
     console.log(`  ... and ${filtered.length - 5} more`);
   }
 
-  console.log('\n🔗 Expanding relationships from "buildGraph"...');
+  console.log('\n🔗 Expanding relationships from "needsSummary"...');
   const expanded = await rag.scope()
-    .whereName('buildGraph')
+    .whereName('needsSummary')
     .withConsumes(2)  // Get relationships 2 levels deep
     .execute();
 

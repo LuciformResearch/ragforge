@@ -24,9 +24,9 @@ async function filterAndExpandByInheritsFrom() {
     console.log(`  ... and ${filtered.length - 5} more`);
   }
 
-  console.log('\n🔗 Expanding relationships from "CodeSourceAdapter"...');
+  console.log('\n🔗 Expanding relationships from "needsSummary"...');
   const expanded = await rag.scope()
-    .whereName('CodeSourceAdapter')
+    .whereName('needsSummary')
     .withInheritsFrom(2)  // Get relationships 2 levels deep
     .execute();
 

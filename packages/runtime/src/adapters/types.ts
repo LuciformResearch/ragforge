@@ -24,6 +24,9 @@ export interface SourceConfig {
   /** Glob patterns to exclude */
   exclude?: string[];
 
+  /** Track changes and store diffs in Neo4j (default: false) */
+  track_changes?: boolean;
+
   /** Adapter-specific options */
   options?: Record<string, any>;
 }

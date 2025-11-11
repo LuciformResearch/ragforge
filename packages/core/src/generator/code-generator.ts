@@ -70,6 +70,8 @@ export interface GeneratedCode {
     ingestFromSource?: string;   // Script to ingest code from source paths
     setup?: string;               // Orchestrator script: ingest → indexes → embeddings → summaries
     cleanDb?: string;             // Script to clean the database
+    watch?: string;               // Script to watch files and auto-ingest changes
+    changeStats?: string;         // Script to analyze change history statistics
   };
   examples: Map<string, string>; // example name -> TypeScript example code
   rebuildAgentScript: string;    // Script to rebuild agent documentation
@@ -249,6 +251,11 @@ export class CodeGenerator {
       for (const strategy of config.reranking.strategies) {
         lines.push(...this.generateRerankMethod(strategy));
       }
+    }
+
+    // Generate temporal filtering methods (if change tracking enabled)
+    if (entity.track_changes || config.source?.track_changes) {
+      lines.push(...this.generateTemporalMethods(entity.name));
     }
 
     // Generate helper methods for better DX
@@ -586,6 +593,83 @@ export class CodeGenerator {
     lines.push(`   */`);
     lines.push(`  ${methodName}(): this {`);
     lines.push(`    return this.rerank('${strategy.name}');`);
+    lines.push(`  }`);
+    lines.push(``);
+
+    return lines;
+  }
+
+  /**
+   * Generate temporal filtering methods for entities with change tracking
+   */
+  private static generateTemporalMethods(entityName: string): string[] {
+    const lines: string[] = [];
+
+    // modifiedSince method
+    lines.push(`  /**`);
+    lines.push(`   * Filter ${entityName} entities modified since a specific date`);
+    lines.push(`   * Requires change tracking to be enabled`);
+    lines.push(`   * @param date - Date to filter from`);
+    lines.push(`   * @example`);
+    lines.push(`   * const recent = await query.modifiedSince(new Date('2024-11-01')).execute();`);
+    lines.push(`   */`);
+    lines.push(`  modifiedSince(date: Date): this {`);
+    lines.push(`    return this.clientFilter(result => {`);
+    lines.push(`      if (!result.changeInfo?.lastModified) return false;`);
+    lines.push(`      return result.changeInfo.lastModified >= date;`);
+    lines.push(`    });`);
+    lines.push(`  }`);
+    lines.push(``);
+
+    // recentlyModified method
+    lines.push(`  /**`);
+    lines.push(`   * Filter ${entityName} entities modified in the last N days`);
+    lines.push(`   * Requires change tracking to be enabled`);
+    lines.push(`   * @param days - Number of days to look back`);
+    lines.push(`   * @example`);
+    lines.push(`   * const thisWeek = await query.recentlyModified(7).execute();`);
+    lines.push(`   */`);
+    lines.push(`  recentlyModified(days: number): this {`);
+    lines.push(`    const cutoffDate = new Date();`);
+    lines.push(`    cutoffDate.setDate(cutoffDate.getDate() - days);`);
+    lines.push(`    return this.modifiedSince(cutoffDate);`);
+    lines.push(`  }`);
+    lines.push(``);
+
+    // modifiedBetween method
+    lines.push(`  /**`);
+    lines.push(`   * Filter ${entityName} entities modified between two dates`);
+    lines.push(`   * Requires change tracking to be enabled`);
+    lines.push(`   * @param startDate - Start date`);
+    lines.push(`   * @param endDate - End date`);
+    lines.push(`   * @example`);
+    lines.push(`   * const november = await query.modifiedBetween(`);
+    lines.push(`   *   new Date('2024-11-01'),`);
+    lines.push(`   *   new Date('2024-11-30')`);
+    lines.push(`   * ).execute();`);
+    lines.push(`   */`);
+    lines.push(`  modifiedBetween(startDate: Date, endDate: Date): this {`);
+    lines.push(`    return this.clientFilter(result => {`);
+    lines.push(`      if (!result.changeInfo?.lastModified) return false;`);
+    lines.push(`      return result.changeInfo.lastModified >= startDate && `);
+    lines.push(`             result.changeInfo.lastModified <= endDate;`);
+    lines.push(`    });`);
+    lines.push(`  }`);
+    lines.push(``);
+
+    // withChangeInfo method
+    lines.push(`  /**`);
+    lines.push(`   * Enrich results with change information`);
+    lines.push(`   * Adds changeInfo to each result with lastModified, changeType, etc.`);
+    lines.push(`   * Requires change tracking to be enabled`);
+    lines.push(`   * @example`);
+    lines.push(`   * const results = await query.withChangeInfo().execute();`);
+    lines.push(`   * results.forEach(r => console.log(r.changeInfo?.lastModified));`);
+    lines.push(`   */`);
+    lines.push(`  withChangeInfo(): this {`);
+    lines.push(`    // This will be handled automatically by the query execution`);
+    lines.push(`    // The changeInfo is fetched from the most recent Change node`);
+    lines.push(`    return this;`);
     lines.push(`  }`);
     lines.push(``);
 
@@ -1043,6 +1127,56 @@ export class CodeGenerator {
           lines.push(`    },`);
         }
       }
+
+      // Pattern 6: Temporal patterns (if change tracking enabled)
+      if (entity.track_changes || config.source?.track_changes) {
+        lines.push(``);
+        lines.push(`    // ===== Temporal Patterns (Change Tracking) =====`);
+        lines.push(``);
+
+        // Pattern: Find recently modified
+        lines.push(`    /**`);
+        lines.push(`     * Find ${entity.name} entities modified in the last N days`);
+        lines.push(`     * @example`);
+        lines.push(`     * const results = await patterns.findRecentlyModified${entity.name}(7).execute();`);
+        lines.push(`     */`);
+        lines.push(`    findRecentlyModified${entity.name}(days: number = 7) {`);
+        lines.push(`      return client.${entityMethodName}().recentlyModified(days);`);
+        lines.push(`    },`);
+        lines.push(``);
+
+        // Pattern: Find modified since date
+        lines.push(`    /**`);
+        lines.push(`     * Find ${entity.name} entities modified since a specific date`);
+        lines.push(`     * @example`);
+        lines.push(`     * const results = await patterns.find${entity.name}ModifiedSince(new Date('2025-01-01')).execute();`);
+        lines.push(`     */`);
+        lines.push(`    find${entity.name}ModifiedSince(date: Date) {`);
+        lines.push(`      return client.${entityMethodName}().modifiedSince(date);`);
+        lines.push(`    },`);
+        lines.push(``);
+
+        // Pattern: Find modified between dates
+        lines.push(`    /**`);
+        lines.push(`     * Find ${entity.name} entities modified within a date range`);
+        lines.push(`     * @example`);
+        lines.push(`     * const results = await patterns.find${entity.name}ModifiedBetween(new Date('2025-01-01'), new Date('2025-01-31')).execute();`);
+        lines.push(`     */`);
+        lines.push(`    find${entity.name}ModifiedBetween(startDate: Date, endDate: Date) {`);
+        lines.push(`      return client.${entityMethodName}().modifiedBetween(startDate, endDate);`);
+        lines.push(`    },`);
+        lines.push(``);
+
+        // Pattern: Find with change history
+        lines.push(`    /**`);
+        lines.push(`     * Find ${entity.name} entities with change history information`);
+        lines.push(`     * @example`);
+        lines.push(`     * const results = await patterns.find${entity.name}WithChangeHistory().execute();`);
+        lines.push(`     */`);
+        lines.push(`    find${entity.name}WithChangeHistory() {`);
+        lines.push(`      return client.${entityMethodName}().withChangeInfo();`);
+        lines.push(`    },`);
+      }
     }
 
     // Close the patterns object
@@ -1057,11 +1191,17 @@ export class CodeGenerator {
    */
   private static generateQuickstart(config: RagForgeConfig, schema: GraphSchema): string {
     const lines: string[] = [];
-    const clientVarName = config.name.toLowerCase();
+    // Sanitize client variable name (remove hyphens, spaces, etc.)
+    const clientVarName = config.name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '')
+      .replace(/^[0-9]/, 'rag') || 'rag';
     const entityExample = config.entities[0]; // Use first entity as example
     const entityMethodName = entityExample.name.charAt(0).toLowerCase() + entityExample.name.slice(1);
     const queryField = this.getQueryField(entityExample);
     const displayNameField = this.getDisplayNameField(entityExample);
+    const hasSourceConfig = !!config.source;
+    const hasVectorIndexes = config.entities.some(e => e.vector_indexes && e.vector_indexes.length > 0);
 
     lines.push(`# ${config.name} RAG Client - Quick Start Guide`);
     lines.push('');
@@ -1074,6 +1214,73 @@ export class CodeGenerator {
     lines.push('```bash');
     lines.push('npm install');
     lines.push('```');
+    lines.push('');
+
+    // Add Database Setup section if source config exists
+    if (hasSourceConfig) {
+      lines.push('## 🗄️ Database Setup');
+      lines.push('');
+      lines.push('### First-time setup');
+      lines.push('');
+      lines.push('If this is a new project with code to ingest:');
+      lines.push('');
+      lines.push('```bash');
+      lines.push('npm run setup');
+      lines.push('```');
+      lines.push('');
+      lines.push('This will:');
+      lines.push('1. ✅ Parse your source code (configured in `ragforge.config.yaml`)');
+      lines.push('2. ✅ Ingest code into Neo4j (incremental - only changed files)');
+      if (hasVectorIndexes) {
+        lines.push('3. ✅ Create vector indexes');
+        lines.push('4. ✅ Generate embeddings');
+      }
+      lines.push('');
+      lines.push('### Subsequent updates');
+      lines.push('');
+      lines.push('When your code changes, just run:');
+      lines.push('');
+      lines.push('```bash');
+      lines.push('npm run ingest');
+      lines.push('```');
+      lines.push('');
+      lines.push('This uses **incremental ingestion** - only re-processes files that changed!');
+      lines.push('');
+
+      // Add watch mode section if watch is enabled
+      if (config.watch?.enabled) {
+        lines.push('### Watch mode (automatic ingestion)');
+        lines.push('');
+        lines.push('For automatic ingestion as you code:');
+        lines.push('');
+        lines.push('```bash');
+        lines.push('npm run watch');
+        lines.push('```');
+        lines.push('');
+        lines.push('This watches your source files and automatically ingests changes:');
+        lines.push(`- 🔄 Batches changes every ${config.watch.batch_interval ?? 1000}ms`);
+        lines.push('- ⚡ Only processes modified files (incremental)');
+        if (config.watch.auto_embed) {
+          lines.push('- 🔢 Auto-generates embeddings after each batch');
+        }
+        lines.push('- ⚠️  Marks changed scopes with dirty embeddings flag');
+        lines.push('');
+        lines.push('Press Ctrl+C to stop watching.');
+        lines.push('');
+      }
+
+      lines.push('### Clean slate');
+      lines.push('');
+      lines.push('To wipe the database and start fresh:');
+      lines.push('');
+      lines.push('```bash');
+      lines.push('npm run clean:db  # Removes all data');
+      lines.push('npm run setup     # Re-ingest everything');
+      lines.push('```');
+      lines.push('');
+      lines.push('---');
+      lines.push('');
+    }
     lines.push('');
     lines.push('## 🚀 Basic Usage');
     lines.push('');
@@ -1109,6 +1316,66 @@ export class CodeGenerator {
     lines.push(`const total = await ${clientVarName}.${entityMethodName}().count();`);
     lines.push('```');
     lines.push('');
+    lines.push('---');
+    lines.push('');
+
+    // Add Understanding Results section
+    lines.push('## 📦 Understanding Results');
+    lines.push('');
+    lines.push('**Important**: Query results have a specific structure:');
+    lines.push('');
+    lines.push('```typescript');
+    lines.push('{');
+    lines.push('  entity: {');
+    lines.push('    // All node properties here');
+    lines.push(`    ${displayNameField}: "value",`);
+    lines.push(`    ${queryField}: "example",`);
+    lines.push('    // ... other properties');
+    lines.push('  },');
+    lines.push('  score?: number,  // Relevance score (only for semantic/vector search)');
+    lines.push('  // ... other metadata');
+    lines.push('}');
+    lines.push('```');
+    lines.push('');
+    lines.push('**Always access node properties via `.entity`**:');
+    lines.push('');
+    lines.push('```typescript');
+    lines.push(`const results = await ${clientVarName}.${entityMethodName}().whereName('example').execute();`);
+    lines.push('');
+    lines.push('// ✅ Correct');
+    lines.push(`console.log(results[0].entity.${displayNameField});`);
+    lines.push(`console.log(results[0].entity.${queryField});`);
+    lines.push('');
+    lines.push('// ❌ Wrong - returns undefined!');
+    lines.push(`console.log(results[0].${displayNameField});`);
+    lines.push(`console.log(results[0].${queryField});`);
+    lines.push('```');
+    lines.push('');
+
+    // Add semantic search example if vector indexes exist
+    if (hasVectorIndexes) {
+      const vectorEntity = config.entities.find(e => e.vector_indexes && e.vector_indexes.length > 0);
+      if (vectorEntity && vectorEntity.vector_indexes) {
+        const firstIndex = vectorEntity.vector_indexes[0];
+        const semanticMethodName = `semanticSearchBy${firstIndex.source_field.charAt(0).toUpperCase() + firstIndex.source_field.slice(1)}`;
+        const entityMethod = vectorEntity.name.charAt(0).toLowerCase() + vectorEntity.name.slice(1);
+
+        lines.push('For semantic searches, you also get a relevance score:');
+        lines.push('');
+        lines.push('```typescript');
+        lines.push(`const results = await ${clientVarName}.${entityMethod}()`);
+        lines.push(`  .${semanticMethodName}("your search query")`);
+        lines.push(`  .limit(5)`);
+        lines.push(`  .execute();`);
+        lines.push('');
+        lines.push('results.forEach(r => {');
+        lines.push(`  console.log(\`\${r.entity.${displayNameField}}: \${r.score?.toFixed(2)}\`);`);
+        lines.push('});');
+        lines.push('```');
+        lines.push('');
+      }
+    }
+
     lines.push('---');
     lines.push('');
     lines.push('## 🎯 Common Patterns');
@@ -1195,9 +1462,17 @@ export class CodeGenerator {
     lines.push('Check out the `examples/` directory for more detailed examples:');
     lines.push('');
     lines.push('```bash');
-    lines.push('npm run examples:01-basic-query');
-    lines.push('npm run examples:02-filters');
-    lines.push('npm run examples:03-relationships');
+    if (hasVectorIndexes) {
+      lines.push('npm run examples:01-semantic-search-source');
+    }
+    if (entityExample.relationships && entityExample.relationships.length > 0) {
+      lines.push('npm run examples:02-relationship-defined_in');
+    }
+    lines.push('npm run examples:07-llm-reranking');
+    lines.push('npm run examples:09-complex-pipeline');
+    lines.push('```');
+    lines.push('');
+    lines.push('> See all examples: `ls examples/` or check `package.json` scripts');
     lines.push('```');
     lines.push('');
     lines.push('---');
@@ -1593,6 +1868,93 @@ export class CodeGenerator {
     lines.push('');
     lines.push('> Embeddings use Google Gemini (`@google/genai`) and require `GEMINI_API_KEY` in your environment.');
     lines.push('');
+
+    // Add Project Scripts section if source config exists
+    if (config.source) {
+      const hasVectorIndexes = config.entities.some(e => e.vector_indexes && e.vector_indexes.length > 0);
+      lines.push('## 📜 Available Scripts');
+      lines.push('');
+      lines.push('This project includes auto-generated scripts for database management:');
+      lines.push('');
+
+      lines.push('### `npm run setup`');
+      lines.push('**Complete setup workflow** - Run this for first-time setup:');
+      lines.push('1. Parses code from configured source paths');
+      lines.push('2. Ingests into Neo4j (creates Scope, File nodes)');
+      if (hasVectorIndexes) {
+        lines.push('3. Creates vector indexes');
+        lines.push('4. Generates embeddings');
+      }
+      lines.push('');
+      lines.push('**When to use**: New project, or when you want a clean slate');
+      lines.push('');
+
+      lines.push('### `npm run ingest`');
+      lines.push('**Incremental code ingestion** - Only re-processes changed files:');
+      lines.push('- Detects file changes using content hashing');
+      lines.push('- Only updates modified scopes');
+      lines.push('- Much faster than full re-ingestion');
+      lines.push('');
+      lines.push('**When to use**: After code changes, for quick updates');
+      lines.push('');
+      lines.push('**Example output**:');
+      lines.push('```');
+      lines.push('🔍 Analyzing changes...');
+      lines.push('   Created: 5');
+      lines.push('   Updated: 2');
+      lines.push('   Unchanged: 143');
+      lines.push('   Deleted: 0');
+      lines.push('```');
+      lines.push('');
+
+      lines.push('### `npm run ingest:clean`');
+      lines.push('Clean database + fresh ingestion:');
+      lines.push('```bash');
+      lines.push('npm run ingest:clean');
+      lines.push('```');
+      lines.push('');
+
+      lines.push('### `npm run clean:db`');
+      lines.push('Removes all data from Neo4j:');
+      lines.push('```bash');
+      lines.push('npm run clean:db');
+      lines.push('```');
+      lines.push('**⚠️ Warning**: This deletes everything!');
+      lines.push('');
+
+      lines.push('### How ingestion works');
+      lines.push('');
+      lines.push('The code is parsed using the configuration in `ragforge.config.yaml`:');
+      lines.push('');
+      lines.push('```yaml');
+      lines.push('source:');
+      lines.push(`  type: ${config.source.type}`);
+      lines.push(`  adapter: ${config.source.adapter}`);
+      lines.push(`  root: ${config.source.root || '.'}`);
+      lines.push('  include:');
+      for (const pattern of config.source.include.slice(0, 2)) {
+        lines.push(`    - "${pattern}"`);
+      }
+      if (config.source.include.length > 2) {
+        lines.push(`    # ... and ${config.source.include.length - 2} more`);
+      }
+      if (config.source.exclude && config.source.exclude.length > 0) {
+        lines.push('  exclude:');
+        for (const pattern of config.source.exclude.slice(0, 2)) {
+          lines.push(`    - "${pattern}"`);
+        }
+        if (config.source.exclude.length > 2) {
+          lines.push(`    # ... and ${config.source.exclude.length - 2} more`);
+        }
+      }
+      lines.push('```');
+      lines.push('');
+      lines.push('Each scope (function, class, method, etc.) gets:');
+      lines.push('- A unique UUID');
+      lines.push('- A content hash (for change detection)');
+      lines.push('- Relationships (DEFINED_IN, CALLS, IMPORTS, etc.)');
+      lines.push('');
+    }
 
     // ⭐ CUSTOM YAML-GENERATED METHODS (added first!)
     lines.push('## ⭐ Custom Methods (Generated from YAML Config)');
@@ -3405,6 +3767,8 @@ ${cleanupSections}
     ingestFromSource?: string;
     setup?: string;
     cleanDb?: string;
+    watch?: string;
+    changeStats?: string;
   } | undefined {
     if (!config.source) {
       return undefined;
@@ -3413,6 +3777,14 @@ ${cleanupSections}
     const { include, adapter, exclude = [], root = '.' } = config.source;
     const hasEmbeddings = !!config.embeddings;
     const hasSummarization = !!config.summarization_strategies;
+    const hasWatch = !!config.watch?.enabled;
+    const hasChangeTracking = config.source.track_changes || config.entities.some(e => e.track_changes);
+
+    // Calculate root path: if root is '.', use projectRoot (config file location)
+    // otherwise resolve relative to projectRoot
+    const rootPathExpression = root === '.'
+      ? 'projectRoot'
+      : `path.resolve(projectRoot, '${root}')`;
 
     const ingestFromSource = `/**
  * Ingest code from configured source paths
@@ -3434,13 +3806,13 @@ console.log('🔄 Starting code ingestion...\\n');
 const manager = new IncrementalIngestionManager(rag.client);
 
 // Source configuration (from ragforge.config.yaml)
-// Note: paths are relative to the config file location (parent of generated folder)
+// Note: include/exclude paths are relative to the config file location
 const config = {
   type: 'code' as const,
-  root: path.resolve(projectRoot, '..', '${root}'),
+  root: ${rootPathExpression},
   include: ${JSON.stringify(include)},
   exclude: ${JSON.stringify(exclude)},
-  adapter: '${adapter}' as const
+  adapter: '${adapter}' as const${hasChangeTracking ? ',\n  track_changes: true' : ''}
 };
 
 try {
@@ -3563,10 +3935,97 @@ async function main() {
 main();
 `;
 
+    // Watch script (only if watch is enabled in config)
+    const watch = hasWatch ? `/**
+ * Watch source files and automatically ingest changes
+ * Uses batching to efficiently handle multiple file changes
+ * Generated by RagForge
+ */
+
+import { IncrementalIngestionManager, FileWatcher } from '@luciformresearch/ragforge-runtime';
+import { createRagClient } from '../client.js';
+import { spawn } from 'child_process';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const projectRoot = path.resolve(__dirname, '..');
+
+const rag = createRagClient();
+const manager = new IncrementalIngestionManager(rag.client);
+
+// Source configuration (from ragforge.config.yaml)
+const sourceConfig = {
+  type: 'code' as const,
+  root: path.resolve(projectRoot, '..', '${root}'),
+  include: ${JSON.stringify(include)},
+  exclude: ${JSON.stringify(exclude)},
+  adapter: '${adapter}' as const
+};
+
+// Watch configuration
+const watchConfig = {
+  batchInterval: ${config.watch?.batch_interval ?? 1000},
+  verbose: ${config.watch?.verbose ?? true},
+  onBatchStart: (fileCount: number) => {
+    console.log(\`\\n🔄 Processing batch of \${fileCount} file(s)...\`);
+  },
+  onBatchComplete: (stats) => {
+    console.log(\`✅ Batch complete: \${stats.created + stats.updated} scope(s) updated\`);
+    ${config.watch?.auto_embed ? `
+    // Auto-generate embeddings if configured
+    console.log('🔢 Auto-generating embeddings...');
+    spawn('npm', ['run', 'embeddings:generate'], {
+      cwd: projectRoot,
+      stdio: 'inherit',
+      shell: true
+    });
+    ` : ''}
+  },
+  onBatchError: (error) => {
+    console.error('❌ Batch failed:', error);
+  }
+};
+
+console.log('👀 Starting file watcher...\\n');
+console.log('   Watching patterns:');
+${include.map(p => `console.log('     - ${p}');`).join('\n')}
+${exclude.length > 0 ? `console.log('\\n   Ignoring patterns:');
+${exclude.map(p => `console.log('     - ${p}');`).join('\n')}` : ''}
+console.log(\`\\n   Batch interval: ${config.watch?.batch_interval ?? 1000}ms\`);
+console.log('   Press Ctrl+C to stop\\n');
+
+const watcher = new FileWatcher(manager, sourceConfig, watchConfig);
+
+try {
+  await watcher.start();
+
+  // Handle graceful shutdown
+  process.on('SIGINT', async () => {
+    console.log('\\n\\n🛑 Stopping watcher...');
+    await watcher.stop();
+    await rag.close();
+    process.exit(0);
+  });
+
+  // Keep process alive
+  await new Promise(() => {});
+} catch (error) {
+  console.error('❌ Watcher failed:', error);
+  await rag.close();
+  process.exit(1);
+}
+` : undefined;
+
+    // Change stats script (only if change tracking is enabled)
+    const changeStats = hasChangeTracking ? loadTemplate('scripts/change-stats.ts') : undefined;
+
     return {
       ingestFromSource,
       setup,
-      cleanDb
+      cleanDb,
+      ...(watch ? { watch } : {}),
+      ...(changeStats ? { changeStats } : {})
     };
   }
 

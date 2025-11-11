@@ -18,17 +18,17 @@ async function batchMutations() {
     {
       uuid: 'scope-batch-001',
       name: 'Sample Scope 1 name',
-      source: 'Sample Scope 1 source'
+      file: 'Sample Scope 1 file'
     },
     {
       uuid: 'scope-batch-002',
       name: 'Sample Scope 2 name',
-      source: 'Sample Scope 2 source'
+      file: 'Sample Scope 2 file'
     },
     {
       uuid: 'scope-batch-003',
       name: 'Sample Scope 3 name',
-      source: 'Sample Scope 3 source'
+      file: 'Sample Scope 3 file'
     }
   ];
 

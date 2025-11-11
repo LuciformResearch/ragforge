@@ -17,8 +17,8 @@ async function complexMultiStagePipeline() {
   // 4. Expand relationships (complete context)
   // 5. Track metadata (observe)
   const { results, metadata } = await rag.scope()
-    .semanticSearchBySource('function createClient...', { topK: 100 })
-    .whereFileName('index.ts')
+    .semanticSearchBySource('public static GenerateUUID(): string { const lut = this.Lut; // Generate four random 32-bit numbers...', { topK: 100 })
+    .whereFileName('config.ts')
     .llmRerank('find the most relevant code scopes', { topK: 20 })
     .withDefinedIn(1)
     .executeWithMetadata();

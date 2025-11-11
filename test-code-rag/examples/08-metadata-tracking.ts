@@ -11,8 +11,8 @@ async function pipelineMetadataAndObservability() {
   const rag = createRagClient(); // Uses .env variables automatically
 
   const { results, metadata } = await rag.scope()
-    .semanticSearchBySource('function createClient...', { topK: 50 })
-    .llmRerank('find code scopes related to: function createClient...', { topK: 10 })
+    .semanticSearchBySource('public static GenerateUUID(): string { const lut = this.Lut; // Generate four random 32-bit numbers...', { topK: 50 })
+    .llmRerank('find code scopes related to: public static GenerateUUID(): string { const lut = this.Lut; // Generate four random 32-bit numbers...', { topK: 10 })
     .executeWithMetadata();
 
   console.log(`Pipeline executed in ${metadata.totalDuration}ms`);

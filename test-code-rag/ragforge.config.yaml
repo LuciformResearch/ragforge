@@ -7,12 +7,23 @@ source:
   adapter: typescript
   root: .
   include:
-    - "src/**/*.ts"
+    - "../packages/runtime/src/**/*.ts"
+    - "../packages/core/src/**/*.ts"
+    - "../packages/cli/src/**/*.ts"
   exclude:
     - "**/node_modules/**"
     - "**/dist/**"
+    - "**/*.test.ts"
+    - "**/*.spec.ts"
+  track_changes: true
   options:
     exportXml: false
+
+watch:
+  enabled: true
+  batch_interval: 1000
+  verbose: true
+  auto_embed: false
 
 neo4j:
   uri: ${NEO4J_URI}

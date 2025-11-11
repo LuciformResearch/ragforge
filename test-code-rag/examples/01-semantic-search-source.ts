@@ -10,9 +10,9 @@ import type { SearchResult } from '@luciformresearch/ragforge-runtime';
 async function semanticSearchBySource() {
   const rag = createRagClient(); // Uses .env variables automatically
 
-  console.log('🔎 Semantic search for: "function createClient..."');
+  console.log('🔎 Semantic search for: "public static GenerateUUID(): string { const lut = this.Lut; // Generate four random 32-bit numbers..."');
   const results = await rag.scope()
-    .semanticSearchBySource('function createClient...', { topK: 50 })
+    .semanticSearchBySource('public static GenerateUUID(): string { const lut = this.Lut; // Generate four random 32-bit numbers...', { topK: 50 })
     .execute();
 
   console.log(`\nFound ${results.length} results:`);
