@@ -2670,10 +2670,24 @@ export class CodeGenerator {
       const paramName = firstFilter.parameter || 'entityName';
       const withMethod = this.camelCase(`with_${rel.type}`);
 
-      // Priority: YAML config > working example from introspection > real data from target entity > relationshipExamples > generic fallback
+      // Priority: YAML config > popular targets > working example from introspection > real data from target entity > relationshipExamples > generic fallback
       let exampleTarget = rel.example_target;
 
-      // Try to find a working example from introspection (guaranteed to have results)
+      // Try to find a popular target first (e.g., parent with many children for HAS_PARENT)
+      // This ensures filter examples return actual results
+      if (!exampleTarget && schema.workingExamples) {
+        const popularTargets = schema.workingExamples[`${firstEntity.name}.popularTargets`];
+        if (popularTargets && Array.isArray(popularTargets)) {
+          const matchingTarget = popularTargets.find((ex: any) =>
+            ex.relType === rel.type && ex.targetLabel === rel.target
+          );
+          if (matchingTarget) {
+            exampleTarget = matchingTarget.targetName;
+          }
+        }
+      }
+
+      // Fallback: Try to find any working example from introspection
       if (!exampleTarget && schema.workingExamples) {
         const relExamples = schema.workingExamples[`${firstEntity.name}.relationshipExamplesWithTargets`];
         if (relExamples && Array.isArray(relExamples)) {
@@ -3506,20 +3520,24 @@ ${relCalls}
         .slice(0, 2)
         .map(f => f.name) : [];
 
+    // Check if relatedEntity is the same as mainEntity (self-referential relationship)
+    const isSelfReferential = relatedEntity && relatedEntity.name === mainEntity.name;
+
     const bodyCode = `  console.log('📚 Testing CRUD mutations\\n');
 
-  // 1. Create a new ${relatedEntity ? relatedEntity.name.toLowerCase() : 'entity'}
-  console.log('1️⃣ Creating a new ${relatedEntity ? relatedEntity.name.toLowerCase() : 'entity'}...');
-  const new${relatedEntity ? relatedEntity.name : 'Entity'}: ${relatedEntityCreate || 'any'} = {
-    ${uniqueField}: '${relatedEntity ? relatedEntity.name.toLowerCase() : 'entity'}-test-001',${relatedFields.map((f, i) => `\n    ${f}: 'Sample ${f} ${i + 1}'`).join(',')}
+  ${!isSelfReferential && relatedEntity ? `// 1. Create a new ${relatedEntity.name.toLowerCase()}
+  console.log('1️⃣ Creating a new ${relatedEntity.name.toLowerCase()}...');
+  const new${relatedEntity.name}: ${relatedEntityCreate} = {
+    ${uniqueField}: '${relatedEntity.name.toLowerCase()}-test-001',${relatedFields.map((f, i) => `\n    ${f}: 'Sample ${f} ${i + 1}'`).join(',')}
   };
 
-  const created${relatedEntity ? relatedEntity.name : 'Entity'} = await rag.${relatedEntityMethod}Mutations().create(new${relatedEntity ? relatedEntity.name : 'Entity'});
-  console.log('✅ ${relatedEntity ? relatedEntity.name : 'Entity'} created:', created${relatedEntity ? relatedEntity.name : 'Entity'});
+  const created${relatedEntity.name} = await rag.${relatedEntityMethod}Mutations().create(new${relatedEntity.name});
+  console.log('✅ ${relatedEntity.name} created:', created${relatedEntity.name});
   console.log();
 
   // 2. Create a new ${mainEntity.name.toLowerCase()}
-  console.log('2️⃣ Creating a new ${mainEntity.name.toLowerCase()}...');
+  console.log('2️⃣ Creating a new ${mainEntity.name.toLowerCase()}...');` : `// 1. Create a new ${mainEntity.name.toLowerCase()}
+  console.log('1️⃣ Creating a new ${mainEntity.name.toLowerCase()}...');`}
   const new${mainEntity.name}: ${mainEntityCreate} = {
     ${uniqueField}: '${mainEntity.name.toLowerCase()}-test-001',${mainFields.map((f, i) => `\n    ${f}: 'Sample ${f} ${i + 1}'`).join(',')}
   };
@@ -3528,15 +3546,15 @@ ${relCalls}
   console.log('✅ ${mainEntity.name} created:', created${mainEntity.name});
   console.log();
 
-  ${relatedEntity && relationshipType ? `// 3. Add relationship: ${mainEntity.name} ${relationshipType} ${relatedEntity.name}
-  console.log('3️⃣ Linking ${mainEntity.name.toLowerCase()} to ${relatedEntity.name.toLowerCase()}...');
+  ${relatedEntity && relationshipType ? `// ${!isSelfReferential ? '3' : '2'}. Add relationship: ${mainEntity.name} ${relationshipType} ${relatedEntity.name}
+  console.log('${!isSelfReferential ? '3' : '2'}️⃣ Linking ${mainEntity.name.toLowerCase()} to ${relatedEntity.name.toLowerCase()}...');
   await rag.${mainEntityMethod}Mutations().${addRelationshipMethod}('${mainEntity.name.toLowerCase()}-test-001', '${relatedEntity.name.toLowerCase()}-test-001');
   console.log('✅ Relationship added: ${mainEntity.name} ${relationshipType} ${relatedEntity.name}');
   console.log();
 
-  // 4. Update the ${mainEntity.name.toLowerCase()}
-  console.log('4️⃣ Updating ${mainEntity.name.toLowerCase()}...');` : `// 3. Update the ${mainEntity.name.toLowerCase()}
-  console.log('3️⃣ Updating ${mainEntity.name.toLowerCase()}...');`}
+  // ${!isSelfReferential ? '4' : '3'}. Update the ${mainEntity.name.toLowerCase()}
+  console.log('${!isSelfReferential ? '4' : '3'}️⃣ Updating ${mainEntity.name.toLowerCase()}...');` : `// ${!isSelfReferential ? '3' : '2'}. Update the ${mainEntity.name.toLowerCase()}
+  console.log('${!isSelfReferential ? '3' : '2'}️⃣ Updating ${mainEntity.name.toLowerCase()}...');`}
   const ${mainEntityMethod}Update: ${mainEntityUpdate} = {
     ${mainFields[1]}: 'Updated ${mainFields[1]}'
   };
@@ -3545,21 +3563,21 @@ ${relCalls}
   console.log('✅ ${mainEntity.name} updated:', updated${mainEntity.name});
   console.log();
 
-  ${relatedEntity && relationshipType ? `// 5. Remove the relationship
-  console.log('5️⃣ Removing ${mainEntity.name.toLowerCase()}-${relatedEntity.name.toLowerCase()} relationship...');
+  ${relatedEntity && relationshipType ? `// ${!isSelfReferential ? '5' : '4'}. Remove the relationship
+  console.log('${!isSelfReferential ? '5' : '4'}️⃣ Removing ${mainEntity.name.toLowerCase()}-${relatedEntity.name.toLowerCase()} relationship...');
   await rag.${mainEntityMethod}Mutations().${removeRelationshipMethod}('${mainEntity.name.toLowerCase()}-test-001', '${relatedEntity.name.toLowerCase()}-test-001');
   console.log('✅ Relationship removed');
   console.log();
 
-  // 6. Delete the ${mainEntity.name.toLowerCase()}
-  console.log('6️⃣ Deleting the ${mainEntity.name.toLowerCase()}...');` : `// 4. Delete the ${mainEntity.name.toLowerCase()}
-  console.log('4️⃣ Deleting the ${mainEntity.name.toLowerCase()}...');`}
+  // ${!isSelfReferential ? '6' : '5'}. Delete the ${mainEntity.name.toLowerCase()}
+  console.log('${!isSelfReferential ? '6' : '5'}️⃣ Deleting the ${mainEntity.name.toLowerCase()}...');` : `// ${!isSelfReferential ? '4' : '3'}. Delete the ${mainEntity.name.toLowerCase()}
+  console.log('${!isSelfReferential ? '4' : '3'}️⃣ Deleting the ${mainEntity.name.toLowerCase()}...');`}
   await rag.${mainEntityMethod}Mutations().delete('${mainEntity.name.toLowerCase()}-test-001');
   console.log('✅ ${mainEntity.name} deleted');
   console.log();
 
-  ${relatedEntity ? `// ${relatedEntity && relationshipType ? '7' : '5'}. Delete the ${relatedEntity.name.toLowerCase()}
-  console.log('${relatedEntity && relationshipType ? '7' : '5'}️⃣ Deleting the ${relatedEntity.name.toLowerCase()}...');
+  ${relatedEntity && !isSelfReferential ? `// 7. Delete the ${relatedEntity.name.toLowerCase()}
+  console.log('7️⃣ Deleting the ${relatedEntity.name.toLowerCase()}...');
   await rag.${relatedEntityMethod}Mutations().delete('${relatedEntity.name.toLowerCase()}-test-001');
   console.log('✅ ${relatedEntity.name} deleted');
   console.log();` : ''}

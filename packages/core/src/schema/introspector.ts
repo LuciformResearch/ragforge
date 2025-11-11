@@ -493,6 +493,30 @@ export class SchemaIntrospector {
           workingExamples[`${label}.relationshipExamplesWithTargets`] = relData;
         }
 
+        // Find popular targets (e.g., for HAS_PARENT, find parents with many children)
+        // This helps generate better filter examples where we want entities that ARE targets
+        const popularTargets = await session.run(`
+          MATCH (source:\`${label}\`)-[r]->(target)
+          WITH type(r) AS relType, target, labels(target)[0] AS targetLabel, count(source) AS incomingCount
+          WHERE incomingCount > 1
+          RETURN relType,
+                 target.name AS popularTargetName,
+                 targetLabel,
+                 incomingCount
+          ORDER BY incomingCount DESC
+          LIMIT 10
+        `);
+
+        if (popularTargets.records.length > 0) {
+          const targetData = popularTargets.records.map(r => ({
+            relType: r.get('relType'),
+            targetName: r.get('popularTargetName'),
+            targetLabel: r.get('targetLabel'),
+            incomingCount: r.get('incomingCount').toNumber()
+          }));
+          workingExamples[`${label}.popularTargets`] = targetData;
+        }
+
       } catch (error) {
         console.warn(`Could not introspect working examples for ${label}:`, error);
       }

@@ -28,6 +28,11 @@ import {
   runEmbeddingsGenerate,
   printEmbeddingsHelp
 } from './commands/embeddings.js';
+import {
+  parseQuickstartOptions,
+  runQuickstart,
+  printQuickstartHelp
+} from './commands/quickstart.js';
 
 import { VERSION } from './version.js';
 
@@ -35,6 +40,7 @@ function printRootHelp(): void {
   console.log(`RagForge CLI v${VERSION}
 
 Quick start:
+  ragforge quickstart                # New to RagForge? Start here!
   ragforge init                      # Introspect Neo4j + generate client (uses .env)
   ragforge init --auto-detect-fields # + LLM field detection (needs GEMINI_API_KEY)
 
@@ -42,6 +48,7 @@ Connection defaults from .env in current directory:
   NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD, NEO4J_DATABASE, GEMINI_API_KEY
 
 Usage:
+  ragforge quickstart [options]      Quick setup for code RAG with defaults
   ragforge init [options]            Complete setup (introspect + generate)
   ragforge help <command>            Show detailed help for a specific command
 
@@ -56,7 +63,10 @@ Global options:
   -v, --version    Show CLI version
 
 Examples:
-  # Simple - uses .env in current directory
+  # Quick start (auto-detects TypeScript/Python, creates config, sets up Docker)
+  ragforge quickstart
+
+  # Simple init - uses .env in current directory
   ragforge init
 
   # With LLM field auto-detection
@@ -99,6 +109,9 @@ async function main(): Promise<void> {
 
       case 'help':
         switch (rest[0]) {
+          case 'quickstart':
+            printQuickstartHelp();
+            break;
           case 'init':
             printInitHelp();
             break;
@@ -115,6 +128,12 @@ async function main(): Promise<void> {
             printRootHelp();
         }
         return;
+
+      case 'quickstart': {
+        const options = await parseQuickstartOptions(rest);
+        await runQuickstart(options);
+        return;
+      }
 
       case 'init': {
         const options = await parseInitOptions(rest);

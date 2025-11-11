@@ -1,0 +1,156 @@
+source:
+  type: code
+  adapter: typescript
+  exclude:
+    - "**/node_modules/**"
+    - "**/dist/**"
+    - "**/*.test.ts"
+    - "**/*.spec.ts"
+  track_changes: true
+  options:
+    exportXml: false
+  root: .
+  include:
+    - ../packages/runtime/src/**/*.ts
+    - ../packages/core/src/**/*.ts
+    - ../packages/cli/src/**/*.ts
+watch:
+  enabled: true
+  batch_interval: 1000
+  verbose: true
+  auto_embed: false
+summarization_llm:
+  provider: gemini
+  model: gemini-2.0-flash-exp
+  temperature: 0.3
+  max_tokens: 8000
+entities:
+  - name: Scope
+    unique_field: uuid
+    vector_indexes:
+      - name: scopeSourceEmbeddings
+        field: source_embedding
+        source_field: source
+        dimension: 768
+        similarity: cosine
+        provider: gemini
+        model: text-embedding-004
+    searchable_fields:
+      - name: name
+        type: string
+      - name: file
+        type: string
+      - name: source
+        type: string
+        summarization:
+          enabled: true
+          strategy: code_analysis
+          threshold: 300
+          output_fields:
+            - purpose
+            - operation
+            - dependency
+            - concept
+            - complexity
+            - suggestion
+          rerank_use: prefer_summary
+          context_query: |
+            MATCH (n:Scope {uuid: $uuid})-[:DEFINED_IN]->(file:File)
+            OPTIONAL MATCH (n)-[:IMPORTS]->(imported:Scope)
+            OPTIONAL MATCH (caller:Scope)-[:CALLS]->(n)
+            OPTIONAL MATCH (n)-[:CALLS]->(called:Scope)
+            RETURN
+              file.path as file_path,
+              n.type as scope_type,
+              n.startLine as start_line,
+              n.endLine as end_line,
+              n.exported as is_exported,
+              collect(DISTINCT imported.name)[..10] as imports_internal,
+              collect(DISTINCT caller.name)[..10] as called_by,
+              collect(DISTINCT called.name)[..10] as calls_internal
+          batch_order_query: |
+            MATCH (n:Scope)-[:DEFINED_IN]->(file:File)
+            WHERE n.source IS NOT NULL
+              AND size(n.source) > $threshold
+            WITH file, n
+            ORDER BY file.path, n.startLine
+            RETURN n.uuid AS uuid,
+                   n.source AS fieldValue
+    relationships:
+      - type: DEFINED_IN
+        direction: outgoing
+        target: File
+        description: Scope DEFINED_IN File
+        filters:
+          - name: whereFileName
+            description: Filter scopes defined in the provided file
+            parameter: fileName
+            direction: outgoing
+      - type: CONSUMES
+        direction: outgoing
+        target: Scope
+        description: Scope CONSUMES Scope
+        filters:
+          - name: whereConsumesScope
+            description: Filter scopes that consume the provided scope
+            parameter: scopeName
+            direction: outgoing
+          - name: whereConsumedByScope
+            description: Filter scopes consumed by the provided scope
+            parameter: scopeName
+            direction: incoming
+      - type: HAS_PARENT
+        direction: outgoing
+        target: Scope
+        description: Scope HAS_PARENT Scope
+        filters:
+          - name: whereParentScope
+            description: Filter scopes with the provided parent scope
+            parameter: scopeName
+            direction: outgoing
+      - type: USES_LIBRARY
+        direction: outgoing
+        target: ExternalLibrary
+        description: Scope USES_LIBRARY ExternalLibrary
+        filters:
+          - name: whereUsesLibrary
+            description: Filter scopes that use the provided library
+            parameter: libraryName
+            direction: outgoing
+      - type: INHERITS_FROM
+        direction: outgoing
+        target: Scope
+        description: Scope INHERITS_FROM Scope
+        filters:
+          - name: whereInheritsFrom
+            description: Filter scopes that inherit from the provided scope
+            parameter: scopeName
+            direction: outgoing
+embeddings:
+  provider: gemini
+  defaults:
+    model: text-embedding-004
+    dimension: 768
+    similarity: cosine
+  entities:
+    - entity: Scope
+      pipelines:
+        - name: scopeSourceEmbeddings
+          source: source
+          target_property: source_embedding
+          model: text-embedding-004
+          dimension: 768
+          similarity: cosine
+          preprocessors:
+            - normalizeWhitespace
+          batch_size: 10
+          concurrency: 3
+          throttle_ms: 300
+name: test-quickstart
+version: 1.0.0
+description: Minimal config - quickstart will expand this
+neo4j:
+  uri: ${NEO4J_URI}
+  database: neo4j
+  username: ${NEO4J_USERNAME}
+  password: ${NEO4J_PASSWORD}

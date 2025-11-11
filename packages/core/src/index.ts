@@ -13,6 +13,7 @@ export { SchemaIntrospector } from './schema/introspector.js';
 
 // Configuration
 export { ConfigLoader } from './config/loader.js';
+export { mergeWithDefaults } from './config/merger.js';
 
 // Generators
 export { TypeGenerator } from './generator/type-generator.js';

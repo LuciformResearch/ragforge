@@ -1,0 +1,17 @@
+name: test-quickstart
+version: 1.0.0
+description: Minimal config - quickstart will expand this
+
+source:
+  type: code
+  adapter: typescript
+  root: .
+  include:
+    - "../packages/runtime/src/**/*.ts"
+    - "../packages/core/src/**/*.ts"
+    - "../packages/cli/src/**/*.ts"
+  exclude:
+    - "**/node_modules/**"
+    - "**/dist/**"
+    - "**/*.test.ts"
+    - "**/*.spec.ts"

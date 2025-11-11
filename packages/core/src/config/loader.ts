@@ -8,6 +8,7 @@ import { promises as fs } from 'fs';
 import YAML from 'yaml';
 import { z } from 'zod';
 import { RagForgeConfig } from '../types/config.js';
+import { mergeWithDefaults } from './merger.js';
 
 // Zod schema for validation
 const FieldSummarizationConfigSchema = z.object({
@@ -264,5 +265,26 @@ export class ConfigLoader {
 
     const parsed = YAML.parse(content);
     return RagForgeConfigSchema.parse(parsed) as RagForgeConfig;
+  }
+
+  /**
+   * Load configuration with defaults merged and environment variable substitution
+   * This is the recommended way to load configs - it merges adapter-specific defaults
+   */
+  static async loadWithDefaults(filePath: string): Promise<RagForgeConfig> {
+    let content = await fs.readFile(filePath, 'utf-8');
+
+    // Replace ${ENV_VAR} with process.env.ENV_VAR
+    content = content.replace(/\$\{([^}]+)\}/g, (_, varName) => {
+      return process.env[varName] || '';
+    });
+
+    const parsed = YAML.parse(content);
+
+    // Merge with adapter-specific defaults
+    const merged = await mergeWithDefaults(parsed);
+
+    // Validate with Zod
+    return RagForgeConfigSchema.parse(merged) as RagForgeConfig;
   }
 }

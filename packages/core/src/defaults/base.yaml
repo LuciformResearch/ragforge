@@ -1,0 +1,8 @@
+# RagForge Base Defaults
+# Applied to all configurations regardless of source type
+#
+# RagForge is a generic meta-framework that can introspect any Neo4j database
+# and generate query frameworks. Base defaults are intentionally minimal.
+#
+# Adapter-specific defaults (e.g., code-typescript.yaml) contain the bulk
+# of the configuration for specific use cases.
