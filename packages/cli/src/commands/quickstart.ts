@@ -56,6 +56,7 @@ export interface QuickstartOptions {
   rootDir: string;       // Root directory for the generated client
   geminiKey?: string;    // Gemini API key for embeddings/summarization
   dev?: boolean;         // Development mode: use local file: dependencies instead of npm packages
+  debug?: boolean;       // Enable debug logging
 }
 
 export function printQuickstartHelp(): void {
@@ -121,7 +122,8 @@ export async function parseQuickstartOptions(args: string[]): Promise<Quickstart
     ingest: true,        // Default: run ingestion
     embeddings: true,    // Default: generate embeddings (can be slow but enables semantic search)
     force: false,
-    dev: false           // Default: use npm packages (not local file: dependencies)
+    dev: false,          // Default: use npm packages (not local file: dependencies)
+    debug: false         // Default: no debug logging
   };
 
   for (let i = 0; i < args.length; i += 1) {
@@ -160,6 +162,9 @@ export async function parseQuickstartOptions(args: string[]): Promise<Quickstart
       case '--dev':
         options.dev = true;
         break;
+      case '--debug':
+        options.debug = true;
+        break;
       case '-h':
       case '--help':
         printQuickstartHelp();
@@ -190,7 +195,8 @@ export async function parseQuickstartOptions(args: string[]): Promise<Quickstart
     force: options.force ?? false,
     rootDir,
     geminiKey,
-    dev: options.dev ?? false
+    dev: options.dev ?? false,
+    debug: options.debug ?? false
   };
 }
 
@@ -397,13 +403,15 @@ export async function runQuickstart(options: QuickstartOptions): Promise<void> {
   await log('═'.repeat(60));
   await log('');
 
-  // Mask sensitive data for logging
-  const safeOptions = { ...options };
-  if (safeOptions.geminiKey) {
-    safeOptions.geminiKey = safeOptions.geminiKey.substring(0, 3) + '***';
+  // Debug: Show parsed options (only if --debug)
+  if (options.debug) {
+    const safeOptions = { ...options };
+    if (safeOptions.geminiKey) {
+      safeOptions.geminiKey = safeOptions.geminiKey.substring(0, 3) + '***';
+    }
+    await log(`🔧 DEBUG: Parsed options = ${JSON.stringify(safeOptions, null, 2)}`);
+    await log('');
   }
-  await log(`🔧 DEBUG: Parsed options = ${JSON.stringify(safeOptions, null, 2)}`);
-  await log('');
 
   // Separate workspace (where RagForge project is generated) from source (code to analyze)
   const workspacePath = process.cwd(); // Current directory = RagForge workspace
@@ -487,13 +495,66 @@ export async function runQuickstart(options: QuickstartOptions): Promise<void> {
   // Step 7: Check if Docker container already exists
   // Generate unique container name based on workspace path (with hash to avoid conflicts)
   const containerName = generateContainerName(workspacePath);
-  const containerExists = await checkContainerExists(containerName);
+  let containerExists = await checkContainerExists(containerName);
+
+  if (options.debug) {
+    console.log(`🔍 DEBUG: Container name: ${containerName}`);
+    console.log(`🔍 DEBUG: Container exists: ${containerExists}`);
+  }
 
   // If --force flag is set, remove existing container
   if (options.force && containerExists) {
     console.log(`🗑️  Removing existing container: ${containerName}...`);
+
+    // Check volumes before removal
+    const volumePrefix = containerName.replace(/-neo4j$/, '');
+    let volumeNames: string[] = [];
+
+    if (options.debug) {
+      try {
+        const { stdout: volumes } = await execAsync(`docker volume ls --format "{{.Name}}" | grep "${volumePrefix}"`);
+        if (volumes.trim()) {
+          volumeNames = volumes.trim().split('\n');
+          console.log(`🔍 DEBUG: Found existing volumes:\n${volumes.trim()}`);
+        } else {
+          console.log(`🔍 DEBUG: No existing volumes found containing: ${volumePrefix}`);
+        }
+      } catch (err) {
+        console.log(`🔍 DEBUG: No volumes found or error checking volumes`);
+      }
+    } else {
+      // Still need to get volume names even if not debug mode
+      try {
+        const { stdout: volumes } = await execAsync(`docker volume ls --format "{{.Name}}" | grep "${volumePrefix}"`);
+        if (volumes.trim()) {
+          volumeNames = volumes.trim().split('\n');
+        }
+      } catch {
+        // Ignore errors
+      }
+    }
+
     await removeContainer(containerName);
+    containerExists = false; // Update flag after removal
     console.log('✓ Container removed');
+
+    // Remove volumes to force clean state (important: old password in volume prevents new password from working)
+    if (volumeNames.length > 0) {
+      console.log('🗑️  Removing Docker volumes (to allow password change)...');
+      for (const volumeName of volumeNames) {
+        try {
+          await execAsync(`docker volume rm ${volumeName}`);
+          if (options.debug) {
+            console.log(`🔍 DEBUG: Removed volume: ${volumeName}`);
+          }
+        } catch (err: any) {
+          if (options.debug) {
+            console.log(`🔍 DEBUG: Failed to remove volume ${volumeName}: ${err.message}`);
+          }
+        }
+      }
+      console.log('✓ Volumes removed');
+    }
     console.log('');
   }
 
@@ -523,6 +584,8 @@ export async function runQuickstart(options: QuickstartOptions): Promise<void> {
       // If container exists, we must reuse existing password
       if (containerExists) {
         console.log('   Reusing existing Neo4j credentials for existing container');
+      } else {
+        console.log('   Using existing Neo4j credentials from .env');
       }
     }
   } catch {
@@ -573,13 +636,17 @@ export async function runQuickstart(options: QuickstartOptions): Promise<void> {
   // The password might have been generated and written to .env, so we need to read it back
   const envPassword = getEnv(['NEO4J_PASSWORD'], true);
   if (envPassword && envPassword !== neo4jPassword) {
-    console.log(`🔍 DEBUG: Password mismatch! Variable: ${neo4jPassword.substring(0, 3)}***, Env: ${envPassword.substring(0, 3)}***`);
+    if (options.debug) {
+      console.log(`🔍 DEBUG: Password mismatch! Variable: ${neo4jPassword}, Env: ${envPassword}`);
+    }
     neo4jPassword = envPassword;
   }
-  console.log(`🔍 DEBUG: Using password: ${neo4jPassword.substring(0, 3)}*** from ${envPassword ? 'env' : 'variable'}`);
+  if (options.debug) {
+    console.log(`🔍 DEBUG: Using password: ${neo4jPassword} from ${envPassword ? 'env' : 'variable'}`);
+  }
 
   // Step 9: Setup Docker container (reuse existing or create new)
-  const dockerInfo = await setupDockerContainer(workspacePath, containerName);
+  const dockerInfo = await setupDockerContainer(workspacePath, containerName, options.debug);
 
   // Update .env with correct URI if ports changed
   if (dockerInfo.uri !== neo4jUri) {
@@ -606,7 +673,7 @@ export async function runQuickstart(options: QuickstartOptions): Promise<void> {
   console.log('');
 
   // Step 10: Clean existing database
-  await cleanDatabase(neo4jUri, neo4jUsername, neo4jPassword, neo4jDatabase);
+  await cleanDatabase(neo4jUri, neo4jUsername, neo4jPassword, neo4jDatabase, 10, options.debug);
   console.log('');
 
   // Step 11: Ingest code if requested (default: true)
@@ -773,11 +840,6 @@ services:
     volumes:
       - ${containerName.replace(/-neo4j$/, '')}_neo4j_data:/data
       - ${containerName.replace(/-neo4j$/, '')}_neo4j_logs:/logs
-    healthcheck:
-      test: ["CMD", "cypher-shell", "-u", "\${NEO4J_USERNAME:-neo4j}", "-p", "\${NEO4J_PASSWORD}", "RETURN 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
 
 volumes:
   ${containerName.replace(/-neo4j$/, '')}_neo4j_data:
@@ -920,7 +982,8 @@ async function checkDockerAvailable(): Promise<boolean> {
  */
 async function setupDockerContainer(
   projectPath: string,
-  containerName: string
+  containerName: string,
+  debug: boolean = false
 ): Promise<{ bolt: number; http: number; uri: string }> {
   console.log('🐳 Setting up Neo4j container...');
 
@@ -1002,8 +1065,9 @@ async function setupDockerContainer(
       }
 
       // DEBUG: Show password being passed to docker
-      if (envVars.NEO4J_PASSWORD) {
-        console.log(`🔍 DEBUG: Docker will use password from .env: ${envVars.NEO4J_PASSWORD.substring(0, 3)}***`);
+      if (debug && envVars.NEO4J_PASSWORD) {
+        console.log(`🔍 DEBUG: Docker will use password from .env: ${envVars.NEO4J_PASSWORD}`);
+        console.log(`🔍 DEBUG: All env vars passed to docker: ${JSON.stringify(Object.keys(envVars))}`);
       }
 
       // Merge with current env and launch docker compose
@@ -1052,17 +1116,23 @@ async function waitForNeo4j(uri: string, username: string, password: string, max
 /**
  * Drop/clean existing database with retry logic
  */
-async function cleanDatabase(uri: string, username: string, password: string, database?: string, maxRetries = 10): Promise<void> {
+async function cleanDatabase(uri: string, username: string, password: string, database?: string, maxRetries = 10, debug: boolean = false): Promise<void> {
   console.log('🗑️  Cleaning existing data...');
-  console.log(`🔍 DEBUG: Connecting with uri=${uri}, username=${username}, password=${password.substring(0, 3)}***, database=${database}`);
+  if (debug) {
+    console.log(`🔍 DEBUG: Connecting with uri=${uri}, username=${username}, password=${password}, database=${database}`);
+  }
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     const client = new Neo4jClient({ uri, username, password, database });
 
     try {
-      console.log(`🔍 DEBUG: Attempt ${attempt}/${maxRetries} - Verifying connectivity...`);
+      if (debug) {
+        console.log(`🔍 DEBUG: Attempt ${attempt}/${maxRetries} - Verifying connectivity...`);
+      }
       await client.verifyConnectivity();
-      console.log(`🔍 DEBUG: Connectivity verified, running delete query...`);
+      if (debug) {
+        console.log(`🔍 DEBUG: Connectivity verified, running delete query...`);
+      }
 
       // Delete all code-related nodes
       await client.run('MATCH (n) WHERE n:Scope OR n:File OR n:Directory OR n:ExternalLibrary OR n:Project DETACH DELETE n');
@@ -1071,8 +1141,10 @@ async function cleanDatabase(uri: string, username: string, password: string, da
       await client.close();
       return; // Success
     } catch (error: any) {
-      console.log(`🔍 DEBUG: Attempt ${attempt} failed with error: ${error.message}`);
-      console.log(`🔍 DEBUG: Error code: ${error.code}, name: ${error.name}`);
+      if (debug) {
+        console.log(`🔍 DEBUG: Attempt ${attempt} failed with error: ${error.message}`);
+        console.log(`🔍 DEBUG: Error code: ${error.code}, name: ${error.name}`);
+      }
       await client.close();
 
       // If this was the last retry, throw the error
