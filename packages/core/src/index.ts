@@ -14,6 +14,7 @@ export { SchemaIntrospector } from './schema/introspector.js';
 // Configuration
 export { ConfigLoader } from './config/loader.js';
 export { mergeWithDefaults } from './config/merger.js';
+export { writeConfigWithDefaults, writeMinimalConfig, type WriteOptions } from './config/writer.js';
 
 // Generators
 export { TypeGenerator } from './generator/type-generator.js';

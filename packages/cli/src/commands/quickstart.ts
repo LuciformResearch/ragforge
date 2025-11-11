@@ -20,6 +20,7 @@ import {
   CodeGenerator,
   TypeGenerator,
   mergeWithDefaults,
+  writeConfigWithDefaults,
   type RagForgeConfig,
   type GraphSchema,
   SchemaIntrospector
@@ -44,11 +45,14 @@ import { promisify } from 'util';
 const execAsync = promisify(exec);
 
 export interface QuickstartOptions {
-  adapter?: string;      // typescript, python, javascript
+  sourceType?: 'code' | 'documents' | 'chat';  // Type of source (for future multi-domain support)
+  language?: string;     // typescript, python, javascript (alias for adapter)
+  adapter?: string;      // DEPRECATED: use language instead
+  root?: string;         // Root directory to analyze (overrides cwd)
   ingest?: boolean;      // Run initial ingestion (default: true)
   embeddings?: boolean;  // Generate embeddings after ingest (default: false)
   force?: boolean;       // Overwrite existing config
-  rootDir: string;       // Root directory for the project
+  rootDir: string;       // Root directory for the generated client
   geminiKey?: string;    // Gemini API key for embeddings/summarization
 }
 
@@ -58,6 +62,9 @@ export function printQuickstartHelp(): void {
 
 Description:
   One-command setup for code RAG with everything included!
+
+  The RagForge workspace (config, Docker, generated client) is created in the
+  current directory. Use --root to specify a different source code location.
 
   This command will:
   ✓ Auto-detect your project type (TypeScript, Python, etc.)
@@ -75,21 +82,28 @@ Environment variables (from .env):
   NEO4J_PASSWORD       Neo4j password (will be auto-generated if missing)
 
 Options:
-  --adapter <type>     Force adapter type (typescript, python, javascript)
+  --source-type <type> Source type: code, documents, chat (default: code)
+  --root <path>        Source code directory to analyze (default: current directory)
+  --language <lang>    Force language: typescript, python, javascript, go (auto-detected if omitted)
+  --adapter <type>     DEPRECATED: use --language instead
   --no-ingest          Skip code ingestion (default: ingestion enabled)
   --no-embeddings      Skip embeddings generation (default: embeddings enabled)
   --force              Overwrite existing configuration
   -h, --help           Show this help
 
 Examples:
-  # Complete setup with ingestion and embeddings (recommended)
+  # Analyze code in current directory (workspace = source)
   ragforge quickstart
+
+  # Separate workspace: analyze code from ../my-project, generate files here
+  mkdir ragforge-analysis && cd ragforge-analysis
+  ragforge quickstart --root ../my-project
+
+  # Explicit language and source type
+  ragforge quickstart --source-type code --language typescript --root /path/to/code
 
   # Skip embeddings for faster setup (semantic search won't work)
   ragforge quickstart --no-embeddings
-
-  # Force TypeScript adapter
-  ragforge quickstart --adapter typescript
 
   # Setup only (no ingestion, no embeddings)
   ragforge quickstart --no-ingest --no-embeddings
@@ -100,8 +114,9 @@ export async function parseQuickstartOptions(args: string[]): Promise<Quickstart
   const rootDir = ensureEnvLoaded(import.meta.url);
 
   const options: Partial<QuickstartOptions> = {
-    ingest: true,       // Default: run ingestion
-    embeddings: true,   // Default: generate embeddings (can be slow but enables semantic search)
+    sourceType: 'code',  // Default to code
+    ingest: true,        // Default: run ingestion
+    embeddings: true,    // Default: generate embeddings (can be slow but enables semantic search)
     force: false
   };
 
@@ -109,8 +124,19 @@ export async function parseQuickstartOptions(args: string[]): Promise<Quickstart
     const arg = args[i];
 
     switch (arg) {
+      case '--source-type':
+        options.sourceType = args[++i] as 'code' | 'documents' | 'chat';
+        break;
+      case '--root':
+        options.root = args[++i];
+        break;
+      case '--language':
+        options.language = args[++i];
+        break;
       case '--adapter':
+        // DEPRECATED: support for backward compatibility
         options.adapter = args[++i];
+        console.warn('⚠️  --adapter is deprecated, use --language instead');
         break;
       case '--ingest':
         options.ingest = true;
@@ -137,10 +163,21 @@ export async function parseQuickstartOptions(args: string[]): Promise<Quickstart
     }
   }
 
+  // Validate source type
+  if (options.sourceType && !['code', 'documents', 'chat'].includes(options.sourceType)) {
+    throw new Error(`Invalid --source-type: ${options.sourceType}. Must be one of: code, documents, chat`);
+  }
+
   const geminiKey = getEnv(['GEMINI_API_KEY'], true);
 
+  // Merge language and adapter (backward compat)
+  const finalLanguage = options.language || options.adapter;
+
   return {
-    adapter: options.adapter,
+    sourceType: options.sourceType ?? 'code',
+    language: finalLanguage,
+    adapter: finalLanguage, // Keep for backward compat
+    root: options.root,
     ingest: options.ingest ?? true,
     embeddings: options.embeddings ?? true,
     force: options.force ?? false,
@@ -218,18 +255,100 @@ async function checkExistingConfig(projectPath: string): Promise<{ exists: boole
 }
 
 /**
+ * Detect if source path is a monorepo
+ */
+async function isMonorepo(sourcePath: string): Promise<boolean> {
+  // Check for monorepo indicators in source path or parent
+  const indicators = [
+    'lerna.json',
+    'pnpm-workspace.yaml',
+    'nx.json',
+    'turbo.json'
+  ];
+
+  // Check in source path
+  for (const indicator of indicators) {
+    try {
+      await fs.access(path.join(sourcePath, indicator));
+      return true;
+    } catch {
+      // File doesn't exist
+    }
+  }
+
+  // Check in parent directory
+  const parentDir = path.dirname(sourcePath);
+  for (const indicator of indicators) {
+    try {
+      await fs.access(path.join(parentDir, indicator));
+      return true;
+    } catch {
+      // File doesn't exist
+    }
+  }
+
+  // Check if sourcePath itself contains multiple package.json files (direct monorepo)
+  try {
+    const entries = await fs.readdir(sourcePath, { withFileTypes: true });
+    const subdirs = entries.filter(e => e.isDirectory() && !e.name.startsWith('.'));
+
+    let packageCount = 0;
+    for (const dir of subdirs) {
+      try {
+        await fs.access(path.join(sourcePath, dir.name, 'package.json'));
+        packageCount++;
+        if (packageCount >= 2) {
+          return true; // Found 2+ packages, it's a monorepo
+        }
+      } catch {
+        // No package.json in this directory
+      }
+    }
+  } catch {
+    // Can't read directory
+  }
+
+  // Check if there's a "packages" subdirectory with multiple packages
+  try {
+    const packagesDir = path.join(sourcePath, 'packages');
+    await fs.access(packagesDir);
+    const entries = await fs.readdir(packagesDir, { withFileTypes: true });
+    const subdirs = entries.filter(e => e.isDirectory());
+    // If there are multiple subdirectories, likely a monorepo
+    return subdirs.length >= 2;
+  } catch {
+    // No packages directory
+  }
+
+  return false;
+}
+
+/**
  * Create minimal config for new projects
  */
-function createMinimalConfig(
+async function createMinimalConfig(
   projectName: string,
   adapter: string,
-  projectPath: string
-): Partial<RagForgeConfig> {
-  const includePatterns: { [key: string]: string[] } = {
+  sourcePath: string
+): Promise<Partial<RagForgeConfig>> {
+  // Check if this is a monorepo
+  const monorepo = await isMonorepo(sourcePath);
+
+  // Patterns for simple projects (src at root)
+  const simplePatterns: { [key: string]: string[] } = {
     typescript: ['src/**/*.ts', 'lib/**/*.ts'],
     javascript: ['src/**/*.js', 'lib/**/*.js'],
     python: ['src/**/*.py', '**/*.py']
   };
+
+  // Patterns for monorepos (src anywhere in tree)
+  const monorepoPatterns: { [key: string]: string[] } = {
+    typescript: ['**/src/**/*.ts', '**/lib/**/*.ts'],
+    javascript: ['**/src/**/*.js', '**/lib/**/*.js'],
+    python: ['**/src/**/*.py', '**/*.py']
+  };
+
+  const includePatterns = monorepo ? monorepoPatterns : simplePatterns;
 
   return {
     name: projectName,
@@ -238,8 +357,8 @@ function createMinimalConfig(
     source: {
       type: 'code',
       adapter: adapter as 'typescript' | 'python',
-      root: '.',
-      include: includePatterns[adapter] || ['src/**/*']
+      root: sourcePath, // Absolute path to source code
+      include: includePatterns[adapter] || (monorepo ? ['**/*.ts'] : ['src/**/*'])
     },
     neo4j: {
       uri: '${NEO4J_URI}',
@@ -248,32 +367,6 @@ function createMinimalConfig(
       password: '${NEO4J_PASSWORD}'
     }
   };
-}
-
-/**
- * Write expanded config to file with educational comments
- */
-async function writeExpandedConfig(
-  configPath: string,
-  config: RagForgeConfig
-): Promise<void> {
-  // Create backup if file exists
-  try {
-    await fs.access(configPath);
-    const backupPath = `${configPath}.backup`;
-    await fs.copyFile(configPath, backupPath);
-    console.log(`📋 Backup saved to: ${backupPath}`);
-  } catch {
-    // No existing file, no backup needed
-  }
-
-  // Write expanded config
-  const yamlContent = YAML.stringify(config, {
-    indent: 2,
-    lineWidth: 0 // Don't wrap long lines
-  });
-
-  await fs.writeFile(configPath, yamlContent, 'utf-8');
 }
 
 /**
@@ -286,10 +379,25 @@ export async function runQuickstart(options: QuickstartOptions): Promise<void> {
   console.log('═'.repeat(60));
   console.log('');
 
-  const projectPath = process.cwd();
+  // Separate workspace (where RagForge project is generated) from source (code to analyze)
+  const workspacePath = process.cwd(); // Current directory = RagForge workspace
+  const sourcePath = options.root ? path.resolve(options.root) : workspacePath;
 
-  // Step 1: Check for existing config
-  const { exists: configExists, path: configPath } = await checkExistingConfig(projectPath);
+  // Validate that the source path exists
+  try {
+    await fs.access(sourcePath);
+  } catch {
+    throw new Error(`Source directory does not exist: ${sourcePath}`);
+  }
+
+  console.log(`📁 Workspace: ${workspacePath}`);
+  if (sourcePath !== workspacePath) {
+    console.log(`📂 Source code: ${sourcePath}`);
+  }
+  console.log('');
+
+  // Step 1: Check for existing config in workspace
+  const { exists: configExists, path: configPath } = await checkExistingConfig(workspacePath);
 
   if (configExists && !options.force) {
     console.log('⚠️  Configuration already exists:', configPath);
@@ -319,10 +427,10 @@ export async function runQuickstart(options: QuickstartOptions): Promise<void> {
   // Step 3: Detect or validate adapter if still not set
   if (!adapter) {
     console.log('🔍 Auto-detecting project type...');
-    const detected = await detectAdapter(projectPath);
+    const detected = await detectAdapter(sourcePath);
     if (!detected) {
       throw new Error(
-        'Could not auto-detect project type. Please specify with --adapter (typescript, python, javascript)'
+        'Could not auto-detect project type. Please specify with --language (typescript, python, javascript)'
       );
     }
     adapter = detected;
@@ -331,8 +439,8 @@ export async function runQuickstart(options: QuickstartOptions): Promise<void> {
 
   // Step 4: Create minimal config if new project
   if (!configExists) {
-    const projectName = path.basename(projectPath);
-    userConfig = createMinimalConfig(projectName, adapter, projectPath);
+    const projectName = path.basename(sourcePath);
+    userConfig = await createMinimalConfig(projectName, adapter, sourcePath);
   }
 
   console.log('');
@@ -343,10 +451,11 @@ export async function runQuickstart(options: QuickstartOptions): Promise<void> {
   console.log(`✓ Config expanded with ${adapter} defaults`);
   console.log('');
 
-  // Step 6: Write expanded YAML
+  // Step 6: Write expanded YAML with educational comments
   console.log('💾 Writing expanded configuration...');
-  await writeExpandedConfig(configPath, mergedConfig);
+  await writeConfigWithDefaults(configPath, userConfig, mergedConfig);
   console.log(`✓ Configuration saved to: ${configPath}`);
+  console.log('   Fields marked as "auto-added" come from adapter defaults');
   console.log('');
 
   // Step 7: Check if Docker container already exists
@@ -354,7 +463,7 @@ export async function runQuickstart(options: QuickstartOptions): Promise<void> {
   const containerExists = await checkContainerExists(containerName);
 
   // Step 8: Setup Neo4j credentials (smart detection)
-  const envPath = path.join(projectPath, '.env');
+  const envPath = path.join(workspacePath, '.env');
   let neo4jPassword = '';
   let existingEnvContent = '';
   let needsNeo4jCredentials = false;
@@ -425,8 +534,17 @@ export async function runQuickstart(options: QuickstartOptions): Promise<void> {
   const neo4jDatabase = getEnv(['NEO4J_DATABASE'], true) || 'neo4j';
   const geminiKey = getEnv(['GEMINI_API_KEY'], true);
 
+  // IMPORTANT: Reload password from env after writing .env file
+  // The password might have been generated and written to .env, so we need to read it back
+  const envPassword = getEnv(['NEO4J_PASSWORD'], true);
+  if (envPassword && envPassword !== neo4jPassword) {
+    console.log(`🔍 DEBUG: Password mismatch! Variable: ${neo4jPassword.substring(0, 3)}***, Env: ${envPassword.substring(0, 3)}***`);
+    neo4jPassword = envPassword;
+  }
+  console.log(`🔍 DEBUG: Using password: ${neo4jPassword.substring(0, 3)}*** from ${envPassword ? 'env' : 'variable'}`);
+
   // Step 9: Setup Docker container (reuse existing or create new)
-  const dockerInfo = await setupDockerContainer(projectPath, mergedConfig.name);
+  const dockerInfo = await setupDockerContainer(workspacePath, mergedConfig.name);
 
   // Update .env with correct URI if ports changed
   if (dockerInfo.uri !== neo4jUri) {
@@ -446,8 +564,10 @@ export async function runQuickstart(options: QuickstartOptions): Promise<void> {
   // Step 9: Wait for Neo4j to be ready
   await waitForNeo4j(neo4jUri, neo4jUsername, neo4jPassword);
 
-  // Add extra wait time for Neo4j to fully initialize
-  await new Promise(resolve => setTimeout(resolve, 3000));
+  // Add extra wait time for Neo4j to fully initialize auth system
+  // Neo4j might accept connection but still be configuring passwords
+  console.log('   Waiting for Neo4j auth system to stabilize...');
+  await new Promise(resolve => setTimeout(resolve, 10000));
   console.log('');
 
   // Step 10: Clean existing database
@@ -470,7 +590,7 @@ export async function runQuickstart(options: QuickstartOptions): Promise<void> {
   // Step 12: Generate TypeScript client
   const generatedPath = await generateClient(
     mergedConfig,
-    projectPath,
+    workspacePath,
     neo4jUri,
     neo4jUsername,
     neo4jPassword,
@@ -478,10 +598,25 @@ export async function runQuickstart(options: QuickstartOptions): Promise<void> {
     geminiKey
   );
 
-  // Step 13: Copy config to generated folder (needed for embeddings scripts)
+  // Step 13: Copy config to generated folder with absolute paths
   const generatedConfigPath = path.join(generatedPath, 'ragforge.config.yaml');
-  await fs.copyFile(configPath, generatedConfigPath);
-  console.log('✓ Config copied to generated folder');
+
+  // Read the config and convert relative paths to absolute
+  const configContent = await fs.readFile(configPath, 'utf-8');
+  const configForGenerated = YAML.parse(configContent);
+
+  // Convert root path to absolute if it's relative
+  if (configForGenerated.source?.root) {
+    const rootPath = configForGenerated.source.root;
+    if (!path.isAbsolute(rootPath)) {
+      // Resolve relative to workspace, not to generated/
+      configForGenerated.source.root = path.resolve(workspacePath, rootPath);
+    }
+  }
+
+  // Write adjusted config
+  await fs.writeFile(generatedConfigPath, YAML.stringify(configForGenerated), 'utf-8');
+  console.log('✓ Config copied to generated folder (paths adjusted)');
 
   // Step 14: Create vector indexes and generate embeddings if requested
   if (options.embeddings) {
@@ -507,7 +642,7 @@ export async function runQuickstart(options: QuickstartOptions): Promise<void> {
   console.log('📁 Generated files:');
   console.log(`   • Config:         ${configPath}`);
   console.log(`   • Client:         ${generatedPath}`);
-  console.log(`   • Docker Compose: ${path.join(projectPath, 'docker-compose.yml')}`);
+  console.log(`   • Docker Compose: ${path.join(workspacePath, 'docker-compose.yml')}`);
   console.log(`   • Environment:    ${envPath}`);
   console.log('');
 
@@ -602,7 +737,13 @@ volumes:
  */
 async function isPortAvailable(port: number): Promise<boolean> {
   try {
-    // Check if port is in use by system process
+    // Check if port is in use by ANY process (using ss which doesn't require sudo)
+    const { stdout: ssOut } = await execAsync(`ss -tuln | grep ':${port} ' || echo ""`);
+    if (ssOut.trim().length > 0) {
+      return false; // Port in use
+    }
+
+    // Fallback: Check with lsof (might not see all processes without sudo)
     const { stdout: lsofOut } = await execAsync(`lsof -i :${port} -t 2>/dev/null || echo ""`);
     if (lsofOut.trim().length > 0) {
       return false; // Port in use by system process
@@ -799,6 +940,11 @@ async function setupDockerContainer(
         }
       }
 
+      // DEBUG: Show password being passed to docker
+      if (envVars.NEO4J_PASSWORD) {
+        console.log(`🔍 DEBUG: Docker will use password from .env: ${envVars.NEO4J_PASSWORD.substring(0, 3)}***`);
+      }
+
       // Merge with current env and launch docker compose
       await execAsync('docker compose up -d', {
         cwd: projectPath,
@@ -816,16 +962,22 @@ async function setupDockerContainer(
 
 /**
  * Wait for Neo4j to be ready
+ *
+ * IMPORTANT: We only check if the port is open, NOT auth.
+ * Auth verification attempts can trigger rate limiting before the password is fully configured.
  */
 async function waitForNeo4j(uri: string, username: string, password: string, maxRetries = 30): Promise<void> {
   console.log('⏳ Waiting for Neo4j to be ready...');
 
+  // Extract port from URI (bolt://localhost:7687 -> 7687)
+  const port = parseInt(uri.split(':').pop() || '7687');
+  const host = uri.includes('localhost') ? 'localhost' : uri.split('//')[1].split(':')[0];
+
   for (let i = 0; i < maxRetries; i++) {
     try {
-      const client = new Neo4jClient({ uri, username, password });
-      await client.verifyConnectivity();
-      await client.close();
-      console.log('✓ Neo4j is ready');
+      // Just check if port is open with a simple TCP connection
+      await execAsync(`timeout 1 bash -c 'cat < /dev/null > /dev/tcp/${host}/${port}'`);
+      console.log('✓ Neo4j port is open');
       return;
     } catch {
       // Wait 1 second before retrying
@@ -841,12 +993,15 @@ async function waitForNeo4j(uri: string, username: string, password: string, max
  */
 async function cleanDatabase(uri: string, username: string, password: string, database?: string, maxRetries = 10): Promise<void> {
   console.log('🗑️  Cleaning existing data...');
+  console.log(`🔍 DEBUG: Connecting with uri=${uri}, username=${username}, password=${password.substring(0, 3)}***, database=${database}`);
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     const client = new Neo4jClient({ uri, username, password, database });
 
     try {
+      console.log(`🔍 DEBUG: Attempt ${attempt}/${maxRetries} - Verifying connectivity...`);
       await client.verifyConnectivity();
+      console.log(`🔍 DEBUG: Connectivity verified, running delete query...`);
 
       // Delete all code-related nodes
       await client.run('MATCH (n) WHERE n:Scope OR n:File OR n:Directory OR n:ExternalLibrary OR n:Project DETACH DELETE n');
@@ -855,6 +1010,8 @@ async function cleanDatabase(uri: string, username: string, password: string, da
       await client.close();
       return; // Success
     } catch (error: any) {
+      console.log(`🔍 DEBUG: Attempt ${attempt} failed with error: ${error.message}`);
+      console.log(`🔍 DEBUG: Error code: ${error.code}, name: ${error.name}`);
       await client.close();
 
       // If this was the last retry, throw the error
