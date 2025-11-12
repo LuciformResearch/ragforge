@@ -11,6 +11,7 @@
 import { LLMProviderAdapter, EmbeddingProviderAdapter } from './provider-adapter.js';
 import type { LLM, BaseEmbedding } from 'llamaindex';
 import { LuciformXMLParser } from '@luciformresearch/xmlparser';
+import type { EntityContext, EntityField } from '../types/entity-context.js';
 
 // ===== CORE INTERFACES =====
 
@@ -101,7 +102,8 @@ export interface CacheConfig {
  */
 export interface LLMStructuredCallConfig<TInput = any, TOutput = any> {
   // === INPUTS ===
-  inputFields: (string | InputFieldConfig)[];
+  inputFields?: (string | InputFieldConfig)[]; // Optional if entityContext is provided
+  entityContext?: EntityContext; // Use entity schema for automatic field formatting
   inputContext?: InputContextConfig;
   contextData?: Record<string, any>;
 
@@ -230,8 +232,8 @@ export class StructuredLLMExecutor {
   // ===== PRIVATE METHODS =====
 
   private validateLLMConfig<T>(config: LLMStructuredCallConfig<T, any>): void {
-    if (!config.inputFields || config.inputFields.length === 0) {
-      throw new Error('inputFields is required and must not be empty');
+    if (!config.inputFields && !config.entityContext) {
+      throw new Error('Either inputFields or entityContext is required');
     }
 
     if (!config.outputSchema || Object.keys(config.outputSchema).length === 0) {
@@ -299,6 +301,22 @@ export class StructuredLLMExecutor {
     config: LLMStructuredCallConfig<T, any>
   ): number {
     let tokens = 0;
+
+    // If using EntityContext, estimate based on entity fields
+    if (config.entityContext) {
+      for (const field of config.entityContext.fields) {
+        const value = (item as any)[field.name];
+        if (typeof value === 'string') {
+          tokens += Math.ceil(value.length / 4);
+        } else if (value) {
+          tokens += 50;
+        }
+      }
+      return tokens;
+    }
+
+    // Otherwise use inputFields
+    if (!config.inputFields) return 100; // Default estimate
 
     for (const fieldConfig of config.inputFields) {
       const fieldName = typeof fieldConfig === 'string' ? fieldConfig : fieldConfig.name;
@@ -404,10 +422,20 @@ export class StructuredLLMExecutor {
     items: T[],
     config: LLMStructuredCallConfig<T, any>
   ): string {
+    // Use EntityContext formatting if provided (same as LLMReranker)
+    if (config.entityContext) {
+      return this.formatItemsWithEntityContext(items, config.entityContext);
+    }
+
+    // Fall back to manual field config
+    if (!config.inputFields) {
+      throw new Error('Either entityContext or inputFields must be provided');
+    }
+
     return items.map((item, index) => {
       const lines: string[] = [`[Item ${index}]`];
 
-      for (const fieldConfig of config.inputFields) {
+      for (const fieldConfig of config.inputFields!) {
         const fieldName = typeof fieldConfig === 'string' ? fieldConfig : fieldConfig.name;
         let value = (item as any)[fieldName];
 
@@ -435,6 +463,142 @@ export class StructuredLLMExecutor {
 
       return lines.join('\n');
     }).join('\n\n');
+  }
+
+  /**
+   * Format items using EntityContext (same logic as LLMReranker)
+   */
+  private formatItemsWithEntityContext<T>(
+    items: T[],
+    entityContext: EntityContext
+  ): string {
+    const DEFAULT_FIELD_MAX = 2500;
+    const DEFAULT_HEADER_MAX = 120;
+
+    return items.map((item, index) => {
+      const entity = item as any;
+      const lines: string[] = [];
+
+      // Render required fields in header
+      const requiredFields = entityContext.fields.filter(f => f.required);
+      const headerParts = requiredFields.map(field => {
+        const rawValue = entity[field.name];
+        if (this.shouldSkipField(field.name, rawValue)) {
+          return field.name;
+        }
+        const headerValue = this.formatValueWithLength(rawValue, DEFAULT_HEADER_MAX);
+        return headerValue ?? field.name;
+      });
+      lines.push(`[${index}] ${headerParts.join(' - ')}`);
+
+      // Render optional fields
+      const optionalFields = entityContext.fields.filter(f => !f.required);
+      for (const field of optionalFields) {
+        const value = this.getFieldValue(entity, field);
+        if (!value || this.shouldSkipField(field.name, value)) {
+          continue;
+        }
+
+        const label = field.label || field.name;
+        const printable = this.formatArrayOrValue(value, field, DEFAULT_FIELD_MAX);
+        if (printable) {
+          lines.push(`${label}: ${printable}`);
+        }
+      }
+
+      // Render enrichment fields (relationships)
+      for (const enrichment of entityContext.enrichments) {
+        const value = entity[enrichment.fieldName];
+        if (value && Array.isArray(value) && value.length > 0) {
+          const maxItems = enrichment.maxItems || 10;
+          const items = value.slice(0, maxItems);
+          lines.push(`${enrichment.label}: ${items.join(', ')}`);
+        }
+      }
+
+      lines.push(''); // Empty line between items
+      return lines.join('\n');
+    }).join('\n');
+  }
+
+  private getFieldValue(entity: any, field: EntityField): unknown {
+    // Prefer summary if configured
+    if (field.preferSummary) {
+      const prefix = `${field.name}_summary_`;
+      const summaryFields = Object.keys(entity).filter(k => k.startsWith(prefix));
+
+      if (summaryFields.length > 0) {
+        const summary: any = {};
+        for (const key of summaryFields) {
+          const fieldName = key.substring(prefix.length);
+          if (fieldName === 'hash' || fieldName.endsWith('_at')) continue;
+
+          const value = entity[key];
+          if (typeof value === 'string' && value.includes(',')) {
+            summary[fieldName] = value.split(',').map(s => s.trim());
+          } else {
+            summary[fieldName] = value;
+          }
+        }
+
+        if (Object.keys(summary).length > 0) return summary;
+      }
+    }
+
+    return entity[field.name];
+  }
+
+  private shouldSkipField(fieldName: string, value: unknown): boolean {
+    const lower = fieldName.toLowerCase();
+    if (lower.includes('embedding') || lower.includes('vector')) return true;
+
+    if (Array.isArray(value)) {
+      if (value.length === 0) return false;
+      return value.every(item => typeof item === 'number');
+    }
+
+    return false;
+  }
+
+  private formatValueWithLength(value: any, maxLength: number): string {
+    if (typeof value === 'string') {
+      return this.truncate(value, maxLength);
+    }
+    if (Array.isArray(value)) return value.join(', ');
+    if (typeof value === 'object') return JSON.stringify(value);
+    return String(value);
+  }
+
+  private formatArrayOrValue(value: any, field: EntityField, maxLength: number): string | null {
+    if (Array.isArray(value)) {
+      const items = value.slice(0, 5); // Limit array items
+      return items.map(v => this.formatValueWithLength(v, maxLength)).join(', ');
+    }
+
+    if (typeof value === 'object' && value !== null) {
+      // Handle structured summaries
+      return this.formatStructuredSummary(value);
+    }
+
+    return this.formatValueWithLength(value, maxLength);
+  }
+
+  private formatStructuredSummary(summary: any): string {
+    const parts: string[] = [];
+
+    if (summary.purpose) parts.push(`Purpose: ${summary.purpose}`);
+    if (summary.operation && Array.isArray(summary.operation)) {
+      parts.push(`Operations: ${summary.operation.join('; ')}`);
+    }
+    if (summary.dependency && Array.isArray(summary.dependency)) {
+      parts.push(`Dependencies: ${summary.dependency.join(', ')}`);
+    }
+    if (summary.concept && Array.isArray(summary.concept)) {
+      parts.push(`Concepts: ${summary.concept.join(', ')}`);
+    }
+    if (summary.complexity) parts.push(`Complexity: ${summary.complexity}`);
+
+    return parts.join('\n');
   }
 
   private formatValue(value: any): string {

@@ -15,6 +15,8 @@ import { LuciformXMLParser } from '@luciformresearch/xmlparser';
 import type { LLMProvider } from './llm-provider.js';
 import type { SearchResult } from '../types/index.js';
 import type { EntityContext, EntityField } from '../types/entity-context.js';
+import { StructuredLLMExecutor } from '../llm/structured-llm-executor.js';
+import type { LLMStructuredCallConfig, OutputSchema } from '../llm/structured-llm-executor.js';
 
 export interface LLMRerankOptions {
   /**
