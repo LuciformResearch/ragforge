@@ -12,6 +12,8 @@ import { LLMProviderAdapter, EmbeddingProviderAdapter } from './provider-adapter
 import type { LLM, BaseEmbedding } from 'llamaindex';
 import { LuciformXMLParser } from '@luciformresearch/xmlparser';
 import type { EntityContext, EntityField } from '../types/entity-context.js';
+import type { LLMProvider } from '../reranking/llm-provider.js';
+import type { QueryFeedback } from '../reranking/llm-reranker.js';
 
 // ===== CORE INTERFACES =====
 
@@ -121,6 +123,7 @@ export interface LLMStructuredCallConfig<TInput = any, TOutput = any> {
 
   // === LLM ===
   llm?: LLMConfig;
+  llmProvider?: LLMProvider; // Alternative: use existing LLMProvider instance (for backward compat)
   fallback?: FallbackConfig;
 
   // === PERFORMANCE ===
@@ -149,6 +152,20 @@ export interface EmbeddingGenerationConfig {
   persistToNeo4j?: boolean;
   batchSize?: number;
 }
+
+// ===== RERANKING TYPES =====
+
+/**
+ * Evaluation result for a single item (used in reranking)
+ */
+export interface ItemEvaluation {
+  id: string;
+  score: number;
+  reasoning: string;
+  relevant?: boolean;
+}
+
+// QueryFeedback is imported from llm-reranker.js (reusing existing type)
 
 // ===== INTERNAL TYPES =====
 
@@ -195,6 +212,74 @@ export class StructuredLLMExecutor {
 
     // 5. Merge with inputs
     return this.mergeResults(items, parsed, config);
+  }
+
+  /**
+   * Execute reranking with LLM evaluations
+   * Special case that returns evaluations + optional query feedback
+   */
+  async executeReranking<T>(
+    items: T[],
+    config: LLMStructuredCallConfig<T, ItemEvaluation> & {
+      userQuestion: string;
+      withFeedback?: boolean;
+      getItemId?: (item: T, index: number) => string;
+    }
+  ): Promise<{ evaluations: ItemEvaluation[]; queryFeedback?: QueryFeedback }> {
+    // Add reranking-specific prompts
+    const rerankConfig: LLMStructuredCallConfig<T, ItemEvaluation> = {
+      ...config,
+      systemPrompt: config.systemPrompt || `You are ranking ${config.entityContext?.displayName || 'items'} for relevance.`,
+      userTask: `User question: "${config.userQuestion}"`,
+      outputSchema: {
+        id: {
+          type: 'string',
+          description: 'Item ID from the input',
+          required: true
+        },
+        score: {
+          type: 'number',
+          description: 'Relevance score from 0.0 to 1.0',
+          required: true,
+          min: 0,
+          max: 1
+        },
+        reasoning: {
+          type: 'string',
+          description: 'Specific explanation referencing both the question and item details',
+          required: true
+        },
+        relevant: {
+          type: 'boolean',
+          description: 'Whether the item is relevant to the question',
+          default: true
+        }
+      },
+      outputFormat: 'xml'
+    };
+
+    // Execute LLM batch
+    const results = await this.executeLLMBatch(items, rerankConfig);
+
+    // Extract evaluations
+    const evaluations: ItemEvaluation[] = results.map((result, index) => {
+      const itemId = config.getItemId ? config.getItemId(items[index], index) : String(index);
+      return {
+        id: result.id || itemId,
+        score: result.score,
+        reasoning: result.reasoning,
+        relevant: result.relevant
+      };
+    });
+
+    // Parse query feedback if requested
+    let queryFeedback: QueryFeedback | undefined;
+    if (config.withFeedback) {
+      // TODO: Extract feedback from XML response
+      // For now, leave undefined
+    }
+
+    return { evaluations, queryFeedback };
   }
 
   /**
@@ -359,11 +444,16 @@ export class StructuredLLMExecutor {
     // Build prompt
     const prompt = this.buildPrompt(batch.items, config);
 
-    // Get LLM provider
-    const provider = this.getLLMProvider(config.llm);
+    let response: string;
 
-    // Call LLM
-    const response = await provider.generate(prompt);
+    // Use LLMProvider if provided (backward compat with LLMReranker)
+    if (config.llmProvider) {
+      response = await config.llmProvider.generateContent(prompt);
+    } else {
+      // Otherwise use LLMProviderAdapter (LlamaIndex)
+      const provider = this.getLLMProvider(config.llm);
+      response = await provider.generate(prompt);
+    }
 
     return {
       text: response,

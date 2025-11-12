@@ -59,7 +59,9 @@ export type {
   OutputSchema,
   LLMConfig,
   FallbackConfig,
-  CacheConfig
+  CacheConfig,
+  ItemEvaluation
+  // Note: QueryFeedback is already exported from llm-reranker
 } from './llm/structured-llm-executor.js';
 
 // Multi-Provider Adapters (LlamaIndex)
