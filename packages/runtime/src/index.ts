@@ -47,6 +47,21 @@ export type {
   StructuredPromptConfig
 } from './llm/structured-prompt-builder.js';
 
+// Unified Structured LLM Executor
+export { StructuredLLMExecutor } from './llm/structured-llm-executor.js';
+export type {
+  LLMStructuredCallConfig,
+  EmbeddingGenerationConfig,
+  InputFieldConfig,
+  RelationshipConfig as LLMRelationshipConfig,
+  InputContextConfig,
+  OutputFieldSchema,
+  OutputSchema,
+  LLMConfig,
+  FallbackConfig,
+  CacheConfig
+} from './llm/structured-llm-executor.js';
+
 // Multi-Provider Adapters (LlamaIndex)
 export {
   LLMProviderAdapter,

@@ -30,6 +30,11 @@ import type {
   ClientFilterOperation
 } from './operations.js';
 import type { EntityContext } from '../types/entity-context.js';
+import {
+  StructuredLLMExecutor,
+  type LLMStructuredCallConfig,
+  type EmbeddingGenerationConfig
+} from '../llm/structured-llm-executor.js';
 
 export class QueryBuilder<T = any> {
   // Pipeline-based architecture
@@ -58,6 +63,9 @@ export class QueryBuilder<T = any> {
   private trackMetadata: boolean = false;
   private executionMetadata?: QueryExecutionMetadata;
 
+  // Unified LLM structured generation
+  private structuredLLMExecutor: StructuredLLMExecutor;
+
   constructor(
     protected client: Neo4jClient,
     protected entityType: string,
@@ -67,6 +75,7 @@ export class QueryBuilder<T = any> {
     this.vectorSearch = new VectorSearch(client);
     this.enrichmentConfig = enrichmentConfig || [];
     this.entityContext = entityContext;
+    this.structuredLLMExecutor = new StructuredLLMExecutor();
   }
 
   /**
@@ -512,6 +521,175 @@ export class QueryBuilder<T = any> {
   }
 
   /**
+   * Generate structured LLM outputs for query results
+   *
+   * Uses an LLM to generate custom structured data for each result based on
+   * input fields, context, and a defined output schema.
+   *
+   * @example
+   * // Security audit - generate risk scores
+   * const audited = await rag.scope()
+   *   .semantic('authentication', { topK: 20 })
+   *   .llmGenerateStructured({
+   *     inputFields: ['name', 'source'],
+   *     outputSchema: {
+   *       riskLevel: { type: 'string', enum: ['low', 'medium', 'high'], description: 'Security risk level' },
+   *       reasoning: { type: 'string', description: 'Why this risk level?' }
+   *     },
+   *     llm: { provider: 'gemini', model: 'gemini-pro' }
+   *   })
+   *   .execute();
+   *
+   * @example
+   * // Documentation generation
+   * const documented = await rag.scope()
+   *   .where({ type: 'function' })
+   *   .llmGenerateStructured({
+   *     inputFields: [
+   *       { name: 'source', maxLength: 500 },
+   *       { name: 'consumes', prompt: 'dependencies used' }
+   *     ],
+   *     outputSchema: {
+   *       summary: { type: 'string', description: 'One-line summary' },
+   *       params: { type: 'array', description: 'Parameter descriptions' },
+   *       returns: { type: 'string', description: 'Return value description' }
+   *     }
+   *   })
+   *   .execute();
+   */
+  llmGenerateStructured<TOutput = any>(
+    config: Omit<LLMStructuredCallConfig<T, TOutput>, 'outputSchema'> & {
+      outputSchema: LLMStructuredCallConfig<T, TOutput>['outputSchema']
+    }
+  ): QueryBuilder<T & TOutput> {
+    // Add to pipeline
+    this.operations.push({
+      type: 'llmStructured' as any,
+      config: config as any
+    });
+
+    return this as any;
+  }
+
+  /**
+   * Alias for llmGenerateStructured - backward compatible reranking using new unified API
+   *
+   * @deprecated Use llmRerank() for traditional reranking, or llmGenerateStructured() for custom outputs
+   */
+  rerankWithLLM<TOutput = any>(
+    config: Omit<LLMStructuredCallConfig<T, TOutput>, 'outputSchema'> & {
+      outputSchema: LLMStructuredCallConfig<T, TOutput>['outputSchema']
+    }
+  ): QueryBuilder<T & TOutput> {
+    return this.llmGenerateStructured(config);
+  }
+
+  /**
+   * Generate embeddings for query results with optional relationship context
+   *
+   * Generates embeddings by combining specified fields and optionally including
+   * relationship context (e.g., dependency names alongside code content).
+   *
+   * @example
+   * // Generate embeddings with dependency context
+   * const withEmbeddings = await rag.scope()
+   *   .where({ type: 'function' })
+   *   .generateEmbeddings({
+   *     sourceFields: ['name', 'source'],
+   *     targetField: 'codeEmbedding',
+   *     includeRelationships: ['CONSUMES'],
+   *     relationshipFormat: 'text',
+   *     provider: { provider: 'gemini', model: 'text-embedding-004' }
+   *   })
+   *   .execute();
+   *
+   * @example
+   * // Weighted combination of fields
+   * const withWeightedEmbeddings = await rag.scope()
+   *   .generateEmbeddings({
+   *     sourceFields: ['name', 'signature', 'source'],
+   *     weights: { name: 0.3, signature: 0.3, source: 0.4 },
+   *     combineStrategy: 'weighted',
+   *     targetField: 'embedding'
+   *   })
+   *   .execute();
+   */
+  generateEmbeddings(config: EmbeddingGenerationConfig): this {
+    // Add to pipeline
+    this.operations.push({
+      type: 'generateEmbeddings' as any,
+      config: config as any
+    });
+
+    return this;
+  }
+
+  /**
+   * Generate summaries for query results
+   *
+   * Alias for llmGenerateStructured with common summarization patterns.
+   *
+   * @example
+   * // Generate summaries for complex code
+   * const summarized = await rag.scope()
+   *   .semantic('database operations', { topK: 10 })
+   *   .withSummaries({
+   *     inputFields: ['name', 'source'],
+   *     summaryFields: ['oneLine', 'detailed', 'keywords'],
+   *     llm: { provider: 'gemini' }
+   *   })
+   *   .execute();
+   */
+  withSummaries(config: {
+    inputFields: LLMStructuredCallConfig<T, any>['inputFields'];
+    summaryFields?: string[];
+    llm?: LLMStructuredCallConfig<T, any>['llm'];
+    [key: string]: any;
+  }): QueryBuilder<T & { summary?: string; summaryDetailed?: string; keywords?: string[] }> {
+    // Build output schema from summaryFields
+    const outputSchema: any = {};
+    const summaryFieldList = config.summaryFields || ['oneLine', 'detailed', 'keywords'];
+
+    for (const field of summaryFieldList) {
+      switch (field) {
+        case 'oneLine':
+          outputSchema.summary = {
+            type: 'string',
+            description: 'One-line summary of the code',
+            prompt: 'Summarize in one sentence'
+          };
+          break;
+        case 'detailed':
+          outputSchema.summaryDetailed = {
+            type: 'string',
+            description: 'Detailed multi-sentence summary',
+            prompt: 'Provide a detailed explanation'
+          };
+          break;
+        case 'keywords':
+          outputSchema.keywords = {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Key concepts and terms',
+            prompt: 'Extract 3-5 key concepts'
+          };
+          break;
+        default:
+          outputSchema[field] = {
+            type: 'string',
+            description: `Summary: ${field}`
+          };
+      }
+    }
+
+    return this.llmGenerateStructured({
+      inputFields: config.inputFields,
+      outputSchema,
+      llm: config.llm
+    });
+  }
+
+  /**
    * Execute query and return results
    */
   async execute(): Promise<SearchResult<T>[]> {
@@ -715,6 +893,14 @@ export class QueryBuilder<T = any> {
         case 'clientFilter':
           // Client-side filtering using predicate function
           currentResults = currentResults.filter(operation.config.predicate);
+          break;
+
+        case 'llmStructured':
+          currentResults = await this.executeLLMStructured(currentResults, operation);
+          break;
+
+        case 'generateEmbeddings':
+          currentResults = await this.executeGenerateEmbeddings(currentResults, operation);
           break;
 
         default:
@@ -1368,6 +1554,68 @@ export class QueryBuilder<T = any> {
       }
       return true;
     });
+  }
+
+  /**
+   * Execute LLM STRUCTURED operation: Generate custom structured outputs using LLM
+   */
+  private async executeLLMStructured(
+    currentResults: SearchResult<T>[],
+    operation: any
+  ): Promise<SearchResult<any>[]> {
+    if (currentResults.length === 0) {
+      return [];
+    }
+
+    const config = operation.config as LLMStructuredCallConfig<T, any>;
+
+    try {
+      // Extract entities from SearchResults
+      const entities = currentResults.map(r => r.entity);
+
+      // Execute LLM batch generation
+      const enriched = await this.structuredLLMExecutor.executeLLMBatch(entities, config);
+
+      // Merge generated fields back into SearchResults
+      return currentResults.map((result, index) => ({
+        ...result,
+        entity: enriched[index]
+      }));
+    } catch (error: any) {
+      console.error('LLM structured generation failed:', error.message);
+      return currentResults;
+    }
+  }
+
+  /**
+   * Execute GENERATE EMBEDDINGS operation: Generate embeddings with relationship context
+   */
+  private async executeGenerateEmbeddings(
+    currentResults: SearchResult<T>[],
+    operation: any
+  ): Promise<SearchResult<any>[]> {
+    if (currentResults.length === 0) {
+      return [];
+    }
+
+    const config = operation.config as EmbeddingGenerationConfig;
+
+    try {
+      // Extract entities from SearchResults
+      const entities = currentResults.map(r => r.entity);
+
+      // Execute embedding generation
+      const withEmbeddings = await this.structuredLLMExecutor.generateEmbeddings(entities, config);
+
+      // Merge embeddings back into SearchResults
+      return currentResults.map((result, index) => ({
+        ...result,
+        entity: withEmbeddings[index]
+      }));
+    } catch (error: any) {
+      console.error('Embedding generation failed:', error.message);
+      return currentResults;
+    }
   }
 
   /**

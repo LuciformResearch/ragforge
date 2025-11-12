@@ -8,12 +8,16 @@
 import type { SearchResult } from '../types/index.js';
 import type { LLMProvider } from '../reranking/llm-provider.js';
 import type { LLMRerankOptions } from '../reranking/llm-reranker.js';
+import type {
+  LLMStructuredCallConfig,
+  EmbeddingGenerationConfig
+} from '../llm/structured-llm-executor.js';
 
 /**
  * Base operation interface
  */
 export interface Operation {
-  type: 'fetch' | 'expand' | 'semantic' | 'llmRerank' | 'filter' | 'clientFilter';
+  type: 'fetch' | 'expand' | 'semantic' | 'llmRerank' | 'filter' | 'clientFilter' | 'llmStructured' | 'generateEmbeddings';
   config: any;
 }
 
@@ -101,6 +105,22 @@ export interface ClientFilterOperation extends Operation {
 }
 
 /**
+ * LLM_STRUCTURED: Generate structured outputs using LLM
+ */
+export interface LLMStructuredOperation extends Operation {
+  type: 'llmStructured';
+  config: LLMStructuredCallConfig<any, any>;
+}
+
+/**
+ * GENERATE_EMBEDDINGS: Generate embeddings with relationship context
+ */
+export interface GenerateEmbeddingsOperation extends Operation {
+  type: 'generateEmbeddings';
+  config: EmbeddingGenerationConfig;
+}
+
+/**
  * Union type of all operations
  */
 export type PipelineOperation =
@@ -109,7 +129,9 @@ export type PipelineOperation =
   | SemanticOperation
   | LLMRerankOperation
   | FilterOperation
-  | ClientFilterOperation;
+  | ClientFilterOperation
+  | LLMStructuredOperation
+  | GenerateEmbeddingsOperation;
 
 /**
  * Operation execution context
