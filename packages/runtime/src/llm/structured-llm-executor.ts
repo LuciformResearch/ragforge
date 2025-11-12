@@ -10,6 +10,7 @@
 
 import { LLMProviderAdapter, EmbeddingProviderAdapter } from './provider-adapter.js';
 import type { LLM, BaseEmbedding } from 'llamaindex';
+import { LuciformXMLParser } from '@luciformresearch/xmlparser';
 
 // ===== CORE INTERFACES =====
 
@@ -481,12 +482,173 @@ export class StructuredLLMExecutor {
     const results: TOutput[] = [];
 
     for (const response of responses) {
-      // TODO: Implement XML/JSON parsing with schema validation
-      // For now, placeholder
-      results.push({} as TOutput);
+      if (response.format === 'json') {
+        // Parse JSON responses
+        const parsed = this.parseJSONResponse(response.text, schema);
+        results.push(...parsed);
+      } else {
+        // Parse XML responses (default)
+        const parsed = this.parseXMLResponse(response.text, schema);
+        results.push(...parsed);
+      }
     }
 
     return results;
+  }
+
+  /**
+   * Parse XML response into structured outputs
+   */
+  private parseXMLResponse<TOutput>(
+    xmlText: string,
+    schema: OutputSchema<TOutput>
+  ): TOutput[] {
+    const results: TOutput[] = [];
+
+    try {
+      const parser = new LuciformXMLParser(xmlText, { mode: 'luciform-permissive' });
+      const parseResult = parser.parse();
+
+      if (!parseResult.document?.root) {
+        console.warn('No XML root element found');
+        return [];
+      }
+
+      const root = parseResult.document.root;
+
+      // Extract items from <items> or <evaluations> root
+      const itemElements = root.children?.filter(
+        (child: any) => child.type === 'element' && child.name === 'item'
+      ) || [];
+
+      if (itemElements.length === 0) {
+        console.warn('No <item> elements found in XML response');
+        return [];
+      }
+
+      for (const itemEl of itemElements) {
+        const output: any = {};
+        const item = itemEl as any; // Cast to any for XML node access
+
+        // Map XML attributes/elements to output schema
+        for (const [fieldName, fieldSchema] of Object.entries(schema) as [string, OutputFieldSchema][]) {
+          // Try attribute first, then child element
+          let value = item.attributes?.[fieldName];
+
+          if (value === undefined && item.children) {
+            const childEl = item.children.find((c: any) => c.name === fieldName);
+            if (childEl?.text) {
+              value = childEl.text;
+            }
+          }
+
+          if (value !== undefined) {
+            // Type conversion based on schema
+            output[fieldName] = this.convertValue(value, fieldSchema);
+          } else if (fieldSchema.default !== undefined) {
+            output[fieldName] = fieldSchema.default;
+          } else if (fieldSchema.required) {
+            console.warn(`Required field "${fieldName}" missing in XML response`);
+          }
+        }
+
+        results.push(output as TOutput);
+      }
+    } catch (error: any) {
+      console.error('Failed to parse XML response:', error.message);
+      console.error('XML text:', xmlText);
+    }
+
+    return results;
+  }
+
+  /**
+   * Parse JSON response into structured outputs
+   */
+  private parseJSONResponse<TOutput>(
+    jsonText: string,
+    schema: OutputSchema<TOutput>
+  ): TOutput[] {
+    const results: TOutput[] = [];
+
+    try {
+      // Try to extract JSON from markdown code blocks
+      let cleanedText = jsonText.trim();
+      const jsonMatch = cleanedText.match(/```json\s*([\s\S]*?)\s*```/);
+      if (jsonMatch) {
+        cleanedText = jsonMatch[1];
+      }
+
+      const parsed = JSON.parse(cleanedText);
+      const items = Array.isArray(parsed) ? parsed : (parsed.items || [parsed]);
+
+      for (const item of items) {
+        const output: any = {};
+
+        for (const [fieldName, fieldSchema] of Object.entries(schema) as [string, OutputFieldSchema][]) {
+          let value = item[fieldName];
+
+          if (value !== undefined) {
+            output[fieldName] = this.convertValue(value, fieldSchema);
+          } else if (fieldSchema.default !== undefined) {
+            output[fieldName] = fieldSchema.default;
+          } else if (fieldSchema.required) {
+            console.warn(`Required field "${fieldName}" missing in JSON response`);
+          }
+        }
+
+        results.push(output as TOutput);
+      }
+    } catch (error: any) {
+      console.error('Failed to parse JSON response:', error.message);
+      console.error('JSON text:', jsonText);
+    }
+
+    return results;
+  }
+
+  /**
+   * Convert value to expected type based on schema
+   */
+  private convertValue(value: any, schema: OutputFieldSchema): any {
+    switch (schema.type) {
+      case 'number':
+        return typeof value === 'number' ? value : parseFloat(value);
+
+      case 'boolean':
+        if (typeof value === 'boolean') return value;
+        if (typeof value === 'string') {
+          return value.toLowerCase() === 'true' || value === '1';
+        }
+        return Boolean(value);
+
+      case 'array':
+        if (Array.isArray(value)) return value;
+        if (typeof value === 'string') {
+          // Try to parse as JSON array or split by comma
+          try {
+            return JSON.parse(value);
+          } catch {
+            return value.split(',').map(s => s.trim());
+          }
+        }
+        return [value];
+
+      case 'object':
+        if (typeof value === 'object') return value;
+        if (typeof value === 'string') {
+          try {
+            return JSON.parse(value);
+          } catch {
+            return { value };
+          }
+        }
+        return value;
+
+      case 'string':
+      default:
+        return String(value);
+    }
   }
 
   private mergeResults<TInput, TOutput>(
