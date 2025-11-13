@@ -25,6 +25,7 @@ export { VectorSearch } from './vector/vector-search.js';
 export { LLMReranker } from './reranking/llm-reranker.js';
 export { VertexAIProvider } from './reranking/vertex-ai-provider.js';
 export { GeminiAPIProvider } from './reranking/gemini-api-provider.js';
+export { RateLimiter, GlobalRateLimiter } from './reranking/rate-limiter.js';
 export type {
   LLMProvider,
   LLMProviderConfig
@@ -38,7 +39,8 @@ export type {
   RerankInput
 } from './reranking/llm-reranker.js';
 export type { VertexAIConfig } from './reranking/vertex-ai-provider.js';
-export type { GeminiAPIConfig } from './reranking/gemini-api-provider.js';
+export type { GeminiAPIConfig, RateLimitStrategy } from './reranking/gemini-api-provider.js';
+export type { RateLimiterConfig } from './reranking/rate-limiter.js';
 
 // Structured Prompts & LLM
 export { StructuredPromptBuilder } from './llm/structured-prompt-builder.js';
@@ -51,6 +53,7 @@ export type {
 export { StructuredLLMExecutor } from './llm/structured-llm-executor.js';
 export type {
   LLMStructuredCallConfig,
+  LLMBatchResult,
   EmbeddingGenerationConfig,
   InputFieldConfig,
   RelationshipConfig as LLMRelationshipConfig,

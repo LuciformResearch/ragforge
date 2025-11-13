@@ -61,6 +61,7 @@ export interface OutputFieldSchema<T = any> {
   max?: number;
   properties?: Record<string, OutputFieldSchema>;
   items?: OutputFieldSchema;
+  nested?: Record<string, OutputFieldSchema>; // For nested objects in globalSchema
   validate?: (value: T) => boolean | string;
 }
 
@@ -117,7 +118,9 @@ export interface LLMStructuredCallConfig<TInput = any, TOutput = any> {
 
   // === OUTPUT ===
   outputSchema: OutputSchema<TOutput>;
-  outputFormat?: 'json' | 'xml' | 'auto';
+  globalSchema?: OutputSchema<any>; // Global metadata fields (not per-item)
+  outputFormat?: 'json' | 'xml' | 'yaml' | 'auto'; // Format for items
+  globalMetadataFormat?: 'json' | 'xml' | 'yaml'; // Format for metadata (defaults to outputFormat)
   mergeStrategy?: 'append' | 'replace' | 'custom';
   customMerge?: (entity: TInput, generated: TOutput) => TInput & TOutput;
 
@@ -132,6 +135,10 @@ export interface LLMStructuredCallConfig<TInput = any, TOutput = any> {
   tokenBudget?: number;
   onOverflow?: 'truncate' | 'split' | 'error';
   cache?: boolean | CacheConfig;
+
+  // === DEBUGGING ===
+  logPrompts?: boolean | string; // true = console, string = file path
+  logResponses?: boolean | string; // true = console, string = file path
 }
 
 /**
@@ -176,7 +183,15 @@ interface Batch<T> {
 
 interface LLMResponse {
   text: string;
-  format: 'json' | 'xml';
+  format: 'json' | 'xml' | 'yaml';
+}
+
+/**
+ * Result from executeLLMBatch with optional global metadata
+ */
+export interface LLMBatchResult<TInput, TOutput, TGlobal = any> {
+  items: (TInput & TOutput)[];
+  globalMetadata?: TGlobal;
 }
 
 /**
@@ -193,25 +208,62 @@ export class StructuredLLMExecutor {
 
   /**
    * Execute structured LLM generation on batch of items
+   *
+   * Returns items directly if no globalSchema is provided (backward compatible)
+   * Returns LLMBatchResult with items and globalMetadata if globalSchema is provided
    */
-  async executeLLMBatch<TInput, TOutput>(
+  async executeLLMBatch<TInput, TOutput, TGlobal = any>(
     items: TInput[],
     config: LLMStructuredCallConfig<TInput, TOutput>
-  ): Promise<(TInput & TOutput)[]> {
+  ): Promise<(TInput & TOutput)[] | LLMBatchResult<TInput, TOutput, TGlobal>> {
     // 1. Validate config
     this.validateLLMConfig(config);
 
+    // Warn about less permissive formats
+    if (config.outputFormat === 'json' || config.outputFormat === 'yaml') {
+      console.warn(
+        `[StructuredLLMExecutor] Warning: Using ${config.outputFormat.toUpperCase()} format for structured generation. ` +
+        `This format is less permissive than XML and may fail more often if the LLM doesn't follow the exact format. ` +
+        `Consider using 'xml' (default) for more robust parsing.`
+      );
+    }
+    if (config.globalMetadataFormat === 'json' || config.globalMetadataFormat === 'yaml') {
+      console.warn(
+        `[StructuredLLMExecutor] Warning: Using ${config.globalMetadataFormat.toUpperCase()} format for global metadata. ` +
+        `This format is less permissive than XML and may fail more often if the LLM doesn't follow the exact format. ` +
+        `Consider using 'xml' (default) for more robust parsing.`
+      );
+    }
+
     // 2. Pack items into optimal batches
     const batches = this.packBatches(items, config);
+    console.log(
+      `[StructuredLLMExecutor] 📦 Batching: ${items.length} items → ${batches.length} batch(es) | ` +
+      `Items per batch: [${batches.map(b => b.items.length).join(', ')}] | ` +
+      `Parallel: ${config.parallel || 5}`
+    );
 
     // 3. Execute batches in parallel
-    const results = await this.executeParallelLLM(batches, config);
+    const responses = await this.executeParallelLLM(batches, config);
 
     // 4. Parse outputs
-    const parsed = this.parseOutputs(results, config.outputSchema);
+    const { items: parsedItems, globalMetadata } = await this.parseOutputs(
+      responses,
+      config.outputSchema,
+      config.globalSchema,
+      config.globalMetadataFormat
+    );
 
     // 5. Merge with inputs
-    return this.mergeResults(items, parsed, config);
+    const mergedItems = this.mergeResults(items, parsedItems, config);
+
+    // 6. Return based on whether globalSchema was requested
+    if (config.globalSchema && globalMetadata !== undefined) {
+      return { items: mergedItems, globalMetadata } as LLMBatchResult<TInput, TOutput, TGlobal>;
+    }
+
+    // Backward compatible: return items directly if no globalSchema
+    return mergedItems as (TInput & TOutput)[];
   }
 
   /**
@@ -258,26 +310,50 @@ export class StructuredLLMExecutor {
       outputFormat: 'xml'
     };
 
+    // Add globalSchema for feedback if requested
+    if (config.withFeedback) {
+      rerankConfig.globalSchema = {
+        feedback: {
+          type: 'object',
+          description: 'Query quality feedback and suggestions',
+          required: false,
+          nested: {
+            quality: {
+              type: 'string',
+              description: 'Query quality: excellent, good, insufficient, or poor',
+              required: true
+            },
+            suggestions: {
+              type: 'array',
+              description: 'Array of suggestion objects with type and description',
+              required: false
+            }
+          }
+        }
+      };
+    }
+
     // Execute LLM batch
-    const results = await this.executeLLMBatch(items, rerankConfig);
+    const result = await this.executeLLMBatch<T, ItemEvaluation, { feedback?: QueryFeedback }>(items, rerankConfig);
+
+    // Handle both return formats (backward compat)
+    const isArrayResult = Array.isArray(result);
+    const itemResults = isArrayResult ? result : result.items;
+    const globalMetadata = isArrayResult ? undefined : result.globalMetadata;
 
     // Extract evaluations
-    const evaluations: ItemEvaluation[] = results.map((result, index) => {
+    const evaluations: ItemEvaluation[] = itemResults.map((itemResult, index) => {
       const itemId = config.getItemId ? config.getItemId(items[index], index) : String(index);
       return {
-        id: result.id || itemId,
-        score: result.score,
-        reasoning: result.reasoning,
-        relevant: result.relevant
+        id: itemResult.id || itemId,
+        score: itemResult.score,
+        reasoning: itemResult.reasoning,
+        relevant: itemResult.relevant
       };
     });
 
-    // Parse query feedback if requested
-    let queryFeedback: QueryFeedback | undefined;
-    if (config.withFeedback) {
-      // TODO: Extract feedback from XML response
-      // For now, leave undefined
-    }
+    // Extract query feedback from global metadata
+    const queryFeedback = globalMetadata?.feedback as QueryFeedback | undefined;
 
     return { evaluations, queryFeedback };
   }
@@ -427,6 +503,11 @@ export class StructuredLLMExecutor {
     for (let i = 0; i < batches.length; i += parallel) {
       const batchGroup = batches.slice(i, i + parallel);
 
+      console.log(
+        `[StructuredLLMExecutor] 🚀 Launching ${batchGroup.length} requests in parallel ` +
+        `(batch group ${Math.floor(i / parallel) + 1}/${Math.ceil(batches.length / parallel)})`
+      );
+
       const groupResults = await Promise.all(
         batchGroup.map(batch => this.executeSingleLLMBatch(batch, config))
       );
@@ -444,6 +525,11 @@ export class StructuredLLMExecutor {
     // Build prompt
     const prompt = this.buildPrompt(batch.items, config);
 
+    // Log prompt if requested
+    if (config.logPrompts) {
+      await this.logContent('PROMPT', prompt, config.logPrompts);
+    }
+
     let response: string;
 
     // Use LLMProvider if provided (backward compat with LLMReranker)
@@ -455,10 +541,50 @@ export class StructuredLLMExecutor {
       response = await provider.generate(prompt);
     }
 
+    // Log response if requested
+    if (config.logResponses) {
+      await this.logContent('RESPONSE', response, config.logResponses);
+    }
+
+    // Determine response format
+    let format: 'json' | 'xml' | 'yaml' = 'xml';
+    if (config.outputFormat === 'json') {
+      format = 'json';
+    } else if (config.outputFormat === 'yaml') {
+      format = 'yaml';
+    }
+
     return {
       text: response,
-      format: config.outputFormat === 'json' ? 'json' : 'xml'
+      format
     };
+  }
+
+  /**
+   * Log content to console or file
+   */
+  private async logContent(label: string, content: string, logTo: boolean | string): Promise<void> {
+    const timestamp = new Date().toISOString();
+    const separator = '='.repeat(80);
+    const logMessage = `\n${separator}\n${label} @ ${timestamp}\n${separator}\n${content}\n${separator}\n`;
+
+    if (logTo === true) {
+      // Log to console
+      console.log(logMessage);
+    } else if (typeof logTo === 'string') {
+      // Log to file
+      const fs = await import('fs');
+      const path = await import('path');
+
+      // Ensure directory exists
+      const dir = path.dirname(logTo);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+
+      // Append to file
+      fs.appendFileSync(logTo, logMessage);
+    }
   }
 
   private buildPrompt<T>(
@@ -495,7 +621,12 @@ export class StructuredLLMExecutor {
 
     // Output instructions
     parts.push('## Required Output Format');
-    parts.push(this.generateOutputInstructions(config.outputSchema));
+    parts.push(this.generateOutputInstructions(
+      config.outputSchema,
+      config.globalSchema,
+      config.outputFormat || 'xml',
+      config.globalMetadataFormat
+    ));
     parts.push('');
 
     // Additional instructions
@@ -703,61 +834,413 @@ export class StructuredLLMExecutor {
     return text.slice(0, max - 3) + '...';
   }
 
-  private generateOutputInstructions(schema: OutputSchema<any>): string {
+  private generateOutputInstructions(
+    schema: OutputSchema<any>,
+    globalSchema?: OutputSchema<any>,
+    format: 'xml' | 'json' | 'yaml' | 'auto' = 'xml',
+    globalMetadataFormat?: 'xml' | 'json' | 'yaml'
+  ): string {
+    // Determine actual format to use
+    const itemsFormat = format === 'auto' ? 'xml' : format;
+    const metadataFormat = globalMetadataFormat || itemsFormat;
+
+    if (itemsFormat === 'json') {
+      return this.generateJSONInstructions(schema, globalSchema, metadataFormat);
+    } else if (itemsFormat === 'yaml') {
+      return this.generateYAMLInstructions(schema, globalSchema, metadataFormat);
+    } else {
+      return this.generateXMLInstructions(schema, globalSchema, metadataFormat);
+    }
+  }
+
+  private generateXMLInstructions(
+    schema: OutputSchema<any>,
+    globalSchema?: OutputSchema<any>,
+    globalFormat: 'xml' | 'json' | 'yaml' = 'xml'
+  ): string {
     const instructions: string[] = [
       'You MUST respond with structured XML in the following format:',
       '',
-      '<items>'
+      '<items>',
+      '  <item id="INDEX">'
     ];
 
     for (const [fieldName, fieldSchema] of Object.entries(schema)) {
       const required = fieldSchema.required ? ' (REQUIRED)' : '';
-      instructions.push(`  <item id="INDEX">`);
       instructions.push(`    <${fieldName}>${fieldSchema.description}${required}</${fieldName}>`);
 
       if (fieldSchema.prompt) {
         instructions.push(`    <!-- ${fieldSchema.prompt} -->`);
       }
-
-      instructions.push(`  </item>`);
     }
 
+    instructions.push('  </item>');
     instructions.push('</items>');
+
+    // Add global metadata instructions if provided
+    if (globalSchema) {
+      instructions.push('');
+      if (globalFormat === 'json') {
+        instructions.push('Additionally, include global metadata as JSON at the end:');
+        instructions.push('```json');
+        instructions.push('{');
+        for (const [fieldName, fieldSchema] of Object.entries(globalSchema)) {
+          const required = fieldSchema.required ? ' (REQUIRED)' : '';
+          instructions.push(`  "${fieldName}": ${this.describeJSONType(fieldSchema)}${required}`);
+        }
+        instructions.push('}');
+        instructions.push('```');
+      } else if (globalFormat === 'yaml') {
+        instructions.push('Additionally, include global metadata as YAML at the end:');
+        instructions.push('```yaml');
+        for (const [fieldName, fieldSchema] of Object.entries(globalSchema)) {
+          const required = fieldSchema.required ? ' (REQUIRED)' : '';
+          instructions.push(`${fieldName}: ${this.describeYAMLType(fieldSchema)}${required}`);
+        }
+        instructions.push('```');
+      } else {
+        instructions.push('');
+        instructions.push('Additionally, include these global metadata fields as sibling elements to <items>:');
+        for (const [fieldName, fieldSchema] of Object.entries(globalSchema)) {
+          const required = fieldSchema.required ? ' (REQUIRED)' : '';
+          instructions.push(`<${fieldName}>${fieldSchema.description}${required}</${fieldName}>`);
+        }
+      }
+    }
+
     instructions.push('');
     instructions.push('Replace INDEX with 0, 1, 2, etc. for each item.');
 
     return instructions.join('\n');
   }
 
-  private parseOutputs<TOutput>(
+  private generateJSONInstructions(
+    schema: OutputSchema<any>,
+    globalSchema?: OutputSchema<any>,
+    globalFormat: 'xml' | 'json' | 'yaml' = 'json'
+  ): string {
+    const instructions: string[] = [
+      'You MUST respond with structured JSON in the following format:',
+      '',
+      '```json',
+      '{'
+    ];
+
+    if (globalSchema && globalFormat === 'json') {
+      // Include global metadata at root level
+      for (const [fieldName, fieldSchema] of Object.entries(globalSchema)) {
+        const required = fieldSchema.required ? ' (REQUIRED)' : '';
+        instructions.push(`  "${fieldName}": ${this.describeJSONType(fieldSchema)}${required},`);
+      }
+    }
+
+    instructions.push('  "items": [');
+    instructions.push('    {');
+
+    const schemaEntries = Object.entries(schema);
+    schemaEntries.forEach(([fieldName, fieldSchema], index) => {
+      const required = fieldSchema.required ? ' (REQUIRED)' : '';
+      const comma = index < schemaEntries.length - 1 ? ',' : '';
+      instructions.push(`      "${fieldName}": ${this.describeJSONType(fieldSchema)}${required}${comma}`);
+
+      if (fieldSchema.prompt) {
+        instructions.push(`      // ${fieldSchema.prompt}`);
+      }
+    });
+
+    instructions.push('    }');
+    instructions.push('  ]');
+    instructions.push('}');
+    instructions.push('```');
+
+    if (globalSchema && globalFormat !== 'json') {
+      instructions.push('');
+      if (globalFormat === 'xml') {
+        instructions.push('Additionally, include global metadata as XML:');
+        for (const [fieldName, fieldSchema] of Object.entries(globalSchema)) {
+          const required = fieldSchema.required ? ' (REQUIRED)' : '';
+          instructions.push(`<${fieldName}>${fieldSchema.description}${required}</${fieldName}>`);
+        }
+      } else {
+        instructions.push('Additionally, include global metadata as YAML:');
+        instructions.push('```yaml');
+        for (const [fieldName, fieldSchema] of Object.entries(globalSchema)) {
+          const required = fieldSchema.required ? ' (REQUIRED)' : '';
+          instructions.push(`${fieldName}: ${this.describeYAMLType(fieldSchema)}${required}`);
+        }
+        instructions.push('```');
+      }
+    }
+
+    return instructions.join('\n');
+  }
+
+  private generateYAMLInstructions(
+    schema: OutputSchema<any>,
+    globalSchema?: OutputSchema<any>,
+    globalFormat: 'xml' | 'json' | 'yaml' = 'yaml'
+  ): string {
+    const instructions: string[] = [
+      'You MUST respond with structured YAML in the following format:',
+      '',
+      '```yaml'
+    ];
+
+    if (globalSchema && globalFormat === 'yaml') {
+      // Include global metadata at root level
+      for (const [fieldName, fieldSchema] of Object.entries(globalSchema)) {
+        const required = fieldSchema.required ? ' (REQUIRED)' : '';
+        instructions.push(`${fieldName}: ${this.describeYAMLType(fieldSchema)}${required}`);
+      }
+      instructions.push('');
+    }
+
+    instructions.push('items:');
+    instructions.push('  - # First item');
+
+    for (const [fieldName, fieldSchema] of Object.entries(schema)) {
+      const required = fieldSchema.required ? ' (REQUIRED)' : '';
+      instructions.push(`    ${fieldName}: ${this.describeYAMLType(fieldSchema)}${required}`);
+
+      if (fieldSchema.prompt) {
+        instructions.push(`    # ${fieldSchema.prompt}`);
+      }
+    }
+
+    instructions.push('  - # Second item');
+    instructions.push('    ...');
+    instructions.push('```');
+
+    if (globalSchema && globalFormat !== 'yaml') {
+      instructions.push('');
+      if (globalFormat === 'xml') {
+        instructions.push('Additionally, include global metadata as XML:');
+        for (const [fieldName, fieldSchema] of Object.entries(globalSchema)) {
+          const required = fieldSchema.required ? ' (REQUIRED)' : '';
+          instructions.push(`<${fieldName}>${fieldSchema.description}${required}</${fieldName}>`);
+        }
+      } else {
+        instructions.push('Additionally, include global metadata as JSON:');
+        instructions.push('```json');
+        instructions.push('{');
+        for (const [fieldName, fieldSchema] of Object.entries(globalSchema)) {
+          const required = fieldSchema.required ? ' (REQUIRED)' : '';
+          instructions.push(`  "${fieldName}": ${this.describeJSONType(fieldSchema)}${required}`);
+        }
+        instructions.push('}');
+        instructions.push('```');
+      }
+    }
+
+    return instructions.join('\n');
+  }
+
+  private describeJSONType(fieldSchema: OutputFieldSchema): string {
+    switch (fieldSchema.type) {
+      case 'string':
+        return '"string value"';
+      case 'number':
+        return '123';
+      case 'boolean':
+        return 'true';
+      case 'array':
+        return '[]';
+      case 'object':
+        if (fieldSchema.nested) {
+          const nestedFields = Object.entries(fieldSchema.nested)
+            .map(([key, val]) => `"${key}": ${this.describeJSONType(val)}`)
+            .join(', ');
+          return `{ ${nestedFields} }`;
+        }
+        return '{}';
+      default:
+        return '"value"';
+    }
+  }
+
+  private describeYAMLType(fieldSchema: OutputFieldSchema): string {
+    switch (fieldSchema.type) {
+      case 'string':
+        return '"string value"';
+      case 'number':
+        return '123';
+      case 'boolean':
+        return 'true';
+      case 'array':
+        return '[]';
+      case 'object':
+        if (fieldSchema.nested) {
+          return '{ nested object }';
+        }
+        return '{}';
+      default:
+        return '"value"';
+    }
+  }
+
+  private async parseOutputs<TOutput>(
     responses: LLMResponse[],
-    schema: OutputSchema<TOutput>
-  ): TOutput[] {
+    schema: OutputSchema<TOutput>,
+    globalSchema?: OutputSchema<any>,
+    globalMetadataFormat?: 'json' | 'xml' | 'yaml'
+  ): Promise<{ items: TOutput[]; globalMetadata?: any }> {
     const results: TOutput[] = [];
+    let globalMetadata: any = undefined;
 
     for (const response of responses) {
       if (response.format === 'json') {
         // Parse JSON responses
-        const parsed = this.parseJSONResponse(response.text, schema);
-        results.push(...parsed);
+        // Only try to extract JSON global metadata if format matches or is unspecified
+        const shouldExtractJSONMetadata = !globalMetadataFormat || globalMetadataFormat === 'json';
+        const parsed = this.parseJSONResponse(
+          response.text,
+          schema,
+          shouldExtractJSONMetadata ? globalSchema : undefined
+        );
+        results.push(...parsed.items);
+        // Take first non-empty globalMetadata
+        if (!globalMetadata && parsed.globalMetadata) {
+          globalMetadata = parsed.globalMetadata;
+        }
+      } else if (response.format === 'yaml') {
+        // Parse YAML responses
+        // Only try to extract YAML global metadata if format matches or is unspecified
+        const shouldExtractYAMLMetadata = !globalMetadataFormat || globalMetadataFormat === 'yaml';
+        const parsed = await this.parseYAMLResponse(
+          response.text,
+          schema,
+          shouldExtractYAMLMetadata ? globalSchema : undefined
+        );
+        results.push(...parsed.items);
+        // Take first non-empty globalMetadata
+        if (!globalMetadata && parsed.globalMetadata) {
+          globalMetadata = parsed.globalMetadata;
+        }
       } else {
         // Parse XML responses (default)
-        const parsed = this.parseXMLResponse(response.text, schema);
-        results.push(...parsed);
+        // Only try to extract XML global metadata if format matches or is unspecified
+        const shouldExtractXMLMetadata = !globalMetadataFormat || globalMetadataFormat === 'xml';
+        const parsed = this.parseXMLResponse(
+          response.text,
+          schema,
+          shouldExtractXMLMetadata ? globalSchema : undefined
+        );
+        results.push(...parsed.items);
+        // Take first non-empty globalMetadata
+        if (!globalMetadata && parsed.globalMetadata) {
+          globalMetadata = parsed.globalMetadata;
+        }
+      }
+
+      // If globalSchema is provided and format differs from response format, try parsing global metadata separately
+      if (globalSchema && !globalMetadata && globalMetadataFormat && globalMetadataFormat !== response.format) {
+        if (globalMetadataFormat === 'json') {
+          // Try to extract JSON metadata from mixed response
+          const jsonMetadata = this.extractJSONMetadata(response.text, globalSchema);
+          if (jsonMetadata) {
+            globalMetadata = jsonMetadata;
+          }
+        } else if (globalMetadataFormat === 'yaml') {
+          // Try to extract YAML metadata from mixed response
+          const yamlMetadata = await this.extractYAMLMetadata(response.text, globalSchema);
+          if (yamlMetadata) {
+            globalMetadata = yamlMetadata;
+          }
+        }
       }
     }
 
-    return results;
+    return { items: results, globalMetadata };
+  }
+
+  /**
+   * Extract JSON metadata from a mixed-format response
+   */
+  private extractJSONMetadata(text: string, globalSchema: OutputSchema<any>): any | null {
+    try {
+      // Look for JSON code block - specifically marked as json
+      const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[1]);
+        const metadata: any = {};
+
+        for (const [fieldName, fieldSchema] of Object.entries(globalSchema)) {
+          if (parsed[fieldName] !== undefined) {
+            if (fieldSchema.type === 'object' && fieldSchema.nested) {
+              metadata[fieldName] = {};
+              for (const [nestedName, nestedSchema] of Object.entries(fieldSchema.nested)) {
+                if (parsed[fieldName][nestedName] !== undefined) {
+                  metadata[fieldName][nestedName] = this.convertValue(parsed[fieldName][nestedName], nestedSchema);
+                }
+              }
+            } else {
+              metadata[fieldName] = this.convertValue(parsed[fieldName], fieldSchema);
+            }
+          }
+        }
+
+        return Object.keys(metadata).length > 0 ? metadata : null;
+      }
+    } catch (err) {
+      console.warn('Failed to extract JSON metadata:', err);
+    }
+    return null;
+  }
+
+  /**
+   * Extract YAML metadata from a mixed-format response
+   */
+  private async extractYAMLMetadata(text: string, globalSchema: OutputSchema<any>): Promise<any | null> {
+    try {
+      const yaml = await import('js-yaml');
+
+      // Look for YAML code block
+      const yamlMatch = text.match(/```(?:yaml|yml)\s*([\s\S]*?)\s*```/);
+      if (yamlMatch) {
+        const parsed = yaml.load(yamlMatch[1]) as any;
+        const metadata: any = {};
+
+        for (const [fieldName, fieldSchema] of Object.entries(globalSchema)) {
+          if (parsed[fieldName] !== undefined) {
+            if (fieldSchema.type === 'object' && fieldSchema.nested) {
+              metadata[fieldName] = {};
+              for (const [nestedName, nestedSchema] of Object.entries(fieldSchema.nested)) {
+                if (parsed[fieldName][nestedName] !== undefined) {
+                  metadata[fieldName][nestedName] = this.convertValue(parsed[fieldName][nestedName], nestedSchema);
+                }
+              }
+            } else {
+              metadata[fieldName] = this.convertValue(parsed[fieldName], fieldSchema);
+            }
+          }
+        }
+
+        return Object.keys(metadata).length > 0 ? metadata : null;
+      }
+    } catch (err) {
+      console.warn('Failed to extract YAML metadata:', err);
+    }
+    return null;
   }
 
   /**
    * Parse XML response into structured outputs
+   * Returns both items and optional global metadata
    */
   private parseXMLResponse<TOutput>(
     xmlText: string,
-    schema: OutputSchema<TOutput>
-  ): TOutput[] {
+    schema: OutputSchema<TOutput>,
+    globalSchema?: OutputSchema<any>
+  ): { items: TOutput[]; globalMetadata?: any } {
     const results: TOutput[] = [];
+    let globalMetadata: any = undefined;
+
+    // Debug logging
+    if (process.env.DEBUG_XML === 'true') {
+      console.log('\n=== RAW XML RESPONSE ===');
+      console.log(xmlText.substring(0, 2000));
+      console.log('========================\n');
+    }
 
     try {
       const parser = new LuciformXMLParser(xmlText, { mode: 'luciform-permissive' });
@@ -765,7 +1248,7 @@ export class StructuredLLMExecutor {
 
       if (!parseResult.document?.root) {
         console.warn('No XML root element found');
-        return [];
+        return { items: [], globalMetadata: undefined };
       }
 
       const root = parseResult.document.root;
@@ -777,22 +1260,37 @@ export class StructuredLLMExecutor {
 
       if (itemElements.length === 0) {
         console.warn('No <item> elements found in XML response');
-        return [];
+        return { items: [], globalMetadata: undefined };
       }
 
+      // Group items by ID (Gemini sometimes generates multiple <item> elements with same ID)
+      const itemsById = new Map<string, any>();
+
       for (const itemEl of itemElements) {
-        const output: any = {};
         const item = itemEl as any; // Cast to any for XML node access
+
+        // Get item ID from attributes
+        const itemId = item.attributes?.get?.('id') || item.attributes?.id || '0';
+
+        // Get or create output for this ID
+        if (!itemsById.has(itemId)) {
+          itemsById.set(itemId, {});
+        }
+        const output = itemsById.get(itemId);
 
         // Map XML attributes/elements to output schema
         for (const [fieldName, fieldSchema] of Object.entries(schema) as [string, OutputFieldSchema][]) {
+          // Skip if already extracted
+          if (output[fieldName] !== undefined) continue;
+
           // Try attribute first, then child element
-          let value = item.attributes?.[fieldName];
+          let value = item.attributes?.get?.(fieldName) || item.attributes?.[fieldName];
 
           if (value === undefined && item.children) {
-            const childEl = item.children.find((c: any) => c.name === fieldName);
-            if (childEl?.text) {
-              value = childEl.text;
+            const childEl = item.children.find((c: any) => c.type === 'element' && c.name === fieldName);
+            if (childEl) {
+              // Extract text content from child elements
+              value = this.getTextContentFromElement(childEl);
             }
           }
 
@@ -805,15 +1303,93 @@ export class StructuredLLMExecutor {
             console.warn(`Required field "${fieldName}" missing in XML response`);
           }
         }
+      }
 
-        results.push(output as TOutput);
+      // Convert map to array, sorted by ID
+      const sortedIds = Array.from(itemsById.keys()).sort((a, b) => {
+        const numA = parseInt(a, 10);
+        const numB = parseInt(b, 10);
+        return isNaN(numA) || isNaN(numB) ? a.localeCompare(b) : numA - numB;
+      });
+
+      for (const id of sortedIds) {
+        results.push(itemsById.get(id) as TOutput);
+      }
+
+      // Parse global metadata if globalSchema is provided
+      if (globalSchema && root.children) {
+        globalMetadata = {};
+
+        for (const [fieldName, fieldSchema] of Object.entries(globalSchema) as [string, OutputFieldSchema][]) {
+          // Look for child element with this name (not an <item>)
+          const globalEl = root.children.find(
+            (c: any) => c.type === 'element' && c.name === fieldName && c.name !== 'item'
+          );
+
+          if (globalEl) {
+            // Extract value from element
+            const value = this.getTextContentFromElement(globalEl);
+            if (value) {
+              globalMetadata[fieldName] = this.convertValue(value, fieldSchema);
+            }
+
+            // Also check for nested elements (like <suggestion> inside <feedback>)
+            if (globalEl.children) {
+              const nestedItems = globalEl.children.filter((c: any) => c.type === 'element');
+              if (nestedItems.length > 0 && fieldSchema.type === 'array') {
+                // Array of nested elements
+                globalMetadata[fieldName] = nestedItems.map((el: any) => {
+                  const obj: any = {};
+
+                  // Extract attributes
+                  if (el.attributes) {
+                    const attrs = el.attributes;
+                    if (attrs instanceof Map) {
+                      attrs.forEach((value, key) => {
+                        obj[key] = value;
+                      });
+                    } else {
+                      Object.assign(obj, attrs);
+                    }
+                  }
+
+                  // Extract text content
+                  const text = this.getTextContentFromElement(el);
+                  if (text && !obj.description) {
+                    obj.description = text;
+                  }
+
+                  return obj;
+                });
+              }
+            }
+          }
+        }
       }
     } catch (error: any) {
       console.error('Failed to parse XML response:', error.message);
       console.error('XML text:', xmlText);
     }
 
-    return results;
+    return { items: results, globalMetadata };
+  }
+
+  /**
+   * Extract text content from XML element
+   */
+  private getTextContentFromElement(element: any): string {
+    if (!element) return '';
+
+    // If element has direct text children, concatenate them
+    if (element.children) {
+      return element.children
+        .filter((c: any) => c.type === 'text')
+        .map((c: any) => c.content || '')
+        .join('')
+        .trim();
+    }
+
+    return '';
   }
 
   /**
@@ -821,9 +1397,11 @@ export class StructuredLLMExecutor {
    */
   private parseJSONResponse<TOutput>(
     jsonText: string,
-    schema: OutputSchema<TOutput>
-  ): TOutput[] {
+    schema: OutputSchema<TOutput>,
+    globalSchema?: OutputSchema<any>
+  ): { items: TOutput[]; globalMetadata?: any } {
     const results: TOutput[] = [];
+    let globalMetadata: any = undefined;
 
     try {
       // Try to extract JSON from markdown code blocks
@@ -853,12 +1431,112 @@ export class StructuredLLMExecutor {
 
         results.push(output as TOutput);
       }
+
+      // Parse global metadata if globalSchema provided
+      if (globalSchema && !Array.isArray(parsed)) {
+        globalMetadata = {};
+
+        for (const [fieldName, fieldSchema] of Object.entries(globalSchema) as [string, OutputFieldSchema][]) {
+          // Look for top-level field (not in items array)
+          const value = parsed[fieldName];
+
+          if (value !== undefined) {
+            if (fieldSchema.type === 'object' && fieldSchema.nested) {
+              // Parse nested object
+              globalMetadata[fieldName] = {};
+              for (const [nestedName, nestedSchema] of Object.entries(fieldSchema.nested) as [string, OutputFieldSchema][]) {
+                if (value[nestedName] !== undefined) {
+                  globalMetadata[fieldName][nestedName] = this.convertValue(value[nestedName], nestedSchema);
+                }
+              }
+            } else {
+              globalMetadata[fieldName] = this.convertValue(value, fieldSchema);
+            }
+          }
+        }
+      }
     } catch (error: any) {
       console.error('Failed to parse JSON response:', error.message);
       console.error('JSON text:', jsonText);
     }
 
-    return results;
+    return { items: results, globalMetadata };
+  }
+
+  /**
+   * Parse YAML response into structured outputs
+   */
+  private async parseYAMLResponse<TOutput>(
+    yamlText: string,
+    schema: OutputSchema<TOutput>,
+    globalSchema?: OutputSchema<any>
+  ): Promise<{ items: TOutput[]; globalMetadata?: any }> {
+    const results: TOutput[] = [];
+    let globalMetadata: any = undefined;
+
+    try {
+      // Import yaml dynamically
+      const yaml = await import('js-yaml');
+
+      // Try to extract YAML from markdown code blocks
+      let cleanedText = yamlText.trim();
+      const yamlMatch = cleanedText.match(/```(?:yaml|yml)\s*([\s\S]*?)\s*```/);
+      if (yamlMatch) {
+        cleanedText = yamlMatch[1];
+      }
+
+      const parsed = yaml.load(cleanedText) as any;
+
+      // Extract items array
+      const items = Array.isArray(parsed) ? parsed : (parsed.items || [parsed]);
+
+      // Parse items
+      for (const item of items) {
+        const output: any = {};
+
+        for (const [fieldName, fieldSchema] of Object.entries(schema) as [string, OutputFieldSchema][]) {
+          const value = item[fieldName];
+
+          if (value !== undefined) {
+            output[fieldName] = this.convertValue(value, fieldSchema);
+          } else if (fieldSchema.default !== undefined) {
+            output[fieldName] = fieldSchema.default;
+          } else if (fieldSchema.required) {
+            console.warn(`Required field "${fieldName}" missing in YAML response`);
+          }
+        }
+
+        results.push(output as TOutput);
+      }
+
+      // Parse global metadata if globalSchema provided
+      if (globalSchema && !Array.isArray(parsed)) {
+        globalMetadata = {};
+
+        for (const [fieldName, fieldSchema] of Object.entries(globalSchema) as [string, OutputFieldSchema][]) {
+          const value = parsed[fieldName];
+
+          if (value !== undefined) {
+            if (fieldSchema.type === 'object' && fieldSchema.nested) {
+              // Parse nested object
+              globalMetadata[fieldName] = {};
+              for (const [nestedName, nestedSchema] of Object.entries(fieldSchema.nested) as [string, OutputFieldSchema][]) {
+                if (value[nestedName] !== undefined) {
+                  globalMetadata[fieldName][nestedName] = this.convertValue(value[nestedName], nestedSchema);
+                }
+              }
+            } else {
+              globalMetadata[fieldName] = this.convertValue(value, fieldSchema);
+            }
+          }
+        }
+      }
+    } catch (error: any) {
+      console.error('Failed to parse YAML response:', error.message);
+      console.error('YAML text:', yamlText);
+    }
+
+    return { items: results, globalMetadata };
   }
 
   /**

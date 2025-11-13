@@ -1574,11 +1574,14 @@ export class QueryBuilder<T = any> {
       const entities = currentResults.map(r => r.entity);
 
       // Execute LLM batch generation
-      const enriched = await this.structuredLLMExecutor.executeLLMBatch(entities, config);
+      const result = await this.structuredLLMExecutor.executeLLMBatch(entities, config);
+
+      // Handle return type (array or LLMBatchResult)
+      const enriched = Array.isArray(result) ? result : result.items;
 
       // Merge generated fields back into SearchResults
-      return currentResults.map((result, index) => ({
-        ...result,
+      return currentResults.map((res, index) => ({
+        ...res,
         entity: enriched[index]
       }));
     } catch (error: any) {

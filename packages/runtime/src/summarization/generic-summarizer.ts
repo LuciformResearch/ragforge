@@ -15,6 +15,8 @@
 import { StructuredPromptBuilder } from '../llm/structured-prompt-builder.js';
 import type { LLMProvider } from '../reranking/llm-provider.js';
 import type { SummaryStrategy } from './default-strategies.js';
+import { StructuredLLMExecutor } from '../llm/structured-llm-executor.js';
+import type { LLMStructuredCallConfig, OutputSchema } from '../llm/structured-llm-executor.js';
 
 /**
  * Configuration for field summarization
@@ -103,11 +105,15 @@ export interface SummarizeInput {
  * ```
  */
 export class GenericSummarizer {
+  private executor: StructuredLLMExecutor;
+
   constructor(
     private llmProvider: LLMProvider,
     private strategies: Map<string, SummaryStrategy>,
     private customTemplates: Map<string, string> = new Map()
-  ) {}
+  ) {
+    this.executor = new StructuredLLMExecutor();
+  }
 
   /**
    * Determine if a field value needs summarization
@@ -123,14 +129,63 @@ export class GenericSummarizer {
   }
 
   /**
-   * Summarize a single field
-   *
-   * @param entityType - Entity type (e.g., "Scope")
-   * @param fieldName - Field being summarized (e.g., "source")
-   * @param fieldValue - Content to summarize
-   * @param entity - Full entity object for context
-   * @param config - Summarization config
-   * @returns Structured summary
+   * NEW: Summarize using StructuredLLMExecutor (unified approach)
+   */
+  async summarizeFieldWithExecutor(
+    entityType: string,
+    fieldName: string,
+    fieldValue: string,
+    entity: any,
+    config: SummarizationConfig
+  ): Promise<FieldSummary> {
+    // Get strategy
+    const strategy = this.strategies.get(config.strategy);
+    if (!strategy) {
+      throw new Error(`Unknown summarization strategy: ${config.strategy}`);
+    }
+
+    // Convert strategy output schema to StructuredLLMExecutor format
+    const outputSchema: OutputSchema<FieldSummary> = {};
+    for (const field of strategy.promptConfig.outputFormat.fields) {
+      outputSchema[field.name] = {
+        type: field.type as any,
+        description: field.description || `Summary field: ${field.name}`,
+        required: field.required
+      };
+    }
+
+    // Prepare data for input
+    const item = {
+      [fieldName]: fieldValue,
+      ...entity
+    };
+
+    // Use StructuredLLMExecutor
+    const result = await this.executor.executeLLMBatch([item], {
+      inputFields: [fieldName],
+      llmProvider: this.llmProvider,
+      systemPrompt: strategy.promptConfig.systemContext,
+      userTask: strategy.promptConfig.userTask,
+      outputSchema,
+      outputFormat: 'xml',
+      batchSize: 1
+    });
+
+    // Handle return type (array or LLMBatchResult)
+    const results = Array.isArray(result) ? result : result.items;
+    const summary = results[0];
+
+    // Filter to requested output fields (if specified)
+    if (config.output_fields.length > 0) {
+      return this.filterOutputFields(summary, config.output_fields);
+    }
+
+    return summary;
+  }
+
+  /**
+   * LEGACY: Summarize a single field (kept for backward compatibility)
+   * @deprecated Use summarizeFieldWithExecutor for better performance
    */
   async summarizeField(
     entityType: string,
@@ -139,6 +194,10 @@ export class GenericSummarizer {
     entity: any,
     config: SummarizationConfig
   ): Promise<FieldSummary> {
+    // Delegate to new implementation
+    return this.summarizeFieldWithExecutor(entityType, fieldName, fieldValue, entity, config);
+
+    /* ORIGINAL IMPLEMENTATION
     // Get strategy
     const strategy = this.strategies.get(config.strategy);
     if (!strategy) {
@@ -171,6 +230,7 @@ export class GenericSummarizer {
     }
 
     return parsed;
+    */
   }
 
   /**
