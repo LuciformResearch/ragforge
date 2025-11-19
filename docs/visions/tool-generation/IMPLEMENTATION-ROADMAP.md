@@ -18,6 +18,93 @@ Implement systematic tool generation from `ragforge.config.yaml`:
 
 ---
 
+## File Overview
+
+### Files to Create (New)
+
+```
+📁 packages/core/src/tools/
+  ├── 📄 tool-generator.ts              # Main tool generation logic
+  ├── 📄 tool-generator.test.ts         # Unit tests
+  └── 📁 types/
+      └── 📄 index.ts                   # Tool type definitions
+
+📁 packages/core/src/tools/specialized/
+  ├── 📄 date-range-tool.ts             # Date range query generator
+  ├── 📄 number-range-tool.ts           # Numeric range query generator
+  ├── 📄 pattern-tool.ts                # Pattern matching query generator
+  └── 📄 index.ts
+
+📁 packages/core/src/tools/advanced/
+  ├── 📄 change-tracking-tools.ts       # Leverage existing ChangeTracker
+  ├── 📄 fulltext-tools.ts              # Neo4j full-text index tools
+  ├── 📄 aggregation-tools.ts           # COUNT/AVG/SUM/GROUP BY
+  ├── 📄 graph-analytics-tools.ts       # PageRank, community detection
+  ├── 📄 multi-entity-join-tools.ts     # Complex cross-entity queries
+  └── 📄 index.ts
+
+📁 packages/core/src/computed/
+  ├── 📄 field-evaluator.ts             # Runtime computation logic
+  └── 📄 field-evaluator.test.ts
+
+📁 packages/core/templates/tools/
+  ├── 📄 database-tools.ts.template
+  ├── 📄 custom-tools.ts.template
+  └── 📄 index.ts.template
+
+📁 ragforge/docs/
+  ├── 📄 TOOL-GENERATION-API.md
+  ├── 📄 CUSTOM-TOOLS-GUIDE.md
+  ├── 📄 COMPUTED-FIELDS-GUIDE.md
+  └── 📄 MIGRATION-TO-GENERATED-TOOLS.md
+
+📁 ragforge/examples/
+  ├── 📁 code-rag-complete/
+  ├── 📁 product-catalog-rag/
+  └── 📁 document-rag/
+```
+
+### Files to Modify (Existing)
+
+```
+✏️ packages/core/src/generator/code-generator.ts
+   - Add tools to GeneratedCode interface
+   - Add generateDatabaseTools() method
+
+✏️ packages/core/src/types/config.ts
+   - Add ComputedFieldConfig interface
+   - Add computed_fields to EntityConfig
+
+✏️ packages/cli/src/commands/generate.ts
+   - Write tools/ directory to output
+   - Preserve custom-tools.ts across regeneration
+
+✏️ packages/runtime/src/query/query-builder.ts
+   - Support ORDER BY on computed fields
+   - Inject WITH clause for runtime computation
+
+✏️ ragforge/README.md
+   - Add tool generation section
+
+✏️ ragforge/docs/QUICKSTART.md
+   - Include tool generation in quick start
+```
+
+### Files to Reference (No Changes)
+
+```
+📖 examples/tool-calling-agent/database-tools-generator.ts
+   - Current manual implementation (reference)
+
+📖 packages/runtime/src/types/chat.ts
+   - Tool, ToolParameter type definitions
+
+📖 packages/runtime/src/adapters/change-tracker.ts
+   - Existing change tracking (leverage for tools)
+```
+
+---
+
 ## Implementation Phases
 
 ### [Phase 1: Core Tool Generation](./TOOL-GENERATION-ARCHITECTURE.md#L1375) (Week 1-2)
@@ -39,9 +126,25 @@ Implement systematic tool generation from `ragforge.config.yaml`:
 
 **Deliverable**: Runtime function `generateToolsFromConfig()` that creates tools with complete schema exposure
 
-**Key Files**:
-- New: `packages/core/src/tools/tool-generator.ts`
-- Reference: `examples/tool-calling-agent/database-tools-generator.ts` (current manual implementation)
+**Files to Create**:
+```
+📁 packages/core/src/tools/
+  └── 📄 tool-generator.ts              # Main tool generation logic
+      └── 📄 tool-generator.test.ts     # Unit tests
+
+📁 packages/core/src/tools/types/
+  └── 📄 index.ts                       # Tool type definitions
+```
+
+**Files to Reference/Modify**:
+- 📖 Read: [`examples/tool-calling-agent/database-tools-generator.ts`](../../../examples/tool-calling-agent/database-tools-generator.ts)
+  - Current manual implementation (lines 12-344)
+  - Shows tool structure and handler patterns
+- 📖 Read: [`packages/core/src/types/config.ts`](../../../packages/core/src/types/config.ts)
+  - RagForgeConfig type definition
+  - EntityConfig, searchable_fields structure
+- 📖 Read: [`packages/runtime/src/types/chat.ts`](../../../packages/runtime/src/types/chat.ts)
+  - Tool, ToolParameter type definitions (lines 113-139)
 
 ---
 
@@ -61,18 +164,31 @@ Implement systematic tool generation from `ragforge.config.yaml`:
 
 **Deliverable**: `ragforge generate` creates `generated-client/tools/` directory
 
-**Output Structure**:
+**Output Structure** (in user project after `ragforge generate`):
 ```
 generated-client/
 ├─ tools/
-│  ├─ database-tools.ts      (auto-generated, DO NOT EDIT)
-│  ├─ custom-tools.ts        (user-editable, preserved)
-│  └─ index.ts               (setupToolRegistry function)
+│  ├─ database-tools.ts      # Auto-generated, DO NOT EDIT
+│  ├─ custom-tools.ts        # User-editable, preserved
+│  └─ index.ts               # setupToolRegistry function
 ```
 
-**Key Files**:
-- Modify: `packages/core/src/generator/code-generator.ts`
-- New: `packages/core/templates/tools/*.template`
+**Files to Create**:
+```
+📁 packages/core/templates/tools/
+  ├── 📄 database-tools.ts.template      # Template for generated tools
+  ├── 📄 custom-tools.ts.template        # Template for user custom tools
+  └── 📄 index.ts.template               # Template for setupToolRegistry
+```
+
+**Files to Modify**:
+- ✏️ Modify: [`packages/core/src/generator/code-generator.ts`](../../../packages/core/src/generator/code-generator.ts)
+  - Lines 43-78: Add `tools` to `GeneratedCode` interface
+  - Add `generateDatabaseTools()` method (around line 300+)
+  - Modify `generate()` to include tools in output
+- ✏️ Modify: [`packages/cli/src/commands/generate.ts`](../../../packages/cli/src/commands/generate.ts)
+  - Update to write tools/ directory to output
+  - Handle preservation of custom-tools.ts across regeneration
 
 ---
 
@@ -109,9 +225,23 @@ entities:
 
 **Deliverable**: Computed fields working end-to-end (config → tools → queries)
 
-**Key Files**:
-- Modify: `packages/core/src/types/config.ts` (add computed_fields schema)
-- Modify: `packages/core/src/tools/tool-generator.ts` (handle computed fields)
+**Files to Create**:
+```
+📁 packages/core/src/computed/
+  ├── 📄 field-evaluator.ts             # Runtime computation logic
+  └── 📄 field-evaluator.test.ts        # Tests for expressions & cypher
+```
+
+**Files to Modify**:
+- ✏️ Modify: [`packages/core/src/types/config.ts`](../../../packages/core/src/types/config.ts)
+  - Add `ComputedFieldConfig` interface
+  - Add `computed_fields?: ComputedFieldConfig[]` to `EntityConfig`
+- ✏️ Modify: [`packages/core/src/tools/tool-generator.ts`](../../../packages/core/src/tools/tool-generator.ts)
+  - Include computed fields in tool descriptions
+  - Mark computed fields with "(computed)" tag
+- ✏️ Modify: [`packages/runtime/src/query/query-builder.ts`](../../../packages/runtime/src/query/query-builder.ts)
+  - Support ORDER BY on computed fields
+  - Inject WITH clause for runtime computation
 
 **Details**: [Computed Fields Solution](./TOOL-GENERATION-ARCHITECTURE.md#L848)
 
@@ -135,6 +265,28 @@ entities:
 - `query_entities_by_pattern` - Regex/glob/fuzzy matching on string fields
 
 **Deliverable**: 3+ specialized tools auto-generated based on config schema
+
+**Files to Create**:
+```
+📁 packages/core/src/tools/specialized/
+  ├── 📄 date-range-tool.ts             # Date range query generator
+  ├── 📄 number-range-tool.ts           # Numeric range query generator
+  ├── 📄 pattern-tool.ts                # Pattern matching query generator
+  └── 📄 index.ts                       # Exports all specialized generators
+```
+
+**Files to Modify**:
+- ✏️ Modify: [`packages/core/src/tools/tool-generator.ts`](../../../packages/core/src/tools/tool-generator.ts)
+  - Add `includeSpecializedTools` option processing
+  - Detect field types and conditionally generate tools
+  - Import specialized generators
+
+**Example Config Detection**:
+```typescript
+// If config has timestamp fields → generate date range tool
+// If config has numeric fields → generate number range tool
+// If config has string fields → generate pattern tool
+```
 
 **Details**: [Specialized Tools](./TOOL-GENERATION-ARCHITECTURE.md#L336)
 
@@ -163,6 +315,29 @@ entities:
 
 **Deliverable**: Advanced tool suite with change tracking
 
+**Files to Create**:
+```
+📁 packages/core/src/tools/advanced/
+  ├── 📄 change-tracking-tools.ts       # Leverage existing ChangeTracker
+  ├── 📄 fulltext-tools.ts              # Neo4j full-text index tools
+  ├── 📄 aggregation-tools.ts           # COUNT/AVG/SUM/GROUP BY
+  ├── 📄 graph-analytics-tools.ts       # PageRank, community detection
+  ├── 📄 multi-entity-join-tools.ts     # Complex cross-entity queries
+  └── 📄 index.ts                       # Exports all advanced tools
+```
+
+**Files to Reference**:
+- 📖 Read: [`packages/runtime/src/adapters/change-tracker.ts`](../../../packages/runtime/src/adapters/change-tracker.ts)
+  - Existing ChangeTracker implementation (lines 29-428)
+  - Methods: `getEntityHistory()`, `getRecentChanges()`, `getMostModifiedEntities()`
+  - Already provides all needed functionality - just expose as tools!
+
+**Files to Modify**:
+- ✏️ Modify: [`packages/core/src/tools/tool-generator.ts`](../../../packages/core/src/tools/tool-generator.ts)
+  - Add options: `includeChangeTracking`, `includeAggregations`, etc.
+  - Import advanced tool generators
+  - Conditionally include based on config (e.g., detect if change tracking enabled)
+
 **Details**:
 - [Change Tracking Tools](./TOOL-GENERATION-ARCHITECTURE.md#L1268)
 - [Full-Text Search](./TOOL-GENERATION-ARCHITECTURE.md#L1070)
@@ -185,6 +360,37 @@ entities:
 - Video/tutorial on tool generation workflow
 
 **Deliverable**: Complete documentation suite
+
+**Files to Create**:
+```
+📁 ragforge/docs/
+  ├── 📄 TOOL-GENERATION-API.md         # API reference for generateToolsFromConfig
+  ├── 📄 CUSTOM-TOOLS-GUIDE.md          # How to write custom tools
+  ├── 📄 COMPUTED-FIELDS-GUIDE.md       # Best practices for computed fields
+  └── 📄 MIGRATION-TO-GENERATED-TOOLS.md # Migration guide
+
+📁 ragforge/examples/
+  ├── 📁 code-rag-complete/              # Full example with all tool types
+  │   ├── ragforge.config.yaml
+  │   ├── test-all-tools.ts
+  │   └── README.md
+  │
+  ├── 📁 product-catalog-rag/            # E-commerce example
+  │   ├── ragforge.config.yaml
+  │   ├── custom-tools.ts                # Custom business logic
+  │   └── README.md
+  │
+  └── 📁 document-rag/                   # Documentation RAG example
+      ├── ragforge.config.yaml
+      └── README.md
+```
+
+**Files to Modify**:
+- ✏️ Modify: [`ragforge/README.md`](../../../README.md)
+  - Add section on tool generation
+  - Link to detailed guides
+- ✏️ Modify: [`ragforge/docs/QUICKSTART.md`](../../../docs/QUICKSTART.md) (if exists)
+  - Include tool generation in quick start flow
 
 ---
 
