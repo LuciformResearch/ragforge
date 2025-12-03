@@ -9,11 +9,10 @@ import { config } from 'dotenv';
 import { resolve } from 'path';
 import {
   StructuredLLMExecutor,
+  BaseToolExecutor,
   GeminiAPIProvider,
   GeminiNativeToolProvider,
-  type ToolExecutor,
   type ToolCallRequest,
-  type ToolExecutionResult,
   type ToolDefinition,
   type LLMProvider,
   type NativeToolCallingProvider,
@@ -27,13 +26,15 @@ config({ path: resolve(process.cwd(), '.env') });
 const rag = createRagClient();
 
 /**
- * Tool Executor that uses RAG queries
+ * Tool Executor that uses RAG queries.
+ * Extends BaseToolExecutor for automatic parallel execution of multiple tool calls.
  */
-class CodeSearchToolExecutor implements ToolExecutor {
+class CodeSearchToolExecutor extends BaseToolExecutor {
   private llmProvider: LLMProvider;
   private executor: StructuredLLMExecutor;
 
   constructor(llmProvider: LLMProvider) {
+    super();
     this.llmProvider = llmProvider;
     this.executor = new StructuredLLMExecutor();
   }
@@ -72,44 +73,20 @@ class CodeSearchToolExecutor implements ToolExecutor {
     }
   }
 
-  async executeBatch(toolCalls: ToolCallRequest[]): Promise<ToolExecutionResult[]> {
-    const results: ToolExecutionResult[] = [];
-
-    for (const toolCall of toolCalls) {
-      try {
-        const result = await this.execute(toolCall);
-        results.push({
-          tool_name: toolCall.tool_name,
-          success: true,
-          result,
-        });
-      } catch (error: any) {
-        console.error(`   ❌ Tool ${toolCall.tool_name} failed:`, error.message);
-        results.push({
-          tool_name: toolCall.tool_name,
-          success: false,
-          error: error.message,
-        });
-      }
-    }
-
-    return results;
-  }
+  // Note: executeBatch is inherited from BaseToolExecutor and runs tools in parallel!
 
   /**
-   * Search for functions by name (exact or partial match)
+   * Search for code elements by name (exact or partial match)
+   * Searches functions, methods, classes, and other code scopes
    */
   private async searchFunctions(query: string): Promise<any> {
+    // Use server-side name filtering with 'contains'
     const results = await rag.scope()
-      .where({ type: 'function' })
+      .where({ name: { contains: query } })
+      .limit(10)
       .execute();
 
-    // Filter by name match (results have .entity wrapper)
-    const matches = results.filter((result: any) =>
-      result.entity?.name?.toLowerCase().includes(query.toLowerCase())
-    ).slice(0, 5);  // Limit to 5 results
-
-    return matches.map((r: any) => ({
+    return results.map((r: any) => ({
       name: r.entity.name,
       file: r.entity.file,
       type: r.entity.type,
@@ -147,10 +124,10 @@ class CodeSearchToolExecutor implements ToolExecutor {
    * Search by relationships (e.g., what does this function call?)
    */
   private async searchByRelationship(scopeName: string, relationship: string): Promise<any> {
-    // For now, just get consumes relationships
+    // Get scope with expanded relationships
     const results = await rag.scope()
       .where({ name: scopeName })
-      .withRelationships(['consumes'])
+      .withConsumes()  // Expand CONSUMES relationship
       .limit(1)
       .execute();
 
@@ -158,16 +135,23 @@ class CodeSearchToolExecutor implements ToolExecutor {
       return { error: 'Scope not found' };
     }
 
-    const entity = results[0].entity; // Access entity wrapper
-    const consumed = entity.consumes || [];
+    const result = results[0];
+    const entity = result.entity;
+    // Expanded relationships are in context.related
+    const related = result.context?.related || [];
 
     return {
       scope: scopeName,
       relationship,
-      related: consumed.slice(0, 10).map((c: any) => ({
-        name: c.entity?.name || c.name,
-        type: c.entity?.type || c.type,
-        file: c.entity?.file || c.file,
+      entity: {
+        name: entity.name,
+        type: entity.type,
+        file: entity.file,
+      },
+      related: related.slice(0, 10).map((r: any) => ({
+        name: r.name,
+        type: r.type,
+        file: r.file,
       })),
     };
   }
@@ -274,6 +258,7 @@ const TOOLS: ToolDefinition[] = [
           items: {
             type: 'array',
             description: 'Array of items to analyze (typically from a previous tool call)',
+            items: { type: 'object' },
           },
           task: {
             type: 'string',

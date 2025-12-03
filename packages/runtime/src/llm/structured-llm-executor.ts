@@ -184,6 +184,44 @@ export interface ToolExecutor {
 }
 
 /**
+ * Base tool executor with parallel execution support.
+ * Extend this class and implement the `execute` method for each tool.
+ * By default, `executeBatch` runs all tools in parallel using Promise.all().
+ */
+export abstract class BaseToolExecutor implements ToolExecutor {
+  /**
+   * Execute a single tool call. Implement this in subclasses.
+   */
+  abstract execute(toolCall: ToolCallRequest): Promise<any>;
+
+  /**
+   * Execute multiple tool calls in parallel.
+   * Override this method if you need sequential execution for specific tools.
+   */
+  async executeBatch(toolCalls: ToolCallRequest[]): Promise<ToolExecutionResult[]> {
+    const promises = toolCalls.map(async (toolCall) => {
+      try {
+        const result = await this.execute(toolCall);
+        return {
+          tool_name: toolCall.tool_name,
+          success: true,
+          result,
+        };
+      } catch (error: any) {
+        console.error(`   ❌ Tool ${toolCall.tool_name} failed:`, error.message);
+        return {
+          tool_name: toolCall.tool_name,
+          success: false,
+          error: error.message,
+        };
+      }
+    });
+
+    return Promise.all(promises);
+  }
+}
+
+/**
  * Embedding generation configuration
  */
 export interface EmbeddingGenerationConfig {
@@ -2138,22 +2176,83 @@ If you already have enough information to process all items, return an empty too
 
   /**
    * Build system prompt with tool descriptions
+   * Inspired by Anthropic's legacy XML tool calling format for better multi-tool support
    */
   private buildSystemPromptWithTools(tools: ToolDefinition[]): string {
     const toolsDesc = tools
-      .map(
-        t => `- ${t.function.name}: ${t.function.description}
-  Parameters: ${JSON.stringify(t.function.parameters, null, 2)}`
-      )
+      .map(t => {
+        const params = t.function.parameters;
+        const required = params.required || [];
+        const properties = params.properties || {};
+
+        const paramsList = Object.entries(properties)
+          .map(([name, schema]: [string, any]) => {
+            const isRequired = required.includes(name);
+            return `    - ${name} (${schema.type}${isRequired ? ', required' : ', optional'}): ${schema.description || ''}`;
+          })
+          .join('\n');
+
+        return `### ${t.function.name}
+${t.function.description}
+
+Parameters:
+${paramsList}`;
+      })
       .join('\n\n');
 
-    return `You are an AI assistant with access to tools.
+    // Get tool names for examples
+    const toolNames = tools.map(t => t.function.name);
+    const exampleTool1 = toolNames[0] || 'tool_name';
+    const exampleTool2 = toolNames[1] || toolNames[0] || 'other_tool';
 
-Available tools:
+    return `You are an AI assistant with access to tools. You can call multiple tools simultaneously when they are independent.
+
+## Available Tools
+
 ${toolsDesc}
 
-Use tools when you need additional information to complete the task.
-Call tools strategically - only when the information is truly needed.`;
+## How to Call Tools
+
+When you need to use tools, include them in the \`tool_calls\` array. Each tool call must have:
+- \`tool_name\`: The exact name of the tool
+- \`arguments\`: An object with the required parameters
+
+### Single Tool Call Example:
+\`\`\`json
+{
+  "tool_calls": [
+    {
+      "tool_name": "${exampleTool1}",
+      "arguments": { "param1": "value1" }
+    }
+  ]
+}
+\`\`\`
+
+### Multiple Parallel Tool Calls Example:
+When tools don't depend on each other's results, call them all at once:
+\`\`\`json
+{
+  "tool_calls": [
+    {
+      "tool_name": "${exampleTool1}",
+      "arguments": { "param1": "value1" }
+    },
+    {
+      "tool_name": "${exampleTool2}",
+      "arguments": { "param2": "value2" }
+    }
+  ]
+}
+\`\`\`
+
+## Important Guidelines
+
+1. **Call multiple tools in parallel** when they don't depend on each other's results
+2. **Provide all required parameters** - missing required parameters will cause errors
+3. **Use exact tool names** - tool names are case-sensitive
+4. **Return empty tool_calls** when you don't need any tool to complete the task
+5. **Sequential calls**: If tool B needs the result of tool A, call A first, wait for results, then call B`;
   }
 
   /**

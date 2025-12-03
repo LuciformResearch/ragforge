@@ -747,7 +747,8 @@ export async function runQuickstart(options: QuickstartOptions): Promise<void> {
     neo4jPassword,
     neo4jDatabase,
     geminiKey,
-    options.dev
+    options.dev,
+    containerName
   );
   await log(`🔧 DEBUG: generateClient returned path: ${generatedPath}`);
 
@@ -1619,7 +1620,8 @@ async function generateClient(
   password: string,
   database?: string,
   geminiKey?: string,
-  devMode?: boolean
+  devMode?: boolean,
+  containerName?: string
 ): Promise<string> {
   console.log('\n🛠️  Generating TypeScript client...');
   console.log(`🔧 generateClient() called with devMode=${devMode}`);
@@ -1671,7 +1673,8 @@ async function generateClient(
     typesContent,
     ragforgeRoot,
     config.name,
-    dev
+    dev,
+    containerName
   );
 
   // Write .env

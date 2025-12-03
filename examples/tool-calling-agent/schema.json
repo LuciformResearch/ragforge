@@ -94,7 +94,7 @@
           "nullable": true
         }
       ],
-      "count": 901
+      "count": 1191
     },
     {
       "label": "File",
@@ -125,7 +125,7 @@
           "nullable": true
         }
       ],
-      "count": 73
+      "count": 81
     },
     {
       "label": "Directory",
@@ -723,11 +723,11 @@
       "AgentResult",
       "AgentRuntime",
       "AggregateResult",
+      "AssistantResponse",
       "Batch",
       "CODE_ANALYSIS_STRATEGY",
       "CacheConfig",
-      "CachedSummary",
-      "Change"
+      "CachedSummary"
     ],
     "Scope.source": [
       "function printRootHelp(): void {\n  console.log(`RagForge CLI v${VERSION}\n\nQuick start:\n  ragforge quickstart                # New to RagForge? Start here!\n  ragforge init                      # Introspect Neo4j + generate client (uses .env)\n  ragforge init --auto-detect-fields # + LLM field detection (needs GEMINI_API_KEY)\n\nConnection defaults from .env in current directory:\n  NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD, NEO4J_DATABASE, GEMINI_API_KEY\n\nUsage:\n  ragforge quickstart [options]      Quick setup for code RAG with defaults\n  ragforge init [options]            Complete setup (introspect + generate)\n  ragforge help <command>            Show detailed help for a specific command\n\nAdvanced commands:\n  generate             Regenerate client from existing config\n  introspect           Just introspection, no client code\n  embeddings:index     Create vector indexes\n  embeddings:generate  Generate embeddings via Gemini\n\nGlobal options:\n  -h, --help       Show this message\n  -v, --version    Show CLI version\n\nExamples:\n  # Quick start (auto-detects TypeScript/Python, creates config, sets up Docker)\n  ragforge quickstart\n\n  # Simple init - uses .env in current directory\n  ragforge init\n\n  # With LLM field auto-detection\n  ragforge init --auto-detect-fields\n\n  # Custom project name and output\n  ragforge init --project myapp --out ./generated\n\n  # Override connection (instead of .env)\n  ragforge init --uri bolt://localhost:7687 --username neo4j --password secret\n`);\n}",
@@ -1243,7 +1243,7 @@
         ]
       },
       {
-        "name": "gemini.ts",
+        "name": "types.ts",
         "uuid": null,
         "relationships": [
           {
@@ -1287,11 +1287,18 @@
               "high": 0
             },
             "type": "BELONGS_TO"
+          },
+          {
+            "count": {
+              "low": 1,
+              "high": 0
+            },
+            "type": null
           }
         ]
       },
       {
-        "name": "types.ts",
+        "name": "gemini.ts",
         "uuid": null,
         "relationships": [
           {

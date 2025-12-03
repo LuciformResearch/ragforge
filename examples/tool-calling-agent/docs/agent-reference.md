@@ -91,7 +91,7 @@ results.forEach(r => {
 
 ## 📚 Entity Reference
 
-### Scope (901 nodes)
+### Scope (1191 nodes)
 **Usage:** `rag.scope()`
 
 **Available Fields:**

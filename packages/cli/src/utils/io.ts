@@ -56,7 +56,8 @@ export async function persistGeneratedArtifacts(
   typesContent: string,
   rootDir: string | undefined,
   projectName: string,
-  dev: boolean = false
+  dev: boolean = false,
+  containerName?: string
 ): Promise<void> {
   console.log('\n📦 Generating project artifacts...\n');
 
@@ -273,7 +274,7 @@ export async function persistGeneratedArtifacts(
 
   // In dev mode, use file: dependency instead of copying runtime
   // No longer copy runtime package, just use file: in package.json
-  await writeGeneratedPackageJson(outDir, projectName, dev, generated, rootDir);
+  await writeGeneratedPackageJson(outDir, projectName, dev, generated, rootDir, containerName);
   await writeGeneratedTsconfig(outDir);
   await writeExampleScripts(outDir, generated, projectName);
   await writeGitIgnore(outDir);
@@ -400,7 +401,8 @@ async function writeGeneratedPackageJson(
   projectName: string,
   dev: boolean,
   generated: GeneratedCode,
-  rootDir: string | undefined
+  rootDir: string | undefined,
+  containerName?: string
 ): Promise<void> {
   const safeName = projectName
     .toLowerCase()
@@ -534,6 +536,14 @@ async function writeGeneratedPackageJson(
     if (generated.scripts.watch) {
       baseScripts['watch'] = 'tsx ./scripts/watch.ts';
     }
+  }
+
+  // Add docker scripts if containerName is provided
+  if (containerName) {
+    baseScripts['docker:start'] = `docker start ${containerName}`;
+    baseScripts['docker:stop'] = `docker stop ${containerName}`;
+    baseScripts['docker:status'] = `docker ps --filter "name=${containerName}" --format "table {{.Names}}\\t{{.Status}}\\t{{.Ports}}"`;
+    baseScripts['docker:logs'] = `docker logs -f ${containerName}`;
   }
 
   pkg.scripts = {

@@ -257,7 +257,7 @@ _Tip_: the runtime exposes `GeminiAPIProvider.fromEnv()` to bootstrap LLM rerank
 
 ### Scope
 
-Approximate nodes: 901
+Approximate nodes: 1191
 
 Usage: `const builder = rag.scope()`
 

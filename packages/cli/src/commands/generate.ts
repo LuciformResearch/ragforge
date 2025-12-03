@@ -302,13 +302,18 @@ export async function runGenerate(options: GenerateOptions): Promise<void> {
   const generated = CodeGenerator.generate(config, schema);
 
   await prepareOutputDirectory(options.outDir, options.force);
+
+  // Extract container name from existing docker-compose.yml if present
+  const containerName = await extractContainerName(options.outDir);
+
   await persistGeneratedArtifacts(
     options.outDir,
     generated,
     typesContent,
     options.rootDir,
     config.name,
-    options.dev
+    options.dev,
+    containerName
   );
   await syncProjectConfigArtifacts(options.outDir, options.configPath, schema, options.schemaPath);
 
@@ -443,6 +448,23 @@ function createVectorIndexFromField(entityName: string, field: string): VectorIn
     provider: 'gemini',
     model: 'gemini-embedding-001'
   };
+}
+
+/**
+ * Extract container name from docker-compose.yml if it exists
+ */
+async function extractContainerName(outDir: string): Promise<string | undefined> {
+  const dockerComposePath = path.join(outDir, 'docker-compose.yml');
+  try {
+    const content = await fs.readFile(dockerComposePath, 'utf-8');
+    const match = content.match(/container_name:\s*(.+)/);
+    if (match) {
+      return match[1].trim();
+    }
+  } catch {
+    // docker-compose.yml doesn't exist
+  }
+  return undefined;
 }
 
 async function syncProjectConfigArtifacts(

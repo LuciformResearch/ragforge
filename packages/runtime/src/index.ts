@@ -67,7 +67,7 @@ export type {
 } from './llm/structured-prompt-builder.js';
 
 // Unified Structured LLM Executor
-export { StructuredLLMExecutor } from './llm/structured-llm-executor.js';
+export { StructuredLLMExecutor, BaseToolExecutor } from './llm/structured-llm-executor.js';
 export type {
   LLMStructuredCallConfig,
   LLMBatchResult,
