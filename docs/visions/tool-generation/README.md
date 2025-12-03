@@ -19,6 +19,12 @@ This directory contains the complete architecture and implementation plan for Ra
    - Implementation strategies
    - Code examples and use cases
 
+3. **[HYBRID-AGENT-SYSTEM.md](./HYBRID-AGENT-SYSTEM.md)** 🆕
+   - Hybrid approach combining text2cypher + generated tools + semantic search
+   - Discovery tools for schema awareness
+   - Decision matrix: when to use which tool
+   - Integration with ragforge.config.yaml
+
 ---
 
 ## 🎯 What This System Does

@@ -26,6 +26,9 @@ summarization_llm:
 entities:
   - name: Scope
     unique_field: uuid
+    display_name_field: name
+    query_field: name
+    content_field: source  # Full content field for agent to read
     vector_indexes:
       - name: scopeSourceEmbeddings
         field: source_embedding

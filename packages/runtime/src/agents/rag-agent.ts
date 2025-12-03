@@ -1,0 +1,686 @@
+/**
+ * RagAgent - Generic Agent from Config
+ *
+ * Creates a ready-to-use agent from any RagForge config.
+ * Uses StructuredLLMExecutor and BaseToolExecutor patterns.
+ *
+ * @example
+ * ```typescript
+ * import { createRagAgent } from '@luciformresearch/ragforge-runtime';
+ * import { createRagClient } from './client.js';
+ *
+ * const rag = createRagClient();
+ * const agent = await createRagAgent({
+ *   configPath: './ragforge.config.yaml',
+ *   ragClient: rag,
+ *   apiKey: process.env.GEMINI_API_KEY,
+ * });
+ *
+ * const { answer } = await agent.ask('What functions handle authentication?');
+ * console.log(answer);
+ * ```
+ */
+
+import { generateToolsFromConfig } from '@luciformresearch/ragforge-core';
+import type { RagForgeConfig, ToolGenerationOptions, GeneratedToolDefinition, ToolHandlerGenerator } from '@luciformresearch/ragforge-core';
+import { StructuredLLMExecutor, BaseToolExecutor, type ToolCallRequest } from '../llm/structured-llm-executor.js';
+import { GeminiAPIProvider } from '../reranking/gemini-api-provider.js';
+import { GeminiNativeToolProvider, type ToolDefinition } from '../llm/native-tool-calling/index.js';
+import * as yaml from 'js-yaml';
+import * as fs from 'fs';
+import * as path from 'path';
+
+// ============================================
+// Agent Logger
+// ============================================
+
+export interface AgentLogEntry {
+  timestamp: string;
+  type: 'start' | 'iteration' | 'tool_call' | 'tool_result' | 'llm_response' | 'final_answer';
+  iteration?: number;
+  data: any;
+}
+
+export interface AgentSessionLog {
+  sessionId: string;
+  question: string;
+  startTime: string;
+  endTime?: string;
+  mode: 'native' | 'structured';
+  tools: string[];
+  entries: AgentLogEntry[];
+  finalAnswer?: string;
+  toolsUsed: string[];
+  totalIterations: number;
+}
+
+class AgentLogger {
+  private logPath?: string;
+  private currentSession?: AgentSessionLog;
+
+  constructor(logPath?: string) {
+    this.logPath = logPath;
+  }
+
+  startSession(question: string, mode: 'native' | 'structured', tools: string[]): void {
+    this.currentSession = {
+      sessionId: `session_${Date.now()}`,
+      question,
+      startTime: new Date().toISOString(),
+      mode,
+      tools,
+      entries: [],
+      toolsUsed: [],
+      totalIterations: 0,
+    };
+
+    this.log({
+      timestamp: new Date().toISOString(),
+      type: 'start',
+      data: { question, mode, tools },
+    });
+  }
+
+  logIteration(iteration: number, llmResponse: any): void {
+    if (!this.currentSession) return;
+    this.currentSession.totalIterations = iteration;
+
+    this.log({
+      timestamp: new Date().toISOString(),
+      type: 'iteration',
+      iteration,
+      data: { llmResponse },
+    });
+  }
+
+  logToolCall(toolName: string, args: any): void {
+    if (!this.currentSession) return;
+    if (!this.currentSession.toolsUsed.includes(toolName)) {
+      this.currentSession.toolsUsed.push(toolName);
+    }
+
+    this.log({
+      timestamp: new Date().toISOString(),
+      type: 'tool_call',
+      data: { toolName, arguments: args },
+    });
+  }
+
+  logToolResult(toolName: string, result: any, durationMs: number): void {
+    this.log({
+      timestamp: new Date().toISOString(),
+      type: 'tool_result',
+      data: { toolName, result, durationMs },
+    });
+  }
+
+  logFinalAnswer(answer: string, confidence?: string): void {
+    if (!this.currentSession) return;
+    this.currentSession.finalAnswer = answer;
+    this.currentSession.endTime = new Date().toISOString();
+
+    this.log({
+      timestamp: new Date().toISOString(),
+      type: 'final_answer',
+      data: { answer, confidence },
+    });
+
+    // Write to file
+    this.writeSessionToFile();
+  }
+
+  private log(entry: AgentLogEntry): void {
+    if (!this.currentSession) return;
+    this.currentSession.entries.push(entry);
+  }
+
+  private writeSessionToFile(): void {
+    if (!this.logPath || !this.currentSession) return;
+
+    try {
+      // Ensure directory exists
+      const dir = path.dirname(this.logPath);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+
+      // Append to log file or create new
+      let logs: AgentSessionLog[] = [];
+      if (fs.existsSync(this.logPath)) {
+        try {
+          const content = fs.readFileSync(this.logPath, 'utf-8');
+          logs = JSON.parse(content);
+        } catch {
+          logs = [];
+        }
+      }
+
+      logs.push(this.currentSession);
+
+      fs.writeFileSync(this.logPath, JSON.stringify(logs, null, 2));
+    } catch (error) {
+      console.error('Failed to write agent log:', error);
+    }
+  }
+
+  getSession(): AgentSessionLog | undefined {
+    return this.currentSession;
+  }
+}
+
+// ============================================
+// Types
+// ============================================
+
+export interface RagAgentOptions {
+  /** Path to ragforge.config.yaml */
+  configPath?: string;
+
+  /** Or provide config object directly */
+  config?: RagForgeConfig;
+
+  /** RagClient instance (required for tool execution) */
+  ragClient: any;
+
+  /** API key for the LLM provider */
+  apiKey?: string;
+
+  /** Model to use (default: gemini-2.0-flash) */
+  model?: string;
+
+  /** Temperature for LLM (default: 0.1) */
+  temperature?: number;
+
+  /** Max iterations for tool loop (default: 10) */
+  maxIterations?: number;
+
+  /** Tool generation options */
+  toolOptions?: ToolGenerationOptions;
+
+  /**
+   * Use native tool calling (Gemini native API) vs XML-based
+   * - 'native': Use Gemini's native function calling (faster, global mode)
+   * - 'structured': Use XML-based StructuredLLMExecutor (per-item mode, more control)
+   * - 'auto': Use native for batch, structured for single questions
+   * Default: 'auto'
+   */
+  toolCallMode?: 'native' | 'structured' | 'auto';
+
+  /**
+   * Include batch_analyze meta-tool
+   * Allows the agent to call executeLLMBatch on items for structured analysis
+   * Default: true
+   */
+  includeBatchAnalyze?: boolean;
+
+  /**
+   * Custom output schema for structured responses
+   * If provided, the agent will return structured data matching this schema
+   */
+  outputSchema?: Record<string, any>;
+
+  /** Verbose logging to console */
+  verbose?: boolean;
+
+  /**
+   * Path to write detailed JSON logs
+   * Each session is logged with full tool calls, results, and LLM responses
+   * Useful for debugging agent behavior
+   */
+  logPath?: string;
+}
+
+export interface AskResult {
+  answer: string;
+  confidence?: string;
+  /** Custom fields from outputSchema */
+  [key: string]: any;
+  iterations?: number;
+  toolsUsed?: string[];
+}
+
+// ============================================
+// Generic Tool Executor
+// ============================================
+
+/**
+ * Tool Executor that uses generated handlers
+ * Extends BaseToolExecutor for automatic parallel execution
+ */
+class GeneratedToolExecutor extends BaseToolExecutor {
+  private handlers: Record<string, (args: Record<string, any>) => Promise<any>>;
+  private verbose: boolean;
+  private logger?: AgentLogger;
+  public toolsUsed: string[] = [];
+
+  constructor(
+    handlers: Record<string, (args: Record<string, any>) => Promise<any>>,
+    verbose: boolean = false,
+    logger?: AgentLogger
+  ) {
+    super();
+    this.handlers = handlers;
+    this.verbose = verbose;
+    this.logger = logger;
+  }
+
+  async execute(toolCall: ToolCallRequest): Promise<any> {
+    if (this.verbose) {
+      console.log(`   🔧 Executing: ${toolCall.tool_name}(${JSON.stringify(toolCall.arguments)})`);
+    }
+
+    this.toolsUsed.push(toolCall.tool_name);
+    this.logger?.logToolCall(toolCall.tool_name, toolCall.arguments);
+
+    const handler = this.handlers[toolCall.tool_name];
+    if (!handler) {
+      throw new Error(`Unknown tool: ${toolCall.tool_name}. Available: ${Object.keys(this.handlers).join(', ')}`);
+    }
+
+    const startTime = Date.now();
+    const result = await handler(toolCall.arguments);
+    const durationMs = Date.now() - startTime;
+
+    if (this.verbose) {
+      console.log(`   📤 Result (${durationMs}ms):`, JSON.stringify(result).substring(0, 200));
+    }
+
+    this.logger?.logToolResult(toolCall.tool_name, result, durationMs);
+
+    return result;
+  }
+
+  // executeBatch is inherited from BaseToolExecutor and runs tools in parallel!
+}
+
+// ============================================
+// RagAgent Class
+// ============================================
+
+export class RagAgent {
+  private config: RagForgeConfig;
+  private tools: GeneratedToolDefinition[];
+  private boundHandlers: Record<string, (args: Record<string, any>) => Promise<any>>;
+  private executor: StructuredLLMExecutor;
+  private llmProvider: GeminiAPIProvider;
+  private nativeToolProvider: GeminiNativeToolProvider;
+  private maxIterations: number;
+  private verbose: boolean;
+  private toolCallMode: 'native' | 'structured' | 'auto';
+  private outputSchema?: Record<string, any>;
+  private logger?: AgentLogger;
+
+  constructor(
+    config: RagForgeConfig,
+    tools: GeneratedToolDefinition[],
+    boundHandlers: Record<string, (args: Record<string, any>) => Promise<any>>,
+    llmProvider: GeminiAPIProvider,
+    nativeToolProvider: GeminiNativeToolProvider,
+    options: RagAgentOptions
+  ) {
+    this.config = config;
+    this.tools = tools;
+    this.boundHandlers = boundHandlers;
+    this.executor = new StructuredLLMExecutor();
+    this.llmProvider = llmProvider;
+    this.nativeToolProvider = nativeToolProvider;
+    this.maxIterations = options.maxIterations ?? 10;
+    this.verbose = options.verbose ?? false;
+    this.toolCallMode = options.toolCallMode ?? 'auto';
+    this.outputSchema = options.outputSchema;
+
+    // Create logger if logPath provided
+    if (options.logPath) {
+      this.logger = new AgentLogger(options.logPath);
+    }
+
+    // Add batch_analyze handler if enabled
+    if (options.includeBatchAnalyze !== false) {
+      this.addBatchAnalyzeTool();
+    }
+  }
+
+  /**
+   * Add the batch_analyze meta-tool
+   * Allows the agent to run LLM analysis on a list of items
+   */
+  private addBatchAnalyzeTool(): void {
+    // Add tool definition
+    this.tools.push({
+      name: 'batch_analyze',
+      description: `Analyze a list of items using LLM with structured output.
+This is a meta-tool that lets you apply LLM reasoning to results from other tools.
+
+Use cases:
+- Analyze search results to extract insights
+- Categorize or summarize items
+- Generate suggestions for each item
+- Extract specific information from each item
+
+Example: After getting search results, use this to analyze each result with a custom task.`,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          items: {
+            type: 'array',
+            description: 'Array of items to analyze (typically from a previous tool call)',
+            items: { type: 'object' },
+          },
+          task: {
+            type: 'string',
+            description: 'What to do with each item. Examples: "summarize the purpose", "extract key concepts", "suggest improvements"',
+          },
+          output_fields: {
+            type: 'object',
+            description: 'Fields to extract per item. Example: {"summary": "string", "category": "string", "importance": "number"}',
+          },
+        },
+        required: ['items', 'task', 'output_fields'],
+      },
+    });
+
+    // Add handler
+    this.boundHandlers['batch_analyze'] = async (args: Record<string, any>) => {
+      const { items, task, output_fields } = args;
+
+      if (!items || items.length === 0) {
+        return { results: [], count: 0 };
+      }
+
+      if (this.verbose) {
+        console.log(`   🧠 batch_analyze: Analyzing ${items.length} items with task: "${task}"`);
+      }
+
+      // Convert output_fields to outputSchema format
+      const outputSchema: Record<string, any> = {};
+      for (const [field, type] of Object.entries(output_fields)) {
+        outputSchema[field] = {
+          type: type as string,
+          description: `${field} for this item`,
+          required: true,
+        };
+      }
+
+      // Determine input fields from first item
+      const inputFields = Object.keys(items[0]);
+
+      // Execute batch LLM analysis
+      const results = await this.executor.executeLLMBatch(items, {
+        inputFields,
+        userTask: task,
+        outputSchema,
+        llmProvider: this.llmProvider,
+        batchSize: 5,
+      });
+
+      const resultItems = Array.isArray(results) ? results : (results as any).items;
+      return { results: resultItems, count: resultItems.length };
+    };
+  }
+
+  /**
+   * Ask a question
+   *
+   * Mode depends on toolCallMode option:
+   * - 'structured': Uses XML-based StructuredLLMExecutor (per-item mode)
+   * - 'native': Uses Gemini native tool calling (global mode)
+   * - 'auto': Uses structured for single questions
+   */
+  async ask(question: string): Promise<AskResult> {
+    const mode = this.toolCallMode === 'auto' ? 'structured' : this.toolCallMode;
+
+    // Start logging session
+    this.logger?.startSession(question, mode, this.tools.map(t => t.name));
+
+    if (this.verbose) {
+      console.log(`\n🤖 Agent starting (mode: ${mode})`);
+      console.log(`   Question: "${question}"`);
+      console.log(`   Available tools: ${this.tools.map(t => t.name).join(', ')}\n`);
+    }
+
+    const toolExecutor = new GeneratedToolExecutor(this.boundHandlers, this.verbose, this.logger);
+
+    // Build output schema (use custom or default)
+    const outputSchema = this.outputSchema || {
+      answer: {
+        type: 'string',
+        description: 'Your answer based on the tool results',
+        required: true,
+      },
+      confidence: {
+        type: 'string',
+        description: 'Confidence level: high, medium, low',
+        required: false,
+      },
+    };
+
+    if (mode === 'native') {
+      // Native tool calling (global mode)
+      const results = await this.executor.executeLLMBatchWithTools(
+        [{ question }],
+        {
+          inputFields: ['question'],
+          systemPrompt: this.buildSystemPrompt(),
+          userTask: 'Answer the question by using the available tools. Start by calling get_schema() to understand what data is available.',
+          outputSchema,
+          tools: this.getToolDefinitions(),
+          toolMode: 'global',
+          toolChoice: 'any',
+          nativeToolProvider: this.nativeToolProvider,
+          toolExecutor,
+          llmProvider: this.llmProvider,
+        }
+      );
+
+      const items = Array.isArray(results) ? results : (results as any).items;
+      const result = items[0] as Record<string, any>;
+
+      // Log final answer
+      this.logger?.logFinalAnswer(result.answer || 'No answer generated', result.confidence);
+
+      return {
+        answer: result.answer || 'No answer generated',
+        confidence: result.confidence,
+        toolsUsed: [...new Set(toolExecutor.toolsUsed)],
+        ...this.extractCustomFields(result),
+      };
+    } else {
+      // Structured mode (per-item, XML-based)
+      const results = await this.executor.executeLLMBatchWithTools(
+        [{ question }],
+        {
+          inputFields: ['question'],
+          systemPrompt: this.buildSystemPrompt(),
+          userTask: 'Answer the question by using the available tools. Start by calling get_schema() to understand what data is available.',
+          outputSchema,
+          tools: this.getToolDefinitions(),
+          toolMode: 'per-item',
+          maxIterationsPerItem: this.maxIterations,
+          toolExecutor,
+          llmProvider: this.llmProvider,
+        }
+      );
+
+      const items = Array.isArray(results) ? results : (results as any).items;
+      const result = items[0] as Record<string, any>;
+
+      // Log final answer
+      this.logger?.logFinalAnswer(result.answer || 'No answer generated', result.confidence);
+
+      return {
+        answer: result.answer || 'No answer generated',
+        confidence: result.confidence,
+        toolsUsed: [...new Set(toolExecutor.toolsUsed)],
+        ...this.extractCustomFields(result),
+      };
+    }
+  }
+
+  /**
+   * Get the last session log (useful for debugging)
+   */
+  getLastSessionLog(): AgentSessionLog | undefined {
+    return this.logger?.getSession();
+  }
+
+  /**
+   * Extract custom fields from result (if using custom outputSchema)
+   */
+  private extractCustomFields(result: Record<string, any>): Record<string, any> {
+    if (!this.outputSchema) return {};
+
+    const custom: Record<string, any> = {};
+    for (const key of Object.keys(this.outputSchema)) {
+      if (key !== 'answer' && key !== 'confidence' && result[key] !== undefined) {
+        custom[key] = result[key];
+      }
+    }
+    return custom;
+  }
+
+  /**
+   * Ask multiple questions in batch (global tool mode)
+   */
+  async askBatch(questions: string[]): Promise<AskResult[]> {
+    if (this.verbose) {
+      console.log(`\n🤖 Agent starting batch (${questions.length} questions)`);
+      console.log(`   Available tools: ${this.tools.map(t => t.name).join(', ')}\n`);
+    }
+
+    const toolExecutor = new GeneratedToolExecutor(this.boundHandlers, this.verbose);
+
+    const results = await this.executor.executeLLMBatchWithTools(
+      questions.map(q => ({ question: q })),
+      {
+        inputFields: ['question'],
+        systemPrompt: this.buildSystemPrompt(),
+        userTask: 'Answer each question by using the available tools.',
+        outputSchema: {
+          answer: {
+            type: 'string',
+            description: 'Your answer based on the tool results',
+            required: true,
+          },
+          confidence: {
+            type: 'string',
+            description: 'Confidence level: high, medium, low',
+            required: false,
+          },
+        },
+        tools: this.getToolDefinitions(),
+        toolMode: 'global',
+        toolChoice: 'any',
+        nativeToolProvider: this.nativeToolProvider,
+        toolExecutor,
+        llmProvider: this.llmProvider,
+        batchSize: 10,
+      }
+    );
+
+    const items = Array.isArray(results) ? results : (results as any).items;
+    return items.map((r: { answer?: string; confidence?: string }) => ({
+      answer: r.answer || 'No answer generated',
+      confidence: r.confidence,
+      toolsUsed: [...new Set(toolExecutor.toolsUsed)],
+    }));
+  }
+
+  /**
+   * Build system prompt
+   */
+  private buildSystemPrompt(): string {
+    return `You are a helpful assistant with access to a database.
+
+Available tools will help you query the database. Use them to find information and answer questions.
+
+**IMPORTANT**:
+1. Start by calling get_schema() to understand what entities and fields are available
+2. Use the schema information to construct proper queries
+3. Be precise with field names and entity types`;
+  }
+
+  /**
+   * Convert tools to ToolDefinition format
+   */
+  private getToolDefinitions(): ToolDefinition[] {
+    return this.tools.map(tool => ({
+      type: 'function' as const,
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.inputSchema,
+      },
+    }));
+  }
+
+  /**
+   * Get list of available tools
+   */
+  getTools(): GeneratedToolDefinition[] {
+    return this.tools;
+  }
+}
+
+// ============================================
+// Factory Function
+// ============================================
+
+/**
+ * Create a RagAgent from config
+ */
+export async function createRagAgent(options: RagAgentOptions): Promise<RagAgent> {
+  // 1. Load config
+  let config: RagForgeConfig;
+  if (options.config) {
+    config = options.config;
+  } else if (options.configPath) {
+    const content = fs.readFileSync(options.configPath, 'utf-8');
+    config = yaml.load(content) as RagForgeConfig;
+  } else {
+    throw new Error('Either config or configPath must be provided');
+  }
+
+  // 2. Generate tools from config
+  const { tools, handlers } = generateToolsFromConfig(config, {
+    includeDiscovery: true,
+    includeSemanticSearch: true,
+    includeRelationships: true,
+    ...options.toolOptions,
+  });
+
+  // 3. Bind handlers with RagClient
+  const boundHandlers: Record<string, (args: Record<string, any>) => Promise<any>> = {};
+  for (const [name, handlerGen] of Object.entries(handlers)) {
+    boundHandlers[name] = handlerGen(options.ragClient);
+  }
+
+  // 4. Create LLM providers
+  const apiKey = options.apiKey ?? process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    throw new Error('API key required (provide apiKey option or set GEMINI_API_KEY env var)');
+  }
+
+  const model = options.model ?? 'gemini-2.0-flash';
+
+  const llmProvider = new GeminiAPIProvider({
+    apiKey,
+    model,
+    temperature: options.temperature ?? 0.1,
+  });
+
+  const nativeToolProvider = new GeminiNativeToolProvider({
+    apiKey,
+    model,
+    temperature: options.temperature ?? 0.1,
+  });
+
+  // 5. Create agent
+  return new RagAgent(
+    config,
+    tools,
+    boundHandlers,
+    llmProvider,
+    nativeToolProvider,
+    options
+  );
+}

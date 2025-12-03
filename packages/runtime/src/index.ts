@@ -136,6 +136,7 @@ export {
 // Agent Runtime (tool-calling loop)
 export { AgentRuntime } from './agents/agent-runtime.js';
 export { ToolRegistry } from './agents/tools/tool-registry.js';
+export { RagAgent, createRagAgent, type RagAgentOptions, type AskResult, type AgentSessionLog, type AgentLogEntry } from './agents/rag-agent.js';
 export type {
   AgentConfig as ToolAgentConfig,
   AgentDebugConfig,

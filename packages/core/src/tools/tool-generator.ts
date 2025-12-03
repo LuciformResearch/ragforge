@@ -19,6 +19,7 @@ import type {
   ToolGenerationContext,
 } from './types/index.js';
 import { generateChangeTrackingTools, generateAggregationTools } from './advanced/index.js';
+import { generateDiscoveryTools } from './discovery-tools.js';
 
 /**
  * Generate database query tools from RagForge config
@@ -39,6 +40,7 @@ export function generateToolsFromConfig(
 
   // Set defaults
   const opts: Required<ToolGenerationOptions> = {
+    includeDiscovery: options.includeDiscovery ?? true,
     includeSemanticSearch: options.includeSemanticSearch ?? true,
     includeRelationships: options.includeRelationships ?? true,
     includeSpecializedTools: options.includeSpecializedTools ?? false,
@@ -51,6 +53,13 @@ export function generateToolsFromConfig(
   // Generate core tools
   const tools: GeneratedToolDefinition[] = [];
   const handlers: Record<string, ToolHandlerGenerator> = {};
+
+  // 0. Discovery tools (get_schema, describe_entity) - always first so agent can discover the schema
+  if (opts.includeDiscovery) {
+    const discoveryTools = generateDiscoveryTools(context);
+    tools.push(...discoveryTools.tools);
+    Object.assign(handlers, discoveryTools.handlers);
+  }
 
   // 1. query_entities (always included)
   const queryEntities = generateQueryEntitiesTool(context);
@@ -75,6 +84,11 @@ export function generateToolsFromConfig(
   const getById = generateGetEntityByIdTool(context);
   tools.push(getById);
   handlers[getById.name] = generateGetEntityByIdHandler(context);
+
+  // 4b. get_entities_by_ids (batch fetch - always included)
+  const getByIds = generateGetEntitiesByIdsTool(context);
+  tools.push(getByIds);
+  handlers[getByIds.name] = generateGetEntitiesByIdsHandler(context);
 
   // 5. Change tracking tools (Phase 5 - if change tracking enabled)
   if (opts.includeChangeTracking) {
@@ -154,6 +168,7 @@ function extractEntityMetadata(entityConfig: EntityConfig): EntityMetadata {
     description: f.description,
     indexed: f.indexed,
     computed: false,
+    values: f.values,  // For enum-type fields
   }));
 
   // Extract computed fields (Phase 3)
@@ -205,6 +220,10 @@ function extractEntityMetadata(entityConfig: EntityConfig): EntityMetadata {
     name: entityConfig.name,
     description: entityConfig.description,
     uniqueField,
+    displayNameField: entityConfig.display_name_field || 'name',
+    queryField: entityConfig.query_field || 'name',
+    contentField: entityConfig.content_field,  // Full content field (e.g., 'source', 'body')
+    exampleDisplayFields: entityConfig.example_display_fields,
     searchableFields,
     computedFields: computedFields.length > 0 ? computedFields : undefined,
     vectorIndexes,
@@ -356,6 +375,9 @@ function generateSemanticSearchTool(context: ToolGenerationContext): GeneratedTo
 
   const description = `Semantic search using vector similarity.
 
+IMPORTANT: Returns metadata + snippet only, NOT full content.
+To get full content, use get_entities_by_ids with the returned IDs.
+
 Available vector indexes:
 ${indexDocs}
 
@@ -363,11 +385,11 @@ Entity unique identifiers (for results):
 ${uniqueFieldDocs}
 
 Results include:
-- Unique identifier (for fetching full entity later)
+- Unique identifier (use with get_entities_by_ids to fetch full content)
 - Match score
-- Snippet from matched field
+- Short snippet (first 200 chars) from matched field
 
-Best for natural language queries about entity content.`;
+Workflow: semantic_search → get_entities_by_ids → answer with actual content`;
 
   return {
     name: 'semantic_search',
@@ -696,6 +718,133 @@ function generateGetEntityByIdHandler(context: ToolGenerationContext): ToolHandl
       entity_type,
       unique_field: entityMeta.uniqueField,
       ...filtered,
+    };
+  };
+}
+
+/**
+ * Generate get_entities_by_ids tool (batch fetch)
+ */
+function generateGetEntitiesByIdsTool(context: ToolGenerationContext): GeneratedToolDefinition {
+  const entityNames = context.entities.map(e => e.name);
+
+  // Build field documentation per entity
+  const fieldDocs = context.entities.map(entity => {
+    const allFields = entity.searchableFields.map(f => f.name);
+    const contentFieldNote = entity.contentField
+      ? ` (content_field: ${entity.contentField})`
+      : '';
+    return `- ${entity.name}: ${allFields.join(', ')}${contentFieldNote}`;
+  }).join('\n');
+
+  // Build default fields documentation
+  const defaultFieldsDocs = context.entities.map(entity => {
+    const defaults = [entity.uniqueField, entity.displayNameField];
+    if (entity.contentField) defaults.push(entity.contentField);
+    return `- ${entity.name}: ${defaults.join(', ')}`;
+  }).join('\n');
+
+  const description = `Fetch multiple entities by their IDs in a single query.
+
+Use this to get full content after semantic_search returns only snippets.
+
+Available entities: ${entityNames.join(', ')}
+
+Available fields per entity:
+${fieldDocs}
+
+Default fields returned (if 'fields' not specified):
+${defaultFieldsDocs}
+
+Example workflow:
+1. semantic_search → returns IDs + snippets
+2. get_entities_by_ids with those IDs → returns full content`;
+
+  return {
+    name: 'get_entities_by_ids',
+    description,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        entity_type: {
+          type: 'string',
+          enum: entityNames,
+          description: 'Entity type to fetch',
+        },
+        ids: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'List of unique IDs to fetch (from previous query results)',
+        },
+        fields: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional: specific fields to return. If omitted, returns unique_field + display_name_field + content_field',
+        },
+      },
+      required: ['entity_type', 'ids'],
+    },
+  };
+}
+
+/**
+ * Generate handler for get_entities_by_ids
+ */
+function generateGetEntitiesByIdsHandler(context: ToolGenerationContext): ToolHandlerGenerator {
+  return (rag: any) => async (params: any) => {
+    const { entity_type, ids, fields } = params;
+
+    const entityMeta = context.entities.find(e => e.name === entity_type);
+    if (!entityMeta) {
+      return { error: `Unknown entity: ${entity_type}` };
+    }
+
+    if (!ids || !Array.isArray(ids) || ids.length === 0) {
+      return { error: 'ids must be a non-empty array' };
+    }
+
+    // Limit batch size
+    const limitedIds = ids.slice(0, 20);
+
+    // Execute query with IN operator
+    const results = await rag
+      .get(entity_type)
+      .where(entityMeta.uniqueField, 'IN', limitedIds)
+      .limit(limitedIds.length)
+      .execute();
+
+    // Determine which fields to return
+    let requestedFields: string[];
+    if (fields && Array.isArray(fields) && fields.length > 0) {
+      // Always include unique field
+      requestedFields = [entityMeta.uniqueField, ...fields.filter(f => f !== entityMeta.uniqueField)];
+    } else {
+      // Default: unique_field + display_name_field + content_field
+      requestedFields = [entityMeta.uniqueField, entityMeta.displayNameField];
+      if (entityMeta.contentField) {
+        requestedFields.push(entityMeta.contentField);
+      }
+    }
+
+    // Filter results to requested fields only
+    const filteredResults = results.map((r: any) => {
+      const filtered: any = {};
+      for (const field of requestedFields) {
+        if (r[field] !== undefined) {
+          filtered[field] = r[field];
+        }
+      }
+      return filtered;
+    });
+
+    return {
+      entity_type,
+      unique_field: entityMeta.uniqueField,
+      content_field: entityMeta.contentField,
+      requested_ids: limitedIds.length,
+      found: filteredResults.length,
+      fields_returned: requestedFields,
+      results: filteredResults,
     };
   };
 }

@@ -100,6 +100,7 @@ export interface EntityConfig {
   display_name_field?: string;  // Field for displaying entity names (default: 'name')
   unique_field?: string;        // Field for deduplication (default: 'uuid')
   query_field?: string;         // Field used in WHERE clauses (default: 'name')
+  content_field?: string;       // Field containing the full content to read (e.g., 'source' for code, 'body' for documents)
   example_display_fields?: string[];  // Additional fields to display in examples (default: [])
 
   // Change tracking configuration

@@ -8,6 +8,9 @@
  * Options for generateToolsFromConfig
  */
 export interface ToolGenerationOptions {
+  /** Include discovery tools (get_schema, describe_entity) */
+  includeDiscovery?: boolean; // default: true
+
   /** Include semantic search tools (requires vector_indexes in config) */
   includeSemanticSearch?: boolean; // default: true
 
@@ -54,6 +57,10 @@ export interface EntityMetadata {
   name: string;
   description?: string;
   uniqueField: string;
+  displayNameField: string;
+  queryField: string;
+  contentField?: string;  // Field containing full content (e.g., 'source', 'body', 'content')
+  exampleDisplayFields?: string[];
   searchableFields: FieldMetadata[];
   computedFields?: ComputedFieldMetadata[];
   vectorIndexes: VectorIndexMetadata[];
@@ -72,7 +79,8 @@ export interface FieldMetadata {
   type: string;
   description?: string;
   indexed?: boolean;
-  computed?: boolean; // Phase 3: computed fields
+  computed?: boolean;
+  values?: string[];  // For enum-type fields
 }
 
 /**

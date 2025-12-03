@@ -36,6 +36,16 @@ export type {
   ToolGenerationMetadata,
 } from './tools/types/index.js';
 
+// Discovery Tools (schema for agents)
+export { generateDiscoveryTools } from './tools/discovery-tools.js';
+export type {
+  SchemaInfo,
+  EntitySchemaInfo,
+  FieldInfo,
+  RelationshipInfo,
+  SemanticIndexInfo,
+} from './tools/discovery-tools.js';
+
 // Computed Fields (Phase 3)
 export {
   evaluateComputedField,
