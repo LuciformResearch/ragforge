@@ -474,7 +474,27 @@ async function writeGeneratedPackageJson(
   // Calculate CLI path for dev mode scripts
   let cliCommand = 'ragforge';
   if (dev && rootDir) {
-    const cliPath = path.join(rootDir, 'packages/cli/dist/esm/index.js');
+    // Find the monorepo root by looking for packages/cli
+    let monorepoRoot = rootDir;
+    const candidates = [
+      path.join(rootDir, 'packages/cli'),           // Already at monorepo root
+      path.join(rootDir, '../packages/cli'),        // One level up
+      path.join(rootDir, '../../packages/cli'),     // Two levels up
+      path.join(rootDir, '../../../packages/cli'),  // Three levels up (examples/foo/generated)
+      path.join(rootDir, '../ragforge/packages/cli') // Sibling ragforge folder
+    ];
+
+    for (const candidate of candidates) {
+      try {
+        await fs.access(candidate);
+        monorepoRoot = path.dirname(path.dirname(candidate)); // Go up to monorepo root
+        break;
+      } catch {
+        continue;
+      }
+    }
+
+    const cliPath = path.join(monorepoRoot, 'packages/cli/dist/esm/index.js');
     const relativeCli = path.relative(outDir, cliPath);
     cliCommand = `node ${relativeCli}`;
   }
@@ -483,10 +503,10 @@ async function writeGeneratedPackageJson(
     build: 'echo "Nothing to build"',
     start: 'tsx ./client.ts',
     regen: dev
-      ? `${cliCommand} generate --config ./ragforge.config.yaml --out . --force`
+      ? `${cliCommand} generate --config ./ragforge.config.yaml --out . --force --dev`
       : 'ragforge generate --config ./ragforge.config.yaml --out . --force',
     'regen:auto': dev
-      ? `${cliCommand} generate --config ./ragforge.config.yaml --out . --force --auto-detect-fields`
+      ? `${cliCommand} generate --config ./ragforge.config.yaml --out . --force --auto-detect-fields --dev`
       : 'ragforge generate --config ./ragforge.config.yaml --out . --force --auto-detect-fields',
     'rebuild:agent': 'tsx ./scripts/rebuild-agent.ts',
     'embeddings:index': 'tsx ./scripts/create-vector-indexes.ts',
