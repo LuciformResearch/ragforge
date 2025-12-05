@@ -58,6 +58,23 @@ export interface CodeSourceConfig extends SourceConfig {
 }
 
 /**
+ * Parsed package.json information
+ */
+export interface PackageJsonInfo {
+  file: string;
+  name: string;
+  version: string;
+  description?: string;
+  dependencies: string[];
+  devDependencies: string[];
+  peerDependencies: string[];
+  scripts: string[];
+  main?: string;
+  type?: 'module' | 'commonjs';
+  raw: Record<string, any>;
+}
+
+/**
  * Adapter for parsing code sources (TypeScript, Python, HTML/Vue, etc.)
  */
 export class CodeSourceAdapter extends SourceAdapter {
@@ -189,7 +206,7 @@ export class CodeSourceAdapter extends SourceAdapter {
     });
 
     // Parse all files
-    const { codeFiles, htmlFiles } = await this.parseFiles(files, config, (current) => {
+    const { codeFiles, htmlFiles, packageJsonFiles } = await this.parseFiles(files, config, (current) => {
       options.onProgress?.({
         phase: 'parsing',
         currentFile: current,
@@ -250,7 +267,39 @@ export class CodeSourceAdapter extends SourceAdapter {
   }
 
   /**
-   * Parse all files (code and HTML)
+   * Check if a file is a package.json
+   */
+  private isPackageJson(filePath: string): boolean {
+    return path.basename(filePath) === 'package.json';
+  }
+
+  /**
+   * Parsed package.json info
+   */
+  private parsePackageJson(content: string, filePath: string): PackageJsonInfo | null {
+    try {
+      const pkg = JSON.parse(content);
+      return {
+        file: filePath,
+        name: pkg.name || path.basename(path.dirname(filePath)),
+        version: pkg.version || '0.0.0',
+        description: pkg.description,
+        dependencies: Object.keys(pkg.dependencies || {}),
+        devDependencies: Object.keys(pkg.devDependencies || {}),
+        peerDependencies: Object.keys(pkg.peerDependencies || {}),
+        scripts: Object.keys(pkg.scripts || {}),
+        main: pkg.main,
+        type: pkg.type, // 'module' or 'commonjs'
+        raw: pkg, // Keep full object for queries
+      };
+    } catch {
+      console.warn(`Failed to parse package.json: ${filePath}`);
+      return null;
+    }
+  }
+
+  /**
+   * Parse all files (code, HTML, and package.json)
    */
   private async parseFiles(
     files: string[],
@@ -259,14 +308,26 @@ export class CodeSourceAdapter extends SourceAdapter {
   ): Promise<{
     codeFiles: Map<string, ScopeFileAnalysis>;
     htmlFiles: Map<string, HTMLParseResult>;
+    packageJsonFiles: Map<string, PackageJsonInfo>;
   }> {
     const codeFiles = new Map<string, ScopeFileAnalysis>();
     const htmlFiles = new Map<string, HTMLParseResult>();
+    const packageJsonFiles = new Map<string, PackageJsonInfo>();
 
     for (const file of files) {
       onProgress(file);
 
       try {
+        // Handle package.json files
+        if (this.isPackageJson(file)) {
+          const content = await import('fs').then(fs => fs.promises.readFile(file, 'utf-8'));
+          const pkgInfo = this.parsePackageJson(content, file);
+          if (pkgInfo) {
+            packageJsonFiles.set(file, pkgInfo);
+          }
+          continue;
+        }
+
         // Handle HTML/Vue/Svelte files separately
         if (this.isHtmlFile(file)) {
           const htmlParser = await this.getHtmlParser();

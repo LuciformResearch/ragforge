@@ -326,6 +326,28 @@ export interface ConnectionEnv {
 }
 
 export async function writeGeneratedEnv(outDir: string, connection: ConnectionEnv, geminiKey?: string): Promise<void> {
+  const envPath = path.join(outDir, '.env');
+
+  // Keys managed by ragforge (will be overwritten)
+  const managedKeys = new Set(['NEO4J_URI', 'NEO4J_USERNAME', 'NEO4J_PASSWORD', 'NEO4J_DATABASE', 'GEMINI_API_KEY']);
+
+  // Read existing .env to preserve user-added keys (like REPLICATE_API_TOKEN)
+  const preservedLines: string[] = [];
+  try {
+    const existingContent = await fs.readFile(envPath, 'utf-8');
+    for (const line of existingContent.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const [key] = trimmed.split('=');
+      if (key && !managedKeys.has(key)) {
+        preservedLines.push(line);
+      }
+    }
+  } catch {
+    // File doesn't exist yet, nothing to preserve
+  }
+
+  // Build new env content
   const envLines = [
     `NEO4J_URI=${connection.uri}`,
     `NEO4J_USERNAME=${connection.username}`,
@@ -340,7 +362,12 @@ export async function writeGeneratedEnv(outDir: string, connection: ConnectionEn
     envLines.push(`GEMINI_API_KEY=${geminiKey}`);
   }
 
-  const envPath = path.join(outDir, '.env');
+  // Add preserved user keys at the end
+  if (preservedLines.length > 0) {
+    envLines.push(''); // Empty line separator
+    envLines.push(...preservedLines);
+  }
+
   await writeFileIfChanged(envPath, envLines.join('\n') + '\n');
 }
 

@@ -890,6 +890,125 @@ function trimDiff(diff: string): string {
 }
 
 // ============================================
+// Install Package Tool
+// ============================================
+
+/**
+ * Generate install_package tool
+ */
+export function generateInstallPackageTool(): GeneratedToolDefinition {
+  return {
+    name: 'install_package',
+    description: `Install an npm package in the project.
+
+Runs 'npm install' to add a package to package.json.
+The package.json will be updated and the package downloaded to node_modules.
+
+Parameters:
+- package_name: Package name with optional version (e.g., "three", "lodash@4.17.21")
+- dev: If true, install as devDependency (default: false)
+
+Example: install_package({ package_name: "three" })
+Example: install_package({ package_name: "typescript", dev: true })`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        package_name: {
+          type: 'string',
+          description: 'Package name with optional version (e.g., "three", "lodash@4.17.21")',
+        },
+        dev: {
+          type: 'boolean',
+          description: 'Install as devDependency (default: false)',
+        },
+      },
+      required: ['package_name'],
+    },
+  };
+}
+
+/**
+ * Generate handler for install_package
+ */
+export function generateInstallPackageHandler(ctx: FileToolsContext): (args: any) => Promise<any> {
+  return async (args: { package_name: string; dev?: boolean }) => {
+    const { package_name, dev = false } = args;
+    const { execSync } = await import('child_process');
+    const fs = await import('fs/promises');
+    const pathModule = await import('path');
+
+    // Validate package name (basic security check)
+    if (!/^(@[\w-]+\/)?[\w.-]+(@[\w.-]+)?$/.test(package_name)) {
+      return { error: `Invalid package name: ${package_name}` };
+    }
+
+    const packageJsonPath = pathModule.join(ctx.projectRoot, 'package.json');
+
+    // Check if package.json exists
+    try {
+      await fs.access(packageJsonPath);
+    } catch {
+      return { error: 'No package.json found in project root. Run "npm init" first.' };
+    }
+
+    // Read current package.json to check if already installed
+    const packageJson = JSON.parse(await fs.readFile(packageJsonPath, 'utf-8'));
+    const baseName = package_name.split('@')[0] || package_name.replace(/^@/, '').split('@')[0];
+    const deps = packageJson.dependencies || {};
+    const devDeps = packageJson.devDependencies || {};
+
+    if (deps[baseName] || devDeps[baseName]) {
+      const installedIn = deps[baseName] ? 'dependencies' : 'devDependencies';
+      const version = deps[baseName] || devDeps[baseName];
+      return {
+        already_installed: true,
+        package: baseName,
+        version,
+        location: installedIn,
+        message: `${baseName}@${version} is already installed in ${installedIn}`,
+      };
+    }
+
+    // Install the package
+    const flag = dev ? '--save-dev' : '--save';
+    const startTime = Date.now();
+
+    try {
+      console.log(`📦 Installing ${package_name}${dev ? ' (dev)' : ''}...`);
+      execSync(`npm install ${flag} ${package_name}`, {
+        cwd: ctx.projectRoot,
+        stdio: 'pipe', // Capture output
+        encoding: 'utf-8',
+      });
+
+      // Read updated package.json to get installed version
+      const updatedPackageJson = JSON.parse(await fs.readFile(packageJsonPath, 'utf-8'));
+      const installedVersion = dev
+        ? updatedPackageJson.devDependencies?.[baseName]
+        : updatedPackageJson.dependencies?.[baseName];
+
+      // Notify about file modification for re-ingestion
+      if (ctx.onFileModified) {
+        await ctx.onFileModified(packageJsonPath, 'modified');
+      }
+
+      return {
+        installed: true,
+        package: baseName,
+        version: installedVersion,
+        dev,
+        duration_ms: Date.now() - startTime,
+      };
+    } catch (err: any) {
+      return {
+        error: `Failed to install ${package_name}: ${err.message}`,
+        stderr: err.stderr?.toString() || '',
+      };
+    }
+  };
+}
+
+// ============================================
 // Export All File Tools
 // ============================================
 
@@ -907,11 +1026,13 @@ export function generateFileTools(ctx: FileToolsContext): FileToolsResult {
       generateReadFileTool(),
       generateWriteFileTool(),
       generateEditFileTool(),
+      generateInstallPackageTool(),
     ],
     handlers: {
       read_file: generateReadFileHandler(ctx),
       write_file: generateWriteFileHandler(ctx),
       edit_file: generateEditFileHandler(ctx),
+      install_package: generateInstallPackageHandler(ctx),
     },
   };
 }

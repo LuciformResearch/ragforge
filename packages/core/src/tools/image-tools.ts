@@ -430,37 +430,55 @@ export function generateGenerateImageHandler(ctx: ImageToolsContext): (args: any
       const { GoogleGenAI } = await import('@google/genai');
       const genAI = new GoogleGenAI({ apiKey });
 
-      const response = await genAI.models.generateContent({
-        model: 'gemini-2.5-flash-image-preview',
-        contents: prompt,
-        config: {
-          responseModalities: ['TEXT', 'IMAGE'],
-        },
-      });
+      // Retry logic: try up to 2 times with different prompt prefixes
+      const maxRetries = 2;
+      let lastError = '';
 
-      // Extract image from response
-      const parts = response.candidates?.[0]?.content?.parts ?? [];
-      const imgPart = parts.find((p: any) => p.inlineData?.data);
+      for (let attempt = 0; attempt < maxRetries; attempt++) {
+        // Add explicit prefix on retry to force image generation
+        const effectivePrompt = attempt === 0
+          ? prompt
+          : `Generate an image: ${prompt}`;
 
-      if (!imgPart) {
-        // Check for text response that might explain the error
+        const response = await genAI.models.generateContent({
+          model: 'gemini-2.5-flash-image-preview',
+          contents: effectivePrompt,
+          config: {
+            responseModalities: ['TEXT', 'IMAGE'],
+          },
+        });
+
+        // Extract image from response
+        const parts = response.candidates?.[0]?.content?.parts ?? [];
+        const imgPart = parts.find((p: any) => p.inlineData?.data);
+
+        if (imgPart) {
+          // Success - save and return
+          const buffer = Buffer.from(imgPart.inlineData!.data!, 'base64');
+          await fs.mkdir(pathModule.dirname(absoluteOutputPath), { recursive: true });
+          await fs.writeFile(absoluteOutputPath, buffer);
+
+          return {
+            prompt,
+            output_path,
+            absolute_path: absoluteOutputPath,
+            aspect_ratio,
+            processing_time_ms: Date.now() - startTime,
+            retries: attempt,
+          };
+        }
+
+        // No image - store error and retry
         const textPart = parts.find((p: any) => p.text);
-        const errorText = textPart?.text || 'No image generated';
-        return { error: `No image in response: ${errorText.substring(0, 200)}` };
+        lastError = textPart?.text || 'No image generated';
+
+        if (attempt < maxRetries - 1) {
+          console.log(`⚠️ No image in response (attempt ${attempt + 1}), retrying with explicit prefix...`);
+        }
       }
 
-      // Save image
-      const buffer = Buffer.from(imgPart.inlineData!.data!, 'base64');
-      await fs.mkdir(pathModule.dirname(absoluteOutputPath), { recursive: true });
-      await fs.writeFile(absoluteOutputPath, buffer);
-
-      return {
-        prompt,
-        output_path,
-        absolute_path: absoluteOutputPath,
-        aspect_ratio,
-        processing_time_ms: Date.now() - startTime,
-      };
+      // All retries failed
+      return { error: `No image after ${maxRetries} attempts: ${lastError.substring(0, 200)}` };
     } catch (err: any) {
       return { error: `Image generation failed: ${err.message}` };
     }
@@ -588,61 +606,93 @@ async function generateViewPrompts(
     };
 
     // Execute structured LLM call with llmProvider
+    // New approach: single object description + view prefixes + scene info for guaranteed consistency
     const results = await executor.executeLLMBatch(
       [inputItem],
       {
         inputFields: ['basePrompt', 'style', 'styleDescription'],
         llmProvider,
-        systemPrompt: `Tu es un expert en prompt engineering pour la génération d'images multi-vues destinées à la reconstruction 3D.
-Tu génères 4 prompts cohérents et optimisés pour Gemini 2.5 Flash Image.
+        systemPrompt: `You are an expert in prompt engineering for multi-view image generation intended for 3D reconstruction.
 
-RÈGLES CRITIQUES DE COHÉRENCE:
-1. MÊME OBJET: Tous les prompts décrivent exactement le même objet avec les mêmes caractéristiques
-2. MÊMES COULEURS: Les couleurs spécifiées doivent être identiques dans tous les prompts
-3. MÊMES DÉTAILS: Tous les détails (textures, matériaux, accessoires) doivent être cohérents
-4. MÊMES PROPORTIONS: L'objet doit avoir les mêmes proportions dans toutes les vues
-5. FOND UNIFORME: Utilise un fond blanc ou neutre pour toutes les vues
-6. CENTRÉ: L'objet doit être centré dans le cadre pour chaque vue
-7. STYLE COHÉRENT: Le style artistique doit être identique`,
-        userTask: `Génère 4 prompts optimisés pour ces vues:
-- front: Vue de face, centré, regardant directement la caméra
-- right: Vue de profil droit (90°), même position/pose
-- top: Vue du dessus (vue plongeante à 90°), même objet
-- perspective: Vue 3/4 avant-droite (45°), légèrement en hauteur
+Your task: create ONE detailed canonical description of the object + scene info that will be reused IDENTICALLY for all 4 views.
 
-Chaque prompt doit:
-- Commencer par la description de l'objet (reprendre les détails originaux)
-- Spécifier la vue clairement
-- Ajouter les détails de style et de rendu
-- Terminer par "centered in frame, white background"`,
+RULES FOR object_description:
+1. Start with "a" or "an" (lowercase) - ex: "a cute yellow rubber duck toy"
+2. Describe PRECISELY the geometric shape (round, elongated, proportions)
+3. Describe EXACT proportions (ex: "head is 40% of total height", "egg-shaped body")
+4. List ALL visual details (eyes, beak, wings, texture, etc.)
+5. Specify the MATERIAL and its texture (matte, glossy, smooth, etc.)
+6. Mention what is NOT present if important (ex: "no crest, no tail feathers")
+
+RULES FOR color_palette:
+- List 2-4 main colors with their location
+- Ex: "bright yellow body, orange beak, black eyes"
+
+RULES FOR lighting:
+- Describe studio lighting appropriate for the style
+- Ex: "soft studio lighting with subtle shadows" or "even diffuse lighting, no harsh shadows"
+
+RULES FOR background:
+- Describe the background consistently
+- Ex: "pure white background" or "light gray neutral background"
+
+EXAMPLE:
+object_description: "a cute yellow rubber duck toy with compact egg-shaped body, round head (40% of height), small flat beak, two black dot eyes, tiny wing bumps on sides, smooth matte rubber texture, no crest or tail"
+color_palette: "bright yellow body, orange beak, black dot eyes"
+lighting: "soft diffuse studio lighting, minimal shadows"
+background: "clean white background"`,
+        userTask: `Analyze the base description and generate all elements for consistent prompts.
+
+Final prompt format:
+"{view_prefix} of {object_description}, {color_palette}, {lighting}, {background}, {styleDescription}, centered in frame"`,
         outputSchema: {
-          front: {
+          object_description: {
             type: 'string',
-            description: 'Prompt complet pour la vue de face (front view)',
+            description: 'Detailed canonical description of the object (shape, proportions, materials, details)',
             required: true,
           },
-          right: {
+          color_palette: {
             type: 'string',
-            description: 'Prompt complet pour la vue de droite (right side view)',
+            description: 'Main colors with location - ex: "bright yellow body, orange beak, black eyes"',
             required: true,
           },
-          top: {
+          lighting: {
             type: 'string',
-            description: 'Prompt complet pour la vue du dessus (top-down view)',
+            description: 'Lighting description - ex: "soft studio lighting, minimal shadows"',
             required: true,
           },
-          perspective: {
+          background: {
             type: 'string',
-            description: 'Prompt complet pour la vue perspective 3/4 (perspective view)',
+            description: 'Background description - ex: "clean white background"',
+            required: true,
+          },
+          view_prefix_front: {
+            type: 'string',
+            description: 'Orthographic front view - ex: "Front view, straight-on, camera at eye level"',
+            required: true,
+          },
+          view_prefix_right: {
+            type: 'string',
+            description: 'Orthographic right side view - ex: "Right side view, perfect profile, camera at eye level"',
+            required: true,
+          },
+          view_prefix_top: {
+            type: 'string',
+            description: 'Orthographic top-down view - ex: "Top-down view, camera directly above looking straight down"',
+            required: true,
+          },
+          view_prefix_perspective: {
+            type: 'string',
+            description: '3/4 perspective view - ex: "3/4 perspective view from front-right, 45 degree angle, slightly elevated camera"',
             required: true,
           },
           reasoning: {
             type: 'string',
-            description: 'Explication courte des choix de prompts',
+            description: 'Explanation of choices made',
             required: false,
           },
         },
-        outputFormat: 'xml', // XML is more robust for parsing
+        outputFormat: 'xml',
         batchSize: 1,
       }
     );
@@ -650,17 +700,32 @@ Chaque prompt doit:
     // Extract result (executeLLMBatch returns array)
     const result = Array.isArray(results) ? results[0] : (results as any).items[0];
 
-    if (!result || !result.front || !result.right || !result.top || !result.perspective) {
-      throw new Error('Missing view prompts in structured response');
+    if (!result || !result.object_description || !result.view_prefix_front) {
+      throw new Error('Missing object_description or view_prefixes in structured response');
     }
 
-    console.log(`✨ Prompt enhancer reasoning: ${result.reasoning || 'N/A'}`);
+    const objDesc = result.object_description;
+    const colors = result.color_palette || '';
+    const lighting = result.lighting || 'studio lighting';
+    const background = result.background || 'white background';
 
+    // Build the common suffix: colors, lighting, background, style
+    const commonSuffix = [colors, lighting, background, styleDesc, 'centered in frame']
+      .filter(Boolean)
+      .join(', ');
+
+    console.log(`✨ Object: ${objDesc}`);
+    console.log(`✨ Colors: ${colors}`);
+    console.log(`✨ Lighting: ${lighting}`);
+    console.log(`✨ Background: ${background}`);
+    console.log(`✨ Reasoning: ${result.reasoning || 'N/A'}`);
+
+    // Concatenate: "{view_prefix} of {object_description}, {commonSuffix}"
     return {
-      front: result.front,
-      right: result.right,
-      top: result.top,
-      perspective: result.perspective,
+      front: `${result.view_prefix_front} of ${objDesc}, ${commonSuffix}`,
+      right: `${result.view_prefix_right} of ${objDesc}, ${commonSuffix}`,
+      top: `${result.view_prefix_top} of ${objDesc}, ${commonSuffix}`,
+      perspective: `${result.view_prefix_perspective} of ${objDesc}, ${commonSuffix}`,
     };
   } catch (err: any) {
     console.warn(`⚠️ StructuredLLMExecutor failed, using fallback prompts: ${err.message}`);

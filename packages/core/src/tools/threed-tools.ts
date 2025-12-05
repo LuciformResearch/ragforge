@@ -803,8 +803,10 @@ export function generateGenerate3DFromImageHandler(ctx: ThreeDToolsContext): (ar
       await fs.writeFile(absoluteOutputPath, modelBuffer);
 
       return {
-        model_path: output_path,
+        output_path,
+        model_path: output_path, // Alias for backward compatibility
         absolute_path: absoluteOutputPath,
+        format: 'glb',
         input_images: imagePaths.length,
         processing_time_ms: Date.now() - startTime,
       };
