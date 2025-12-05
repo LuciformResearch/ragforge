@@ -755,7 +755,13 @@ function generateGetEntitiesByIdsTool(context: ToolGenerationContext): Generated
     return `- ${entity.name}: ${defaults.join(', ')}`;
   }).join('\n');
 
-  const description = `Fetch multiple entities by their IDs in a single query.
+  // Build hierarchical content documentation
+  const hierarchicalDocs = context.entities
+    .filter(e => e.hierarchicalContent)
+    .map(e => `- ${e.name}: use with_children=true to also fetch children (via ${e.hierarchicalContent!.childrenRelationship})`)
+    .join('\n');
+
+  let description = `Fetch multiple entities by their IDs in a single query.
 
 Use this to get full content after semantic_search returns only snippets.
 
@@ -765,11 +771,21 @@ Available fields per entity:
 ${fieldDocs}
 
 Default fields returned (if 'fields' not specified):
-${defaultFieldsDocs}
+${defaultFieldsDocs}`;
+
+  if (hierarchicalDocs) {
+    description += `
+
+HIERARCHICAL CONTENT (use with_children=true for complete content):
+${hierarchicalDocs}`;
+  }
+
+  description += `
 
 Example workflow:
 1. semantic_search → returns IDs + snippets
-2. get_entities_by_ids with those IDs → returns full content`;
+2. get_entities_by_ids with those IDs → returns full content
+3. If content is short and entity has children, use with_children=true`;
 
   return {
     name: 'get_entities_by_ids',
@@ -792,6 +808,10 @@ Example workflow:
           items: { type: 'string' },
           description: 'Optional: specific fields to return. If omitted, returns unique_field + display_name_field + content_field',
         },
+        with_children: {
+          type: 'boolean',
+          description: 'If true, also fetch children entities (for hierarchical content like classes with methods). Children content will be included in the response.',
+        },
       },
       required: ['entity_type', 'ids'],
     },
@@ -803,7 +823,7 @@ Example workflow:
  */
 function generateGetEntitiesByIdsHandler(context: ToolGenerationContext): ToolHandlerGenerator {
   return (rag: any) => async (params: any) => {
-    const { entity_type, ids, fields } = params;
+    const { entity_type, ids, fields, with_children } = params;
 
     const entityMeta = context.entities.find(e => e.name === entity_type);
     if (!entityMeta) {
@@ -848,7 +868,60 @@ function generateGetEntitiesByIdsHandler(context: ToolGenerationContext): ToolHa
       return filtered;
     });
 
-    return {
+    // Fetch children if requested and hierarchical_content is configured
+    let childrenByParent: Record<string, any[]> = {};
+    if (with_children && entityMeta.hierarchicalContent) {
+      const rel = entityMeta.hierarchicalContent.childrenRelationship;
+
+      // Use Cypher to fetch children via relationship traversal
+      // Children point TO parent via the relationship (e.g., method -[:HAS_PARENT]-> class)
+      const cypher = `
+        MATCH (child:${entity_type})-[:${rel}]->(parent:${entity_type})
+        WHERE parent.${entityMeta.uniqueField} IN $parentIds
+        RETURN child, parent.${entityMeta.uniqueField} as parentId
+      `;
+
+      try {
+        const result = await rag.client.run(cypher, { parentIds: limitedIds });
+
+        for (const record of result.records) {
+          const child = record.get('child').properties;
+          const parentId = record.get('parentId');
+
+          // Filter child to requested fields
+          const filtered: any = {};
+          for (const field of requestedFields) {
+            if (child[field] !== undefined) {
+              filtered[field] = child[field];
+            }
+          }
+
+          if (!childrenByParent[parentId]) {
+            childrenByParent[parentId] = [];
+          }
+          childrenByParent[parentId].push(filtered);
+        }
+      } catch (error) {
+        // If relationship query fails, just skip children
+        console.error('Failed to fetch children:', error);
+      }
+    }
+
+    // Check if content is short and hierarchical_content is available (hint for agent)
+    let hint: string | undefined;
+    if (!with_children && entityMeta.hierarchicalContent && entityMeta.contentField) {
+      const shortContentThreshold = 100;
+      const hasShortContent = filteredResults.some((r: any) => {
+        const content = r[entityMeta.contentField!];
+        return content && typeof content === 'string' && content.length < shortContentThreshold;
+      });
+
+      if (hasShortContent) {
+        hint = `Some entities have very short content. This entity type has hierarchical content - use with_children=true to also fetch children (via ${entityMeta.hierarchicalContent.childrenRelationship}) for complete content.`;
+      }
+    }
+
+    const response: any = {
       entity_type,
       unique_field: entityMeta.uniqueField,
       content_field: entityMeta.contentField,
@@ -857,6 +930,19 @@ function generateGetEntitiesByIdsHandler(context: ToolGenerationContext): ToolHa
       fields_returned: requestedFields,
       results: filteredResults,
     };
+
+    // Add children to response if fetched
+    if (with_children && Object.keys(childrenByParent).length > 0) {
+      response.children_by_parent = childrenByParent;
+      response.total_children = Object.values(childrenByParent).reduce((sum, arr) => sum + arr.length, 0);
+    }
+
+    // Add hint if applicable
+    if (hint) {
+      response.hint = hint;
+    }
+
+    return response;
   };
 }
 

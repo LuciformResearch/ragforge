@@ -1,7 +1,7 @@
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { Neo4jClient, neo4j } from '@luciformresearch/ragforge-runtime';
+import { Neo4jClient, neo4j } from '@luciformresearch/ragforge';
 
 import { EMBEDDINGS_CONFIG } from '../embeddings/load-config.js';
 

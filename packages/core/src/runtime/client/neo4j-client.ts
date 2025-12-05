@@ -5,7 +5,7 @@
  */
 
 import neo4j, { Driver, Session, Result, QueryResult } from 'neo4j-driver';
-import type { Neo4jConfig, CypherQuery, QueryPlan, VectorSearchResult } from '../types/index.js';
+import type { RuntimeNeo4jConfig as Neo4jConfig, CypherQuery, QueryPlan, VectorSearchResult } from '../types/index.js';
 
 export class Neo4jClient {
   private driver: Driver;

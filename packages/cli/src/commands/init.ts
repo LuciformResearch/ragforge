@@ -19,12 +19,12 @@ import {
   CodeGenerator,
   type RagForgeConfig,
   type GraphSchema
-} from '@luciformresearch/ragforge-core';
+} from '@luciformresearch/ragforge';
 import {
   CodeSourceAdapter,
   type SourceConfig,
   Neo4jClient
-} from '@luciformresearch/ragforge-runtime';
+} from '@luciformresearch/ragforge';
 import { ensureEnvLoaded, getEnv } from '../utils/env.js';
 import {
   prepareOutputDirectory,
@@ -36,7 +36,7 @@ import {
 import { deriveProjectNaming } from '../utils/project-name.js';
 import { ensureGeminiKey, validateGeminiSchema } from '../utils/gemini.js';
 import { FieldDetector } from '../utils/field-detector.js';
-import type { VectorIndexConfig, EntityConfig } from '@luciformresearch/ragforge-core';
+import type { VectorIndexConfig, EntityConfig } from '@luciformresearch/ragforge';
 
 export interface InitOptions {
   uri: string;

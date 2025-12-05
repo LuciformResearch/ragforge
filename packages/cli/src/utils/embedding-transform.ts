@@ -2,12 +2,12 @@ import type {
   EmbeddingsConfig as CoreEmbeddingsConfig,
   EmbeddingEntityConfig as CoreEmbeddingEntityConfig,
   EmbeddingPipelineConfig as CoreEmbeddingPipelineConfig
-} from '@luciformresearch/ragforge-core';
+} from '@luciformresearch/ragforge';
 import type {
   GeneratedEmbeddingsConfig,
   GeneratedEmbeddingEntityConfig,
   GeneratedEmbeddingPipelineConfig
-} from '@luciformresearch/ragforge-runtime';
+} from '@luciformresearch/ragforge';
 
 export function toRuntimeEmbeddingsConfig(config?: CoreEmbeddingsConfig): GeneratedEmbeddingsConfig | undefined {
   if (!config) {

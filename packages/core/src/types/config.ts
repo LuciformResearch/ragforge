@@ -82,9 +82,13 @@ export interface SummarizationLLMConfig {
 
 export interface Neo4jConfig {
   uri: string;
+  username: string;
+  password: string;
   database?: string;
-  username?: string;
-  password?: string;
+  /** Max connections in pool (optional) */
+  maxConnectionPoolSize?: number;
+  /** Connection timeout in ms (optional) */
+  connectionTimeout?: number;
 }
 
 export interface EntityConfig {
@@ -153,8 +157,8 @@ export interface ComputedFieldConfig {
   /** Field name (used in queries and results) */
   name: string;
 
-  /** Field type */
-  type: FieldType;
+  /** Field type (allows FieldType or any string for flexibility) */
+  type: FieldType | string;
 
   /** Human-readable description */
   description?: string;

@@ -222,7 +222,7 @@ export class CodeGenerator {
     const lines: string[] = [];
 
     // Imports
-    lines.push(`import { QueryBuilder } from '@luciformresearch/ragforge-runtime';`);
+    lines.push(`import { QueryBuilder } from '@luciformresearch/ragforge';`);
     lines.push(`import type { ${entity.name}, ${entity.name}Filter } from '../types.js';`);
     lines.push(``);
 
@@ -285,7 +285,7 @@ export class CodeGenerator {
     lines.push(`   * @example`);
     lines.push(`   * const result = await query.first();`);
     lines.push(`   */`);
-    lines.push(`  async first(): Promise<import('@luciformresearch/ragforge-runtime').SearchResult<${entity.name}> | undefined> {`);
+    lines.push(`  async first(): Promise<import('@luciformresearch/ragforge').SearchResult<${entity.name}> | undefined> {`);
     lines.push(`    const results = await this.limit(1).execute();`);
     lines.push(`    return results[0];`);
     lines.push(`  }`);
@@ -339,7 +339,7 @@ export class CodeGenerator {
     const displayNameField = entity.display_name_field || 'name';
 
     // Imports
-    lines.push(`import { MutationBuilder } from '@luciformresearch/ragforge-runtime';`);
+    lines.push(`import { MutationBuilder } from '@luciformresearch/ragforge';`);
     lines.push(`import type { ${entity.name}, ${entity.name}Create, ${entity.name}Update } from '../types.js';`);
     lines.push(``);
 
@@ -742,11 +742,11 @@ export class CodeGenerator {
     lines.push(``);
     const hasEmbeddings = Boolean(config.embeddings && config.embeddings.entities && config.embeddings.entities.length);
     if (hasEmbeddings) {
-      lines.push(`import { createClient, VectorSearch, LLMReranker, GeminiAPIProvider } from '@luciformresearch/ragforge-runtime';`);
+      lines.push(`import { createClient, VectorSearch, LLMReranker, GeminiAPIProvider } from '@luciformresearch/ragforge';`);
     } else {
-      lines.push(`import { createClient } from '@luciformresearch/ragforge-runtime';`);
+      lines.push(`import { createClient } from '@luciformresearch/ragforge';`);
     }
-    lines.push(`import type { RuntimeConfig } from '@luciformresearch/ragforge-runtime';`);
+    lines.push(`import type { RuntimeConfig } from '@luciformresearch/ragforge';`);
 
     if (hasEmbeddings) {
       lines.push(`import { EMBEDDINGS_CONFIG } from './embeddings/load-config.ts';`);
@@ -1045,7 +1045,7 @@ export class CodeGenerator {
     lines.push(``);
 
     // Import EntityContext type
-    lines.push(`import type { EntityContext } from '@luciformresearch/ragforge-runtime';`);
+    lines.push(`import type { EntityContext } from '@luciformresearch/ragforge';`);
     lines.push(``);
 
     // Generate a constant for each entity
@@ -1553,34 +1553,41 @@ export class CodeGenerator {
   }
 
   /**
-   * Generate iterative agent wrapper that injects generated documentation
+   * Generate agent wrapper using createRagAgent
    */
   private static generateAgent(config: RagForgeConfig): string {
     const lines: string[] = [];
 
-    lines.push(`import { IterativeCodeAgent, type AgentConfig } from '@luciformresearch/ragforge-runtime';`);
-    lines.push(`import { CLIENT_DOCUMENTATION } from './documentation.js';`);
+    lines.push(`import { createRagAgent, type RagAgentOptions } from '@luciformresearch/ragforge';`);
+    lines.push(`import { createRagClient } from './client.js';`);
     lines.push(``);
     lines.push(`/**`);
-    lines.push(` * Configuration for the generated iterative agent.`);
-    lines.push(` * Accepts the same parameters as AgentConfig, but wraps ragClientPath and documentation.`);
+    lines.push(` * Configuration for the generated agent.`);
+    lines.push(` * Extends RagAgentOptions but pre-configures ragClient and configPath.`);
     lines.push(` */`);
-    lines.push(`export interface GeneratedAgentConfig extends Omit<AgentConfig, 'ragClientPath' | 'frameworkDocs'> {`);
-    lines.push(`  /** Optional override for the path to the generated client (default: './client.js') */`);
-    lines.push(`  ragClientPath?: string;`);
+    lines.push(`export interface GeneratedAgentConfig extends Omit<RagAgentOptions, 'ragClient' | 'configPath' | 'config'> {`);
+    lines.push(`  /** Optional: provide your own RagClient (default: creates one via createRagClient()) */`);
+    lines.push(`  ragClient?: any;`);
+    lines.push(`  /** Optional: override config path (default: './ragforge.config.yaml') */`);
+    lines.push(`  configPath?: string;`);
     lines.push(`}`);
     lines.push(``);
     lines.push(`/**`);
-    lines.push(` * Create an IterativeCodeAgent pre-configured with generated documentation.`);
+    lines.push(` * Create a RagAgent pre-configured for this project.`);
+    lines.push(` * `);
+    lines.push(` * @example`);
+    lines.push(` * const agent = await createAgent({ apiKey: process.env.GEMINI_API_KEY });`);
+    lines.push(` * const result = await agent.ask('What does this codebase do?');`);
+    lines.push(` * console.log(result.answer);`);
     lines.push(` */`);
-    lines.push(`export function createIterativeAgent(config: GeneratedAgentConfig): IterativeCodeAgent {`);
-    lines.push(`  const agentConfig: AgentConfig = {`);
+    lines.push(`export async function createAgent(config: GeneratedAgentConfig) {`);
+    lines.push(`  const ragClient = config.ragClient || createRagClient();`);
+    lines.push(`  `);
+    lines.push(`  return createRagAgent({`);
     lines.push(`    ...config,`);
-    lines.push(`    ragClientPath: config.ragClientPath || './client.js',`);
-    lines.push(`    frameworkDocs: CLIENT_DOCUMENTATION`);
-    lines.push(`  };`);
-    lines.push(``);
-    lines.push(`  return new IterativeCodeAgent(agentConfig);`);
+    lines.push(`    ragClient,`);
+    lines.push(`    configPath: config.configPath || './ragforge.config.yaml',`);
+    lines.push(`  });`);
     lines.push(`}`);
 
     return lines.join('\n');
@@ -2254,7 +2261,7 @@ export class CodeGenerator {
     lines.push('');
     lines.push('```typescript');
     lines.push(`import { createIterativeAgent } from './agent.js';`);
-    lines.push(`import type { LLMClient } from '@luciformresearch/ragforge-runtime';`);
+    lines.push(`import type { LLMClient } from '@luciformresearch/ragforge';`);
     lines.push('');
     lines.push(`const llm: LLMClient = /* wrap your LLM */;`);
     lines.push(`const agent = createIterativeAgent({`);
@@ -2652,8 +2659,8 @@ export class CodeGenerator {
     lines.push(``);
 
     // Imports
-    lines.push(`import type { RagClient } from '@luciformresearch/ragforge-runtime';`);
-    lines.push(`import type { Tool } from '@luciformresearch/ragforge-runtime';`);
+    lines.push(`import type { RagClient } from '@luciformresearch/ragforge';`);
+    lines.push(`import type { Tool } from '@luciformresearch/ragforge';`);
     lines.push(``);
 
     // Tool definitions as JSON
@@ -2705,8 +2712,8 @@ export class CodeGenerator {
     lines.push(` * Add your custom tool definitions and handlers here`);
     lines.push(` */`);
     lines.push(``);
-    lines.push(`import type { RagClient } from '@luciformresearch/ragforge-runtime';`);
-    lines.push(`import type { Tool } from '@luciformresearch/ragforge-runtime';`);
+    lines.push(`import type { RagClient } from '@luciformresearch/ragforge';`);
+    lines.push(`import type { Tool } from '@luciformresearch/ragforge';`);
     lines.push(``);
     lines.push(`/**`);
     lines.push(` * Custom tool definitions`);
@@ -2765,8 +2772,8 @@ export class CodeGenerator {
     lines.push(` * Combines auto-generated database tools with custom tools`);
     lines.push(` */`);
     lines.push(``);
-    lines.push(`import type { RagClient } from '@luciformresearch/ragforge-runtime';`);
-    lines.push(`import { ToolRegistry } from '@luciformresearch/ragforge-runtime';`);
+    lines.push(`import type { RagClient } from '@luciformresearch/ragforge';`);
+    lines.push(`import { ToolRegistry } from '@luciformresearch/ragforge';`);
     lines.push(`import { DATABASE_TOOLS, attachDatabaseHandlers } from './database-tools.js';`);
     lines.push(`import { CUSTOM_TOOLS, attachCustomHandlers } from './custom-tools.js';`);
     lines.push(``);
@@ -3279,7 +3286,7 @@ export class CodeGenerator {
   ): string {
     const functionName = this.camelCase(title.replace(/[^a-zA-Z0-9]/g, '_'));
     return `import { createRagClient } from '../client.js';
-import type { SearchResult } from '@luciformresearch/ragforge-runtime';
+import type { SearchResult } from '@luciformresearch/ragforge';
 
 /**
  * @example ${title}
@@ -4079,7 +4086,7 @@ ${cleanupSections}
  * to ensure correct path resolution regardless of where it's run from.
  */
 
-import { IncrementalIngestionManager } from '@luciformresearch/ragforge-runtime';
+import { IncrementalIngestionManager } from '@luciformresearch/ragforge';
 import { createRagClient } from '../client.js';
 import { loadConfig } from '../load-config.js';
 
@@ -4231,7 +4238,7 @@ main();
  * Generated by RagForge
  */
 
-import { IncrementalIngestionManager, FileWatcher } from '@luciformresearch/ragforge-runtime';
+import { IncrementalIngestionManager, FileWatcher } from '@luciformresearch/ragforge';
 import { createRagClient } from '../client.js';
 import { spawn } from 'child_process';
 import path from 'path';
@@ -4365,7 +4372,7 @@ try {
  */
 
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import { createClient } from '@luciformresearch/ragforge-runtime';
+import { createClient } from '@luciformresearch/ragforge';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';

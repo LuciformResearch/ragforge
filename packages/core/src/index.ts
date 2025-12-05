@@ -1,7 +1,8 @@
 /**
- * @luciformresearch/ragforge-core - Core library for RagForge
+ * @luciformresearch/ragforge - Unified RagForge library
  *
- * Provides schema introspection, config loading, and code generation
+ * Provides schema introspection, config loading, code generation,
+ * LLM execution, agents, and RAG runtime.
  */
 
 // Types
@@ -108,8 +109,8 @@ export type {
 }
 from './computed/field-evaluator.js';
 
-// LLM Abstractions
-export * from './llm/index.js';
+// LLM Abstractions - DEPRECATED: moved to runtime/llm, interfaces no longer needed
+// export * from './llm/index.js';
 
 // Database
 export * from './database/index.js';
@@ -117,5 +118,10 @@ export * from './database/index.js';
 // Document Ingestion (temporarily disabled - llamaindex removed)
 // export * from './ingestion';
 
+// ============================================
+// Runtime (merged from @luciformresearch/ragforge-runtime)
+// ============================================
+export * from './runtime/index.js';
+
 // Version
-export const VERSION = '0.0.1';
+export const VERSION = '0.2.0';

@@ -5,18 +5,9 @@
  */
 
 import type { SummarizationStrategyConfig } from '../types/config.js';
-// TODO: Move this to runtime to avoid circular dependency
-// import type { SummaryStrategy } from '@luciformresearch/ragforge-runtime';
-// import { getDefaultStrategies } from '@luciformresearch/ragforge-runtime';
-
-// Temporary: inline type until we reorganize
-interface SummaryStrategy {
-  id: string;
-  name: string;
-  description: string;
-  recommendedThreshold: number;
-  promptConfig: any;
-}
+// Now in same package - can import directly
+import type { SummaryStrategy } from '../runtime/summarization/default-strategies.js';
+import { getDefaultStrategies } from '../runtime/summarization/default-strategies.js';
 
 /**
  * Convert config strategy to runtime strategy format
@@ -48,28 +39,27 @@ export function convertConfigStrategyToRuntime(
   };
 }
 
-// TODO: Move to runtime - this function uses getDefaultStrategies from runtime
-// /**
-//  * Load all strategies (defaults + custom from config)
-//  *
-//  * Custom strategies override defaults with same ID.
-//  */
-// export function loadStrategies(
-//   customStrategies?: Record<string, SummarizationStrategyConfig>
-// ): Map<string, SummaryStrategy> {
-//   // Start with defaults
-//   const strategies = getDefaultStrategies();
-//
-//   // Add/override with custom strategies from config
-//   if (customStrategies) {
-//     for (const [id, config] of Object.entries(customStrategies)) {
-//       const runtimeStrategy = convertConfigStrategyToRuntime(id, config);
-//       strategies.set(id, runtimeStrategy);
-//     }
-//   }
-//
-//   return strategies;
-// }
+/**
+ * Load all strategies (defaults + custom from config)
+ *
+ * Custom strategies override defaults with same ID.
+ */
+export function loadStrategies(
+  customStrategies?: Record<string, SummarizationStrategyConfig>
+): Map<string, SummaryStrategy> {
+  // Start with defaults
+  const strategies = getDefaultStrategies();
+
+  // Add/override with custom strategies from config
+  if (customStrategies) {
+    for (const [id, config] of Object.entries(customStrategies)) {
+      const runtimeStrategy = convertConfigStrategyToRuntime(id, config);
+      strategies.set(id, runtimeStrategy);
+    }
+  }
+
+  return strategies;
+}
 
 /**
  * Validate that all referenced strategies exist

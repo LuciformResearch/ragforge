@@ -6,7 +6,7 @@
  *
  * @example
  * ```typescript
- * import { createRagAgent } from '@luciformresearch/ragforge-runtime';
+ * import { createRagAgent } from '@luciformresearch/ragforge';
  * import { createRagClient } from './client.js';
  *
  * const rag = createRagClient();
@@ -21,8 +21,8 @@
  * ```
  */
 
-import { generateToolsFromConfig, generateFileTools, generateImageTools, generate3DTools, IngestionLock, withIngestionLock } from '@luciformresearch/ragforge-core';
-import type { ToolGenerationOptions, GeneratedToolDefinition, ToolHandlerGenerator, RagForgeConfig, FileToolsContext, ImageToolsContext, ThreeDToolsContext } from '@luciformresearch/ragforge-core';
+import { generateToolsFromConfig, generateFileTools, generateImageTools, generate3DTools, IngestionLock, withIngestionLock } from '../../index.js';
+import type { ToolGenerationOptions, GeneratedToolDefinition, ToolHandlerGenerator, RagForgeConfig, FileToolsContext, ImageToolsContext, ThreeDToolsContext } from '../../index.js';
 import { StructuredLLMExecutor, BaseToolExecutor, type ToolCallRequest, type ToolExecutionResult } from '../llm/structured-llm-executor.js';
 import { GeminiAPIProvider } from '../reranking/gemini-api-provider.js';
 import { GeminiNativeToolProvider, type ToolDefinition } from '../llm/native-tool-calling/index.js';

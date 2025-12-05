@@ -5,7 +5,7 @@
 import neo4j, { Driver, Session } from 'neo4j-driver';
 import { GoogleGenAI } from '@google/genai';
 import { LuciformXMLParser } from '@luciformresearch/xmlparser';
-import type { EntityConfig } from '@luciformresearch/ragforge-core';
+import type { EntityConfig } from '@luciformresearch/ragforge';
 
 interface FieldMappings {
   display_name_field: string;

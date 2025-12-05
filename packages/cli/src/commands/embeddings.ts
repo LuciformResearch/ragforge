@@ -1,12 +1,11 @@
 import path from 'path';
 import process from 'process';
-import { ConfigLoader, SchemaIntrospector } from '@luciformresearch/ragforge-core';
+import { ConfigLoader, SchemaIntrospector } from '@luciformresearch/ragforge';
 import {
   Neo4jClient,
   runEmbeddingPipelines,
-  GeminiEmbeddingProvider, // Legacy - kept for backward compat
-  EmbeddingProvider
-} from '@luciformresearch/ragforge-runtime';
+  GeminiEmbeddingProvider,
+} from '@luciformresearch/ragforge';
 import { ensureEnvLoaded, getEnv } from '../utils/env.js';
 import { ensureGeminiKey, validateGeminiSchema } from '../utils/gemini.js';
 import { toRuntimeEmbeddingsConfig } from '../utils/embedding-transform.js';
@@ -104,73 +103,32 @@ Options:
 }
 
 /**
- * Create embedding provider from config (multi-provider support)
+ * Create Gemini embedding provider from config
+ *
+ * NOTE: Multi-provider support (OpenAI, Ollama, etc.) disabled.
+ * To restore, reinstall LlamaIndex deps and update embedding-provider.ts
  */
-function createEmbeddingProvider(config: any, embeddingsConfig: any): EmbeddingProvider {
-  // Check if user configured a specific embedding provider in config
-  if (config.embedding) {
-    const providerConfig = config.embedding;
-    const provider = providerConfig.provider || 'gemini';
-
-    console.log(`📦 Using embedding provider: ${provider} (from config)`);
-
-    // Get API key from config or environment
-    let apiKey = providerConfig.api_key;
-    if (!apiKey) {
-      // Try environment variables based on provider
-      switch (provider.toLowerCase()) {
-        case 'gemini':
-        case 'google':
-          apiKey = getEnv(['GEMINI_API_KEY', 'GOOGLE_API_KEY'], false);
-          break;
-        case 'openai':
-          apiKey = getEnv(['OPENAI_API_KEY'], false);
-          break;
-        case 'anthropic':
-          apiKey = getEnv(['ANTHROPIC_API_KEY'], false);
-          break;
-        case 'cohere':
-          apiKey = getEnv(['COHERE_API_KEY'], false);
-          break;
-        // Ollama doesn't need an API key
-        case 'ollama':
-          break;
-        default:
-          console.warn(`⚠️  Unknown provider "${provider}", trying to proceed without API key`);
-      }
-    }
-
-    return new EmbeddingProvider({
-      provider,
-      model: providerConfig.model || embeddingsConfig.defaults?.model,
-      apiKey,
-      dimensions: providerConfig.dimensions || embeddingsConfig.defaults?.dimension,
-      batchSize: providerConfig.batchSize,
-      options: providerConfig.options,
-    });
+function createEmbeddingProvider(config: any, embeddingsConfig: any): GeminiEmbeddingProvider {
+  // Get API key from config or environment
+  let apiKey = config.embedding?.api_key;
+  if (!apiKey) {
+    apiKey = getEnv(['GEMINI_API_KEY', 'GOOGLE_API_KEY'], false);
   }
 
-  // Legacy: Fall back to embeddings.provider (old config format)
-  if (embeddingsConfig.provider && embeddingsConfig.provider !== 'gemini') {
-    console.log(`📦 Using embedding provider: ${embeddingsConfig.provider} (from embeddings.provider)`);
-
-    return new EmbeddingProvider({
-      provider: embeddingsConfig.provider,
-      model: embeddingsConfig.defaults?.model,
-      apiKey: getEnv(['GEMINI_API_KEY', 'GOOGLE_API_KEY', 'OPENAI_API_KEY'], false),
-      dimensions: embeddingsConfig.defaults?.dimension,
-    });
+  if (!apiKey) {
+    apiKey = ensureGeminiKey(getEnv(['GEMINI_API_KEY'], true));
   }
 
-  // Default: Gemini (backward compatible)
-  console.log(`📦 Using embedding provider: gemini (default)`);
-  const geminiKey = ensureGeminiKey(getEnv(['GEMINI_API_KEY'], true));
+  const model = config.embedding?.model || embeddingsConfig.defaults?.model || 'text-embedding-004';
+  const dimension = config.embedding?.dimensions || embeddingsConfig.defaults?.dimension;
 
-  return new EmbeddingProvider({
-    provider: 'gemini',
-    model: embeddingsConfig.defaults?.model,
-    apiKey: geminiKey,
-    dimensions: embeddingsConfig.defaults?.dimension,
+  console.log(`📦 Using Gemini embedding provider (model: ${model})`);
+
+  return new GeminiEmbeddingProvider({
+    apiKey,
+    model,
+    dimension,
+    batching: config.embedding?.batchSize ? { size: config.embedding.batchSize } : undefined,
   });
 }
 

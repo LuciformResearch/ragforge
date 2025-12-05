@@ -12,7 +12,7 @@
 import { config } from 'dotenv';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { createRagAgent } from '@luciformresearch/ragforge-runtime';
+import { createRagAgent } from '@luciformresearch/ragforge';
 import { createRagClient } from '../client.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));

@@ -1,7 +1,7 @@
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { Neo4jClient, ChangeTracker } from '@luciformresearch/ragforge-runtime';
+import { Neo4jClient, ChangeTracker } from '@luciformresearch/ragforge';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, '../.env'), override: true });

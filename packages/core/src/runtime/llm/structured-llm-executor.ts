@@ -8,8 +8,10 @@
  * - Embedding generation with graph context
  */
 
-import { LLMProviderAdapter, EmbeddingProviderAdapter } from './provider-adapter.js';
-import type { LLM, BaseEmbedding } from 'llamaindex';
+// LlamaIndex multi-provider support - DISABLED (using native @google/genai instead)
+// To restore, uncomment and reinstall: npm i llamaindex @llamaindex/google @llamaindex/openai @llamaindex/anthropic @llamaindex/ollama
+// import { LLMProviderAdapter, EmbeddingProviderAdapter } from './provider-adapter.js';
+// import type { LLM, BaseEmbedding } from 'llamaindex';
 import { LuciformXMLParser } from '@luciformresearch/xmlparser';
 import type { EntityContext, EntityField } from '../types/entity-context.js';
 import type { LLMProvider } from '../reranking/llm-provider.js';
@@ -278,8 +280,9 @@ export interface LLMBatchResult<TInput, TOutput, TGlobal = any> {
  * Unified executor for all LLM structured operations
  */
 export class StructuredLLMExecutor {
-  private llmProviders: Map<string, LLMProviderAdapter> = new Map();
-  private embeddingProviders: Map<string, EmbeddingProviderAdapter> = new Map();
+  // LlamaIndex multi-provider support - DISABLED
+  // private llmProviders: Map<string, LLMProviderAdapter> = new Map();
+  // private embeddingProviders: Map<string, EmbeddingProviderAdapter> = new Map();
   private nativeToolProvider?: GeminiNativeToolProvider;
 
   constructor(
@@ -441,11 +444,22 @@ export class StructuredLLMExecutor {
 
   /**
    * Generate embeddings for batch of items
+   *
+   * NOTE: LlamaIndex multi-provider support disabled.
+   * Use GeminiEmbeddingProvider directly or via runEmbeddingPipelines() instead.
    */
   async generateEmbeddings<T>(
     items: T[],
     config: EmbeddingGenerationConfig
   ): Promise<(T & { [key: string]: number[] })[]> {
+    // LlamaIndex multi-provider support - DISABLED
+    // To restore, uncomment provider-adapter.ts and getEmbeddingProvider method
+    throw new Error(
+      'generateEmbeddings() is disabled (LlamaIndex removed). ' +
+      'Use GeminiEmbeddingProvider directly: new GeminiEmbeddingProvider({ apiKey }).embed(texts)'
+    );
+
+    /* Original implementation - kept for reference
     const targetField = config.targetField || 'generated_embedding';
 
     // Get embedding provider
@@ -469,6 +483,7 @@ export class StructuredLLMExecutor {
       ...item,
       [targetField]: embeddings[index]
     })) as any;
+    */
   }
 
   /**
@@ -683,13 +698,16 @@ export class StructuredLLMExecutor {
 
     let response: string;
 
-    // Use LLMProvider if provided (backward compat with LLMReranker)
+    // Use LLMProvider (required - LlamaIndex multi-provider support disabled)
     if (config.llmProvider) {
       response = await config.llmProvider.generateContent(prompt);
     } else {
-      // Otherwise use LLMProviderAdapter (LlamaIndex)
-      const provider = this.getLLMProvider(config.llm);
-      response = await provider.generate(prompt);
+      // LlamaIndex multi-provider fallback - DISABLED
+      // To restore, uncomment provider-adapter.ts imports and getLLMProvider method
+      throw new Error(
+        'llmProvider is required. Pass a GeminiAPIProvider instance in config.llmProvider. ' +
+        'Example: new GeminiAPIProvider({ apiKey, model: "gemini-1.5-flash" })'
+      );
     }
 
     // Log response if requested
@@ -1869,6 +1887,9 @@ export class StructuredLLMExecutor {
     }
   }
 
+  // LlamaIndex multi-provider support - DISABLED
+  // To restore, uncomment imports at top of file and these methods:
+  /*
   private getLLMProvider(config?: LLMConfig): LLMProviderAdapter {
     const provider = config?.provider || this.defaultLLMConfig?.provider || 'gemini';
     const cacheKey = `${provider}:${config?.model || ''}`;
@@ -1904,6 +1925,7 @@ export class StructuredLLMExecutor {
 
     return this.embeddingProviders.get(cacheKey)!;
   }
+  */
 
   // ===== TOOL CALLING SUPPORT =====
 

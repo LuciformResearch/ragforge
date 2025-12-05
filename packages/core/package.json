@@ -1,7 +1,7 @@
 {
-  "name": "@luciformresearch/ragforge-core",
-  "version": "0.2.0",
-  "description": "Core library for RagForge - YAML config parsing, Neo4j schema introspection, and TypeScript code generation for domain-specific RAG frameworks.",
+  "name": "@luciformresearch/ragforge",
+  "version": "0.3.0",
+  "description": "Unified RagForge library - YAML config parsing, Neo4j schema introspection, TypeScript code generation, LLM execution, agents, and RAG runtime.",
   "license": "LRSL-1.1 (See LICENSE file for more information)",
   "author": "Lucie Defraiteur <luciedefraiteur@luciformresearch.com>",
   "repository": {
@@ -12,7 +12,7 @@
   "bugs": {
     "url": "https://github.com/LuciformResearch/ragforge/issues"
   },
-  "homepage": "https://github.com/LuciformResearch/ragforge/tree/main/packages/core#readme",
+  "homepage": "https://github.com/LuciformResearch/ragforge#readme",
   "type": "module",
   "main": "./dist/esm/index.js",
   "module": "./dist/esm/index.js",
@@ -52,41 +52,52 @@
     "yaml",
     "schema",
     "meta-framework",
-    "compiler"
+    "compiler",
+    "runtime",
+    "query-builder",
+    "vector-search",
+    "embeddings",
+    "agents",
+    "llm"
   ],
   "engines": {
     "node": ">=18.0.0"
   },
   "dependencies": {
+    "@google/genai": "^1.28.0",
     "@luciformresearch/codeparsers": "file:../../../packages/codeparsers",
+    "@luciformresearch/xmlparser": "^0.2.4",
+    "@nisyaban/tika-server": "^1.3.11",
     "@types/gl": "^6.0.5",
     "@types/three": "^0.181.0",
     "canvas": "^3.2.0",
+    "chokidar": "^3.5.3",
     "diff": "^8.0.2",
+    "dotenv": "^16.3.1",
+    "fast-xml-parser": "^4.3.0",
     "fastest-levenshtein": "^1.0.16",
     "gl": "^8.1.6",
+    "glob-to-regexp": "^0.4.1",
+    "globby": "^14.0.0",
+    "js-yaml": "^4.1.1",
     "neo4j-driver": "^5.14.0",
+    "p-limit": "^4.0.0",
     "playwright": "^1.57.0",
     "replicate": "^1.4.0",
+    "strip-json-comments": "^5.0.3",
     "three": "^0.181.2",
+    "uuid": "^9.0.1",
     "yaml": "^2.3.4",
     "zod": "^3.22.4"
   },
   "devDependencies": {
-    "@luciformresearch/ragforge-runtime": "workspace:*",
+    "@types/diff": "^5.0.9",
+    "@types/js-yaml": "^4.0.9",
     "@types/node": "^20.0.0",
     "eslint": "^9.0.0",
     "prettier": "^3.3.0",
     "typescript": "^5.3.0",
     "vitest": "^1.0.0"
-  },
-  "peerDependencies": {
-    "@luciformresearch/ragforge-runtime": ">=0.2.0"
-  },
-  "peerDependenciesMeta": {
-    "@luciformresearch/ragforge-runtime": {
-      "optional": true
-    }
   },
   "publishConfig": {
     "access": "public"

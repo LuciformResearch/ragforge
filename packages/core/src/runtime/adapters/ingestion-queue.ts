@@ -10,7 +10,7 @@
 
 import type { CodeSourceConfig } from './code-source-adapter.js';
 import type { IncrementalIngestionManager, IncrementalStats } from './incremental-ingestion.js';
-import type { IngestionLock } from '@luciformresearch/ragforge-core';
+import type { IngestionLock } from '../../index.js';
 
 export interface IngestionQueueConfig {
   /**

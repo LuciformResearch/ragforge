@@ -1,7 +1,7 @@
 /**
  * Image Tools - Read images with OCR, describe images, list images
  *
- * Uses ragforge-runtime's OCR service for text extraction from images.
+ * Uses ragforge's OCR service for text extraction from images.
  * Supports Gemini Vision and DeepSeek-OCR (via Replicate).
  *
  * @since 2025-12-05
@@ -224,7 +224,7 @@ Example: list_images({ path: "docs/images", recursive: true })`,
 export interface ImageToolsContext {
   /** Project root directory (for relative paths) */
   projectRoot: string;
-  /** OCR Service instance (from ragforge-runtime) */
+  /** OCR Service instance (from ragforge) */
   ocrService?: any;
 }
 
@@ -291,7 +291,7 @@ export function generateReadImageHandler(ctx: ImageToolsContext): (args: any) =>
 
     // Fallback: try to import OCR service dynamically
     try {
-      const { getOCRService } = await import('@luciformresearch/ragforge-runtime');
+      const { getOCRService } = await import('../runtime/index.js');
       const ocrService = getOCRService();
 
       if (!ocrService.isAvailable()) {
@@ -324,7 +324,7 @@ export function generateReadImageHandler(ctx: ImageToolsContext): (args: any) =>
       };
     } catch (importError: any) {
       return {
-        error: `OCR service not available: ${importError.message}. Make sure @luciformresearch/ragforge-runtime is installed.`,
+        error: `OCR service not available: ${importError.message}. Make sure @luciformresearch/ragforge is installed.`,
       };
     }
   };
@@ -370,7 +370,7 @@ export function generateDescribeImageHandler(ctx: ImageToolsContext): (args: any
 
     // Try to use Gemini for description (best at visual understanding)
     try {
-      const { getOCRService } = await import('@luciformresearch/ragforge-runtime');
+      const { getOCRService } = await import('../runtime/index.js');
       const ocrService = getOCRService({ primaryProvider: 'gemini' });
 
       if (!ocrService.isAvailable()) {
@@ -568,12 +568,17 @@ async function generateViewPrompts(
   const styleDesc = styleDescriptions[style] || styleDescriptions['3d_render'];
 
   try {
-    // Import StructuredLLMExecutor from ragforge-runtime (peer dependency)
-    const { StructuredLLMExecutor } = await import('@luciformresearch/ragforge-runtime');
+    // Import StructuredLLMExecutor and GeminiAPIProvider from runtime
+    const { StructuredLLMExecutor, GeminiAPIProvider } = await import('../runtime/index.js');
 
-    const executor = new StructuredLLMExecutor(
-      { provider: 'gemini', model: 'gemini-1.5-flash', temperature: 0.7 }
-    );
+    // Create GeminiAPIProvider (no LlamaIndex needed)
+    const llmProvider = new GeminiAPIProvider({
+      apiKey,
+      model: 'gemini-2.0-flash',
+      temperature: 0.7,
+    });
+
+    const executor = new StructuredLLMExecutor();
 
     // Define input item
     const inputItem = {
@@ -582,11 +587,12 @@ async function generateViewPrompts(
       styleDescription: styleDesc,
     };
 
-    // Execute structured LLM call
+    // Execute structured LLM call with llmProvider
     const results = await executor.executeLLMBatch(
       [inputItem],
       {
         inputFields: ['basePrompt', 'style', 'styleDescription'],
+        llmProvider,
         systemPrompt: `Tu es un expert en prompt engineering pour la génération d'images multi-vues destinées à la reconstruction 3D.
 Tu génères 4 prompts cohérents et optimisés pour Gemini 2.5 Flash Image.
 

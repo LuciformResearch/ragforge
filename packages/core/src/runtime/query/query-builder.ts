@@ -18,7 +18,7 @@ import type {
   SemanticSearchOptions,
   ExpandOptions,
   FilterValue,
-  RelationshipConfig
+  RuntimeRelationshipConfig as RelationshipConfig
 } from '../types/index.js';
 import type {
   PipelineOperation,
@@ -29,7 +29,8 @@ import type {
   FilterOperation,
   ClientFilterOperation
 } from './operations.js';
-import type { EntityContext, ComputedFieldConfig } from '../types/entity-context.js';
+import type { EntityContext } from '../types/entity-context.js';
+import type { RuntimeComputedFieldConfig as ComputedFieldConfig } from '../types/index.js';
 import {
   StructuredLLMExecutor,
   type LLMStructuredCallConfig,

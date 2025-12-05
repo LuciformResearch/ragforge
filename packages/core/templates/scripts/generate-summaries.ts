@@ -18,19 +18,19 @@ import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { promises as fs } from 'fs';
-import { neo4j } from '@luciformresearch/ragforge-runtime';
+import { neo4j } from '@luciformresearch/ragforge';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, '../.env'), override: true });
 
 import { config } from '../load-config.js';
-import { Neo4jClient } from '@luciformresearch/ragforge-runtime';
+import { Neo4jClient } from '@luciformresearch/ragforge';
 import {
   GenericSummarizer,
   SummaryStorage,
   getDefaultStrategies
-} from '@luciformresearch/ragforge-runtime';
-import { GeminiAPIProvider } from '@luciformresearch/ragforge-runtime';
+} from '@luciformresearch/ragforge';
+import { GeminiAPIProvider } from '@luciformresearch/ragforge';
 
 // Parse CLI args
 const args = process.argv.slice(2);

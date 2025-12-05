@@ -25,13 +25,13 @@ import {
   type RagForgeConfig,
   type GraphSchema,
   SchemaIntrospector
-} from '@luciformresearch/ragforge-core';
+} from '@luciformresearch/ragforge';
 import {
   CodeSourceAdapter,
   TikaSourceAdapter,
   type SourceConfig,
   Neo4jClient
-} from '@luciformresearch/ragforge-runtime';
+} from '@luciformresearch/ragforge';
 import { ensureEnvLoaded, getEnv } from '../utils/env.js';
 import {
   prepareOutputDirectory,

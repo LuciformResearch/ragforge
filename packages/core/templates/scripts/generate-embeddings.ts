@@ -6,7 +6,7 @@ import {
   Neo4jClient,
   GeminiEmbeddingProvider,
   runEmbeddingPipelines
-} from '@luciformresearch/ragforge-runtime';
+} from '@luciformresearch/ragforge';
 
 import { EMBEDDINGS_CONFIG } from '../embeddings/load-config.ts';
 

@@ -14,7 +14,7 @@ import {
   ConfigGenerator,
   type RagForgeConfig,
   type GraphSchema
-} from '@luciformresearch/ragforge-core';
+} from '@luciformresearch/ragforge';
 import { ensureEnvLoaded, getEnv } from '../utils/env.js';
 import { prepareOutputDirectory, writeFileIfChanged } from '../utils/io.js';
 

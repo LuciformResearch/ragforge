@@ -2,7 +2,7 @@ import { promises as fs } from 'fs';
 import { spawn } from 'child_process';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import type { GeneratedCode } from '@luciformresearch/ragforge-core';
+import type { GeneratedCode } from '@luciformresearch/ragforge';
 
 // Get CLI's directory to find monorepo root in dev mode
 const __filename = fileURLToPath(import.meta.url);
@@ -345,10 +345,10 @@ export async function writeGeneratedEnv(outDir: string, connection: ConnectionEn
 }
 
 async function checkIfDevelopmentMode(rootDir: string): Promise<boolean> {
-  // Check if we're in a development environment (monorepo with packages/runtime)
+  // Check if we're in a development environment (monorepo with packages/core)
   const candidates = [
-    path.join(rootDir, 'packages/runtime'),
-    path.join(rootDir, 'ragforge/packages/runtime')
+    path.join(rootDir, 'packages/core'),
+    path.join(rootDir, 'ragforge/packages/core')
   ];
 
   for (const candidate of candidates) {
@@ -363,13 +363,13 @@ async function checkIfDevelopmentMode(rootDir: string): Promise<boolean> {
   return false;
 }
 
-async function copyRuntimePackage(rootDir: string, targetDir: string): Promise<void> {
+async function copyCorePackage(rootDir: string, targetDir: string): Promise<void> {
   const candidates = [
-    path.join(rootDir, 'packages/runtime'),
-    path.join(rootDir, 'ragforge/packages/runtime')
+    path.join(rootDir, 'packages/core'),
+    path.join(rootDir, 'ragforge/packages/core')
   ];
 
-  const runtimeSource = await (async () => {
+  const coreSource = await (async () => {
     for (const candidate of candidates) {
       try {
         await fs.access(candidate);
@@ -378,33 +378,33 @@ async function copyRuntimePackage(rootDir: string, targetDir: string): Promise<v
         continue;
       }
     }
-    throw new Error('Unable to locate @luciformresearch/ragforge-runtime package in the current workspace.');
+    throw new Error('Unable to locate @luciformresearch/ragforge package in the current workspace.');
   })();
-  const runtimeDest = path.join(targetDir, 'packages/runtime');
+  const coreDest = path.join(targetDir, 'packages/core');
 
   try {
-    await fs.access(path.join(runtimeSource, 'dist', 'index.js'));
+    await fs.access(path.join(coreSource, 'dist', 'index.js'));
   } catch {
-    throw new Error('Runtime package not built. Run `npm run build --workspace=@luciformresearch/ragforge-runtime` first.');
+    throw new Error('Core package not built. Run `npm run build --workspace=@luciformresearch/ragforge` first.');
   }
 
   await fs.mkdir(path.join(targetDir, 'packages'), { recursive: true });
-  await fs.rm(runtimeDest, { recursive: true, force: true });
-  await fs.mkdir(runtimeDest, { recursive: true });
+  await fs.rm(coreDest, { recursive: true, force: true });
+  await fs.mkdir(coreDest, { recursive: true });
 
-  await fs.cp(path.join(runtimeSource, 'dist'), path.join(runtimeDest, 'dist'), { recursive: true });
+  await fs.cp(path.join(coreSource, 'dist'), path.join(coreDest, 'dist'), { recursive: true });
 
   const filesToCopy = ['package.json', 'README.md', 'LICENSE', 'LICENSE.md'];
   for (const file of filesToCopy) {
-    const src = path.join(runtimeSource, file);
+    const src = path.join(coreSource, file);
     try {
-      await fs.copyFile(src, path.join(runtimeDest, file));
+      await fs.copyFile(src, path.join(coreDest, file));
     } catch {
       // optional file not present
     }
   }
 
-  await relaxRuntimePackageMetadata(runtimeDest);
+  await relaxCorePackageMetadata(coreDest);
 }
 
 async function writeGeneratedPackageJson(
@@ -429,12 +429,13 @@ async function writeGeneratedPackageJson(
   if (dev) {
     // In dev mode, use CLI's own location to find monorepo root
     // This works regardless of where the generated project is located
-    const runtimePath = path.join(CLI_MONOREPO_ROOT, 'packages/runtime');
+    // Note: @luciformresearch/ragforge is now in packages/core (unified package)
+    const corePath = path.join(CLI_MONOREPO_ROOT, 'packages/core');
 
-    // Verify the runtime exists
+    // Verify the core package exists
     try {
-      await fs.access(runtimePath);
-      const relativePath = path.relative(outDir, runtimePath);
+      await fs.access(corePath);
+      const relativePath = path.relative(outDir, corePath);
       runtimeDependency = `file:${relativePath}`;
 
       // Also calculate codeparsers path (sibling to ragforge monorepo)
@@ -442,7 +443,7 @@ async function writeGeneratedPackageJson(
       const codeparsersRelativePath = path.relative(outDir, codeparsersPath);
       codeparsersDependency = `file:${codeparsersRelativePath}`;
     } catch {
-      console.warn(`⚠️  Dev mode: Could not find runtime at ${runtimePath}, using npm packages`);
+      console.warn(`⚠️  Dev mode: Could not find core at ${corePath}, using npm packages`);
     }
   }
 
@@ -452,7 +453,7 @@ async function writeGeneratedPackageJson(
     type: 'module',
     version: '0.0.1',
     dependencies: {
-      '@luciformresearch/ragforge-runtime': runtimeDependency,
+      '@luciformresearch/ragforge': runtimeDependency,
       '@google/genai': '^1.28.0',
       'dotenv': '^16.3.1',
       'tsx': '^4.20.0',
@@ -552,14 +553,14 @@ async function writeGeneratedPackageJson(
   }
 }
 
-async function relaxRuntimePackageMetadata(runtimeDir: string): Promise<void> {
-  const packagePath = path.join(runtimeDir, 'package.json');
+async function relaxCorePackageMetadata(coreDir: string): Promise<void> {
+  const packagePath = path.join(coreDir, 'package.json');
 
   let raw: string;
   try {
     raw = await fs.readFile(packagePath, 'utf-8');
   } catch (error) {
-    throw new Error(`Failed to read runtime package metadata: ${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(`Failed to read core package metadata: ${error instanceof Error ? error.message : String(error)}`);
   }
 
   const pkg = JSON.parse(raw);
@@ -567,7 +568,7 @@ async function relaxRuntimePackageMetadata(runtimeDir: string): Promise<void> {
   delete pkg.devDependencies;
   pkg.private = true;
   pkg.scripts = {
-    build: 'echo "Runtime already built"'
+    build: 'echo "Core already built"'
   };
 
   await fs.writeFile(packagePath, JSON.stringify(pkg, null, 2) + '\n', 'utf-8');
@@ -590,7 +591,7 @@ async function writeGeneratedTsconfig(outDir: string): Promise<void> {
       outDir: 'dist'
     },
     include: ['**/*.ts'],
-    exclude: ['node_modules', 'packages/runtime/dist', 'packages/runtime/src']
+    exclude: ['node_modules', 'packages/core/dist', 'packages/core/src']
   };
 
   await writeFileIfChanged(
@@ -615,7 +616,7 @@ async function writeGitIgnore(outDir: string): Promise<void> {
 .npm-cache
 .env
 .env.local
-packages/runtime/node_modules
+packages/core/node_modules
 dist
 logs
 `;

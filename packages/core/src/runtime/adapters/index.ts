@@ -4,7 +4,19 @@
  * Adapters for parsing various sources into Neo4j graph structures
  */
 
-export * from './types.js';
+// Re-export types with alias for SourceConfig to avoid conflict with core
+export {
+  SourceConfig as AdapterSourceConfig,
+  ParsedNode,
+  ParsedRelationship,
+  ParsedGraph,
+  UpdateStats,
+  ParseResult,
+  ParseOptions,
+  ParseProgress,
+  SourceAdapter,
+  ValidationResult,
+} from './types.js';
 export * from './code-source-adapter.js';
 // Deprecated: LlamaIndex-based adapter replaced by TikaSourceAdapter
 // export * from './document-source-adapter.js';

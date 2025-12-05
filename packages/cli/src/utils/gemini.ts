@@ -1,4 +1,4 @@
-import type { GraphSchema } from '@luciformresearch/ragforge-core';
+import type { GraphSchema } from '@luciformresearch/ragforge';
 
 export function validateGeminiSchema(schema: GraphSchema): void {
   const unknown = schema.vectorIndexes.filter(ix => ix.dimension === undefined || ix.dimension === null);

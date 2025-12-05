@@ -4,6 +4,10 @@
  * Configuration for making LLM reranker generic across any domain.
  */
 
+// Import unified ComputedFieldConfig from core
+import type { ComputedFieldConfig } from '../../types/config.js';
+export type { ComputedFieldConfig };
+
 /**
  * Entity field configuration for LLM prompt rendering
  */
@@ -43,45 +47,7 @@ export interface EntityField {
   preferSummary?: boolean;
 }
 
-/**
- * Computed field configuration for runtime evaluation
- */
-export interface ComputedFieldConfig {
-  /**
-   * Field name
-   */
-  name: string;
-
-  /**
-   * Field type
-   */
-  type: string;
-
-  /**
-   * Description
-   */
-  description?: string;
-
-  /**
-   * Simple expression for computation (e.g., "endLine - startLine")
-   */
-  expression?: string;
-
-  /**
-   * Cypher query for complex computation
-   */
-  cypher?: string;
-
-  /**
-   * Cache computed values in Neo4j (default: false)
-   */
-  materialized?: boolean;
-
-  /**
-   * Neo4j property name for cached value (required if materialized=true)
-   */
-  cache_property?: string;
-}
+// ComputedFieldConfig imported from core (unified)
 
 /**
  * Enrichment field configuration for LLM prompt rendering

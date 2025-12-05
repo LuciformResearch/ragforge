@@ -1,13 +1,12 @@
 /**
  * Vector Search Module
  *
- * Handles semantic search using multi-provider embeddings and Neo4j vector indexes
- * Supports: Gemini, OpenAI, Ollama, Anthropic, and more via LlamaIndex
+ * Handles semantic search using Gemini embeddings and Neo4j vector indexes
  */
 
 import neo4j from 'neo4j-driver';
 import type { Neo4jClient } from '../client/neo4j-client.js';
-import { EmbeddingProvider, type EmbeddingProviderOptions } from '../embedding/embedding-provider.js';
+import { GeminiEmbeddingProvider, type GeminiProviderOptions as EmbeddingProviderOptions } from '../embedding/embedding-provider.js';
 
 export interface VectorSearchOptions {
   /** Vector index name to query */
@@ -62,7 +61,7 @@ export class VectorSearch {
     this.indexRegistry.set(indexName, config);
   }
 
-  private embeddingProviders = new Map<string, EmbeddingProvider>();
+  private embeddingProviders = new Map<string, GeminiEmbeddingProvider>();
 
   constructor(
     private neo4jClient: Neo4jClient,
@@ -81,19 +80,21 @@ export class VectorSearch {
   /**
    * Get or create embedding provider for a given config
    */
-  private getEmbeddingProvider(config: IndexConfig): EmbeddingProvider {
+  private getEmbeddingProvider(config: IndexConfig): GeminiEmbeddingProvider {
     const provider = config.provider || 'gemini';
     const cacheKey = `${provider}:${config.model}:${config.apiKey || ''}`;
 
     let embeddingProvider = this.embeddingProviders.get(cacheKey);
     if (!embeddingProvider) {
+      const apiKey = config.apiKey || this.options.apiKey;
+      if (!apiKey) {
+        throw new Error('API key is required for embedding provider. Set it in config or pass apiKey option.');
+      }
       // Create provider from config
-      embeddingProvider = new EmbeddingProvider({
-        provider,
+      embeddingProvider = new GeminiEmbeddingProvider({
         model: config.model,
-        apiKey: config.apiKey || this.options.apiKey,
-        dimensions: config.dimension,
-        options: config.options,
+        apiKey,
+        dimension: config.dimension,
       });
 
       this.embeddingProviders.set(cacheKey, embeddingProvider);

@@ -20,7 +20,7 @@ import {
   type GraphSchema,
   type VectorIndexConfig,
   type EntityConfig
-} from '@luciformresearch/ragforge-core';
+} from '@luciformresearch/ragforge';
 import YAML from 'yaml';
 import { ensureEnvLoaded, getEnv } from '../utils/env.js';
 import { prepareOutputDirectory, persistGeneratedArtifacts, writeGeneratedEnv, type ConnectionEnv } from '../utils/io.js';
