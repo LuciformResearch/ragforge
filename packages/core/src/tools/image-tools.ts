@@ -85,6 +85,101 @@ Example:
 }
 
 /**
+ * Generate generate_multiview_images tool (multi-view generation for 3D reconstruction)
+ */
+export function generateGenerateMultiviewImagesTool(): GeneratedToolDefinition {
+  return {
+    name: 'generate_multiview_images',
+    description: `Generate multiple consistent view images from a text description.
+
+Uses AI to create 4 coherent views (front, right, top, perspective) of the same object.
+These views can then be passed to generate_3d_from_image for 3D reconstruction.
+
+The tool uses a prompt enhancer to ensure all views are consistent in style, colors, and details.
+
+Parameters:
+- prompt: Text description of the object to generate
+- output_dir: Directory to save the generated images
+- style: Style preset ('3d_render', 'realistic', 'cartoon', 'lowpoly', default: '3d_render')
+
+Note: Requires GEMINI_API_KEY environment variable.
+
+Example:
+  generate_multiview_images({
+    prompt: "A yellow rubber duck toy",
+    output_dir: "temp/duck-views",
+    style: "3d_render"
+  })
+
+Returns paths to 4 images: {name}_front.png, {name}_right.png, {name}_top.png, {name}_perspective.png`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        prompt: {
+          type: 'string',
+          description: 'Text description of the object to generate',
+        },
+        output_dir: {
+          type: 'string',
+          description: 'Directory to save the generated images',
+        },
+        style: {
+          type: 'string',
+          enum: ['3d_render', 'realistic', 'cartoon', 'lowpoly'],
+          description: 'Style preset (default: 3d_render)',
+        },
+      },
+      required: ['prompt', 'output_dir'],
+    },
+  };
+}
+
+/**
+ * Generate generate_image tool (AI image generation)
+ */
+export function generateGenerateImageTool(): GeneratedToolDefinition {
+  return {
+    name: 'generate_image',
+    description: `Generate an image from a text prompt using AI.
+
+Uses Gemini's image generation (gemini-2.0-flash-exp) to create images from text descriptions.
+Good for creating concept art, reference images, icons, diagrams, etc.
+
+Parameters:
+- prompt: Text description of the image to generate
+- output_path: Where to save the generated image (PNG)
+- aspect_ratio: Aspect ratio ('1:1', '16:9', '9:16', '4:3', '3:4', default: '1:1')
+
+Note: Requires GEMINI_API_KEY environment variable.
+
+Example:
+  generate_image({
+    prompt: "A cute robot mascot, 3D render style, white background",
+    output_path: "assets/robot-mascot.png"
+  })`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        prompt: {
+          type: 'string',
+          description: 'Text description of the image to generate',
+        },
+        output_path: {
+          type: 'string',
+          description: 'Where to save the generated image (PNG)',
+        },
+        aspect_ratio: {
+          type: 'string',
+          enum: ['1:1', '16:9', '9:16', '4:3', '3:4'],
+          description: 'Aspect ratio (default: 1:1)',
+        },
+      },
+      required: ['prompt', 'output_path'],
+    },
+  };
+}
+
+/**
  * Generate list_images tool
  */
 export function generateListImagesTool(): GeneratedToolDefinition {
@@ -310,6 +405,272 @@ export function generateDescribeImageHandler(ctx: ImageToolsContext): (args: any
 }
 
 /**
+ * Generate handler for generate_image
+ */
+export function generateGenerateImageHandler(ctx: ImageToolsContext): (args: any) => Promise<any> {
+  return async (params: any) => {
+    const { prompt, output_path, aspect_ratio = '1:1' } = params;
+    const fs = await import('fs/promises');
+    const pathModule = await import('path');
+
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      return { error: 'GEMINI_API_KEY environment variable is not set' };
+    }
+
+    // Resolve output path
+    const absoluteOutputPath = pathModule.isAbsolute(output_path)
+      ? output_path
+      : pathModule.join(ctx.projectRoot, output_path);
+
+    const startTime = Date.now();
+
+    try {
+      // Use Gemini 2.5 Flash Image (Nano Banana)
+      const { GoogleGenAI } = await import('@google/genai');
+      const genAI = new GoogleGenAI({ apiKey });
+
+      const response = await genAI.models.generateContent({
+        model: 'gemini-2.5-flash-image-preview',
+        contents: prompt,
+        config: {
+          responseModalities: ['TEXT', 'IMAGE'],
+        },
+      });
+
+      // Extract image from response
+      const parts = response.candidates?.[0]?.content?.parts ?? [];
+      const imgPart = parts.find((p: any) => p.inlineData?.data);
+
+      if (!imgPart) {
+        // Check for text response that might explain the error
+        const textPart = parts.find((p: any) => p.text);
+        const errorText = textPart?.text || 'No image generated';
+        return { error: `No image in response: ${errorText.substring(0, 200)}` };
+      }
+
+      // Save image
+      const buffer = Buffer.from(imgPart.inlineData!.data!, 'base64');
+      await fs.mkdir(pathModule.dirname(absoluteOutputPath), { recursive: true });
+      await fs.writeFile(absoluteOutputPath, buffer);
+
+      return {
+        prompt,
+        output_path,
+        absolute_path: absoluteOutputPath,
+        aspect_ratio,
+        processing_time_ms: Date.now() - startTime,
+      };
+    } catch (err: any) {
+      return { error: `Image generation failed: ${err.message}` };
+    }
+  };
+}
+
+/**
+ * Generate handler for generate_multiview_images
+ * Uses a prompt enhancer to generate 4 coherent view-specific prompts
+ */
+export function generateGenerateMultiviewImagesHandler(ctx: ImageToolsContext): (args: any) => Promise<any> {
+  return async (params: any) => {
+    const { prompt, output_dir, style = '3d_render' } = params;
+    const fs = await import('fs/promises');
+    const pathModule = await import('path');
+
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      return { error: 'GEMINI_API_KEY environment variable is not set' };
+    }
+
+    // Resolve output directory
+    const absoluteOutputDir = pathModule.isAbsolute(output_dir)
+      ? output_dir
+      : pathModule.join(ctx.projectRoot, output_dir);
+
+    const startTime = Date.now();
+
+    try {
+      // Create output directory
+      await fs.mkdir(absoluteOutputDir, { recursive: true });
+
+      // 1. Use prompt enhancer to generate 4 coherent view prompts
+      console.log('🎨 Enhancing prompts for multiview generation...');
+      const viewPrompts = await generateViewPrompts(prompt, style, apiKey);
+
+      console.log('📸 Generated view prompts:');
+      for (const [view, viewPrompt] of Object.entries(viewPrompts)) {
+        console.log(`  - ${view}: ${(viewPrompt as string).substring(0, 80)}...`);
+      }
+
+      // 2. Generate all 4 images in parallel
+      console.log('🖼️ Generating 4 images in parallel...');
+      const generateImageHandler = generateGenerateImageHandler(ctx);
+
+      const views = ['front', 'right', 'top', 'perspective'] as const;
+      const imagePromises = views.map(async (view) => {
+        const viewPrompt = viewPrompts[view];
+        const outputPath = pathModule.join(output_dir, `${view}.png`);
+
+        const result = await generateImageHandler({
+          prompt: viewPrompt,
+          output_path: outputPath,
+        });
+
+        return { view, ...result };
+      });
+
+      const results = await Promise.all(imagePromises);
+
+      // Check for errors
+      const errors = results.filter(r => r.error);
+      if (errors.length === results.length) {
+        return { error: `All image generations failed: ${errors.map(e => e.error).join(', ')}` };
+      }
+
+      const successfulResults = results.filter(r => !r.error);
+
+      return {
+        prompt,
+        style,
+        output_dir,
+        absolute_output_dir: absoluteOutputDir,
+        images: successfulResults.map(r => ({
+          view: r.view,
+          path: r.output_path,
+          absolute_path: r.absolute_path,
+        })),
+        failed: errors.map(e => ({ view: e.view, error: e.error })),
+        processing_time_ms: Date.now() - startTime,
+        view_prompts: viewPrompts,
+      };
+    } catch (err: any) {
+      return { error: `Multiview generation failed: ${err.message}` };
+    }
+  };
+}
+
+/**
+ * Generate 4 coherent view-specific prompts using StructuredLLMExecutor
+ * Inspired by PromptEnhancerAgent from lr-tchatagent-web
+ */
+async function generateViewPrompts(
+  basePrompt: string,
+  style: string,
+  apiKey: string
+): Promise<Record<'front' | 'right' | 'top' | 'perspective', string>> {
+  const styleDescriptions: Record<string, string> = {
+    '3d_render': 'Clean 3D render style, studio lighting, smooth materials, white or neutral background',
+    'realistic': 'Photorealistic, detailed textures, natural lighting, high quality photograph',
+    'cartoon': 'Cartoon style, bold outlines, vibrant colors, simplified shapes',
+    'lowpoly': 'Low poly 3D style, geometric facets, minimal detail, stylized',
+  };
+
+  const styleDesc = styleDescriptions[style] || styleDescriptions['3d_render'];
+
+  try {
+    // Import StructuredLLMExecutor from ragforge-runtime (peer dependency)
+    const { StructuredLLMExecutor } = await import('@luciformresearch/ragforge-runtime');
+
+    const executor = new StructuredLLMExecutor(
+      { provider: 'gemini', model: 'gemini-1.5-flash', temperature: 0.7 }
+    );
+
+    // Define input item
+    const inputItem = {
+      basePrompt,
+      style,
+      styleDescription: styleDesc,
+    };
+
+    // Execute structured LLM call
+    const results = await executor.executeLLMBatch(
+      [inputItem],
+      {
+        inputFields: ['basePrompt', 'style', 'styleDescription'],
+        systemPrompt: `Tu es un expert en prompt engineering pour la génération d'images multi-vues destinées à la reconstruction 3D.
+Tu génères 4 prompts cohérents et optimisés pour Gemini 2.5 Flash Image.
+
+RÈGLES CRITIQUES DE COHÉRENCE:
+1. MÊME OBJET: Tous les prompts décrivent exactement le même objet avec les mêmes caractéristiques
+2. MÊMES COULEURS: Les couleurs spécifiées doivent être identiques dans tous les prompts
+3. MÊMES DÉTAILS: Tous les détails (textures, matériaux, accessoires) doivent être cohérents
+4. MÊMES PROPORTIONS: L'objet doit avoir les mêmes proportions dans toutes les vues
+5. FOND UNIFORME: Utilise un fond blanc ou neutre pour toutes les vues
+6. CENTRÉ: L'objet doit être centré dans le cadre pour chaque vue
+7. STYLE COHÉRENT: Le style artistique doit être identique`,
+        userTask: `Génère 4 prompts optimisés pour ces vues:
+- front: Vue de face, centré, regardant directement la caméra
+- right: Vue de profil droit (90°), même position/pose
+- top: Vue du dessus (vue plongeante à 90°), même objet
+- perspective: Vue 3/4 avant-droite (45°), légèrement en hauteur
+
+Chaque prompt doit:
+- Commencer par la description de l'objet (reprendre les détails originaux)
+- Spécifier la vue clairement
+- Ajouter les détails de style et de rendu
+- Terminer par "centered in frame, white background"`,
+        outputSchema: {
+          front: {
+            type: 'string',
+            description: 'Prompt complet pour la vue de face (front view)',
+            required: true,
+          },
+          right: {
+            type: 'string',
+            description: 'Prompt complet pour la vue de droite (right side view)',
+            required: true,
+          },
+          top: {
+            type: 'string',
+            description: 'Prompt complet pour la vue du dessus (top-down view)',
+            required: true,
+          },
+          perspective: {
+            type: 'string',
+            description: 'Prompt complet pour la vue perspective 3/4 (perspective view)',
+            required: true,
+          },
+          reasoning: {
+            type: 'string',
+            description: 'Explication courte des choix de prompts',
+            required: false,
+          },
+        },
+        outputFormat: 'xml', // XML is more robust for parsing
+        batchSize: 1,
+      }
+    );
+
+    // Extract result (executeLLMBatch returns array)
+    const result = Array.isArray(results) ? results[0] : (results as any).items[0];
+
+    if (!result || !result.front || !result.right || !result.top || !result.perspective) {
+      throw new Error('Missing view prompts in structured response');
+    }
+
+    console.log(`✨ Prompt enhancer reasoning: ${result.reasoning || 'N/A'}`);
+
+    return {
+      front: result.front,
+      right: result.right,
+      top: result.top,
+      perspective: result.perspective,
+    };
+  } catch (err: any) {
+    console.warn(`⚠️ StructuredLLMExecutor failed, using fallback prompts: ${err.message}`);
+
+    // Fallback: simple template-based prompts
+    const baseEnhanced = `${basePrompt}, ${styleDesc}`;
+    return {
+      front: `${baseEnhanced}, front view, centered in frame, white background`,
+      right: `${baseEnhanced}, right side view, profile, centered in frame, white background`,
+      top: `${baseEnhanced}, top-down view, from above, centered in frame, white background`,
+      perspective: `${baseEnhanced}, 3/4 perspective view, slightly elevated angle, centered in frame, white background`,
+    };
+  }
+}
+
+/**
  * Generate handler for list_images
  */
 export function generateListImagesHandler(ctx: ImageToolsContext): (args: any) => Promise<any> {
@@ -408,11 +769,15 @@ export function generateImageTools(ctx: ImageToolsContext): ImageToolsResult {
       generateReadImageTool(),
       generateDescribeImageTool(),
       generateListImagesTool(),
+      generateGenerateImageTool(),
+      generateGenerateMultiviewImagesTool(),
     ],
     handlers: {
       read_image: generateReadImageHandler(ctx),
       describe_image: generateDescribeImageHandler(ctx),
       list_images: generateListImagesHandler(ctx),
+      generate_image: generateGenerateImageHandler(ctx),
+      generate_multiview_images: generateGenerateMultiviewImagesHandler(ctx),
     },
   };
 }

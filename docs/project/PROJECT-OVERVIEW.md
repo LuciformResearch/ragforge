@@ -99,6 +99,9 @@ Only changed files are re-ingested:
 - Incremental ingestion with change tracking
 - IngestionLock for RAG query coordination
 - `ragforge create` command for new projects
+- **Media Tools**:
+  - Image: read_image (OCR), describe_image, list_images, generate_image
+  - 3D: render_3d_asset (Three.js), generate_3d_from_image (Trellis)
 
 ### In Progress
 
@@ -127,6 +130,7 @@ Only changed files are re-ingested:
 | [QUICKSTART.md](./QUICKSTART.md) | Get started in 5 minutes |
 | [CODEPARSERS.md](./CODEPARSERS.md) | Parser package documentation |
 | [AGENT-TESTING.md](./AGENT-TESTING.md) | How to test the RAG agent |
+| [MEDIA-TOOLS.md](./MEDIA-TOOLS.md) | Image & 3D tools documentation |
 | [HTML-PARSER-DESIGN.md](./HTML-PARSER-DESIGN.md) | HTML hybrid parser design |
 | [CURRENT-STATE-2025-12-05.md](../visions/tool-generation/CURRENT-STATE-2025-12-05.md) | Detailed technical state |
 

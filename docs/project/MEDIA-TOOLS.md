@@ -1,7 +1,7 @@
 # Media Tools - Images & 3D Assets
 
 **Last Updated**: 2025-12-05
-**Status**: Implementation Phase
+**Status**: Working
 **Author**: Lucie Defraiteur
 
 ---
@@ -10,8 +10,9 @@
 
 RagForge provides media manipulation tools for the code agent, enabling it to:
 1. **Read and analyze images** (OCR, visual description)
-2. **Render 3D assets** to images (multiple views)
-3. **Generate 3D models** from images or text
+2. **Generate images** from text prompts (Gemini)
+3. **Render 3D assets** to images (multiple views)
+4. **Generate 3D models** from images (Trellis)
 
 These tools are designed to help the agent work on visual/3D projects like Three.js applications.
 
@@ -27,8 +28,9 @@ These tools are designed to help the agent work on visual/3D projects like Three
 │                                                              │
 │  Uses tools to:                                              │
 │  - Analyze existing assets (read_image, describe_image)     │
+│  - Generate images (generate_image)                         │
 │  - Preview 3D models (render_3d_asset)                       │
-│  - Generate new 3D content (generate_3d_from_*)             │
+│  - Generate 3D from images (generate_3d_from_image)          │
 │                                                              │
 └─────────────────────────────────────────────────────────────┘
                               │
@@ -40,12 +42,12 @@ These tools are designed to help the agent work on visual/3D projects like Three
 │  IMAGE TOOLS (ragforge-core)                                │
 │  ├── read_image      - OCR text extraction                  │
 │  ├── describe_image  - Visual description (Gemini Vision)  │
-│  └── list_images     - List image files                     │
+│  ├── list_images     - List image files                     │
+│  └── generate_image  - Text → Image (Gemini)               │
 │                                                              │
 │  3D TOOLS (ragforge-core)                                   │
-│  ├── render_3d_asset - Render model to images (Three.js)   │
-│  ├── generate_3d_from_image - Image → 3D (Trellis)         │
-│  └── generate_3d_from_text  - Text → 3D (MVDream)          │
+│  ├── render_3d_asset       - Render model to images         │
+│  └── generate_3d_from_image - Images → 3D (Trellis)        │
 │                                                              │
 └─────────────────────────────────────────────────────────────┘
                               │
@@ -55,15 +57,16 @@ These tools are designed to help the agent work on visual/3D projects like Three
 ├─────────────────────────────────────────────────────────────┤
 │                                                              │
 │  Vision/OCR:                                                │
-│  ├── Gemini Vision (GEMINI_API_KEY)                         │
-│  └── DeepSeek-OCR via Replicate (REPLICATE_API_TOKEN)      │
+│  └── Gemini Vision (GEMINI_API_KEY)                         │
+│                                                              │
+│  Image Generation:                                          │
+│  └── Gemini 2.0 Flash (GEMINI_API_KEY)                     │
 │                                                              │
 │  3D Generation:                                             │
-│  ├── firtoz/trellis (Image → 3D) - Replicate               │
-│  └── adirik/mvdream (Text → 3D) - Replicate                │
+│  └── firtoz/trellis (Images → 3D) - Replicate              │
 │                                                              │
 │  3D Rendering:                                              │
-│  └── Three.js headless (node with WebGL/canvas)            │
+│  └── Three.js headless via Playwright (WebGL)              │
 │                                                              │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -77,12 +80,11 @@ These tools are designed to help the agent work on visual/3D projects like Three
 Extract text from images using AI vision models.
 
 ```typescript
-// Tool definition
 {
   name: 'read_image',
   inputSchema: {
     path: string,      // Image file path
-    provider?: 'gemini' | 'replicate-deepseek' | 'auto'
+    provider?: 'gemini' | 'auto'
   }
 }
 
@@ -92,10 +94,6 @@ const result = await tools.read_image({
 });
 // Returns: { text: "Error: Connection refused...", provider: "gemini" }
 ```
-
-**Providers:**
-- `gemini` - Gemini Vision (primary, semantic understanding)
-- `replicate-deepseek` - DeepSeek-OCR (alternative, 97% accuracy)
 
 ### describe_image
 
@@ -132,6 +130,28 @@ List image files in a directory.
 }
 ```
 
+### generate_image ✨ NEW
+
+Generate an image from a text prompt using Gemini.
+
+```typescript
+{
+  name: 'generate_image',
+  inputSchema: {
+    prompt: string,       // Text description
+    output_path: string,  // Where to save PNG
+    aspect_ratio?: '1:1' | '16:9' | '9:16' | '4:3' | '3:4'
+  }
+}
+
+// Example
+const result = await tools.generate_image({
+  prompt: 'A cute robot mascot, 3D render style, white background',
+  output_path: 'assets/robot-mascot.png'
+});
+// Returns: { output_path: "assets/robot-mascot.png", processing_time_ms: 3500 }
+```
+
 ---
 
 ## 3D Tools
@@ -144,12 +164,12 @@ Render a 3D model to images from multiple viewpoints using Three.js.
 {
   name: 'render_3d_asset',
   inputSchema: {
-    model_path: string,  // Path to .glb, .gltf, .obj, .fbx
+    model_path: string,  // Path to .glb, .gltf
     output_dir: string,  // Where to save rendered images
     views?: string[],    // ['front', 'back', 'left', 'right', 'top', 'bottom', 'perspective']
     width?: number,      // Image width (default: 1024)
     height?: number,     // Image height (default: 1024)
-    background?: string  // Background color (default: transparent)
+    background?: string  // Background color (default: '#333333')
   }
 }
 
@@ -172,8 +192,6 @@ const result = await tools.render_3d_asset({
 
 **Supported formats:**
 - `.glb` / `.gltf` (recommended)
-- `.obj` + `.mtl`
-- `.fbx`
 
 **View presets:**
 | View | Camera Position | Description |
@@ -185,129 +203,98 @@ const result = await tools.render_3d_asset({
 | top | (0, y, 0) | Top-down |
 | bottom | (0, -y, 0) | Bottom-up |
 | perspective | (x, y, z) | 3/4 view |
-| custom | Configurable | User-defined |
 
 ### generate_3d_from_image
 
-Generate a 3D model from a reference image using Trellis (Replicate).
+Generate a 3D model from reference image(s) using Trellis (Replicate).
 
 ```typescript
 {
   name: 'generate_3d_from_image',
   inputSchema: {
-    image_path: string,    // Input image
-    output_path: string,   // Where to save .glb
-    format?: 'glb' | 'obj', // Output format (default: glb)
-    quality?: 'fast' | 'balanced' | 'high'  // Generation quality
+    image_paths: string | string[],  // Single image or multiple views
+    output_path: string,             // Where to save .glb
   }
 }
 
-// Example
+// Example with single image
 const result = await tools.generate_3d_from_image({
-  image_path: 'references/spaceship-concept.png',
+  image_paths: 'references/spaceship-concept.png',
   output_path: 'assets/models/spaceship.glb',
-  quality: 'balanced'
 });
-// Returns: { model_path: 'assets/models/spaceship.glb', processing_time_ms: 45000 }
+
+// Example with multiple views (better quality!)
+const result = await tools.generate_3d_from_image({
+  image_paths: [
+    'renders/model_front.png',
+    'renders/model_right.png',
+    'renders/model_top.png',
+    'renders/model_perspective.png'
+  ],
+  output_path: 'assets/models/reconstructed.glb',
+});
+// Returns: { model_path: '...', processing_time_ms: 110000 }
 ```
 
 **Provider:** `firtoz/trellis` on Replicate
-- High-quality image-to-3D
-- Good topology for games/WebGL
+- High-quality image-to-3D reconstruction
+- Best results with multiple views (front, side, top, perspective)
 - Supports PBR textures
+- ~2 minutes processing time
 
-### generate_3d_from_text
+---
 
-Generate a 3D model from text description using MVDream (Replicate).
+## Text-to-3D Workflow
+
+Since pure text-to-3D models (like MVDream) are expensive, we recommend a two-step workflow:
+
+### Step 1: Generate Views with Gemini
+
+Use `generate_image` to create multiple views from a text description:
 
 ```typescript
-{
-  name: 'generate_3d_from_text',
-  inputSchema: {
-    prompt: string,        // Text description
-    output_path: string,   // Where to save .glb
-    format?: 'glb' | 'obj',
-    style?: 'realistic' | 'stylized' | 'lowpoly'
-  }
-}
+// Generate front view
+await tools.generate_image({
+  prompt: 'A yellow rubber duck toy, front view, white background, 3D render style',
+  output_path: 'temp/duck_front.png'
+});
 
-// Example
-const result = await tools.generate_3d_from_text({
-  prompt: 'A medieval castle with towers and a drawbridge, fantasy style',
-  output_path: 'assets/models/castle.glb',
-  style: 'stylized'
+// Generate side view
+await tools.generate_image({
+  prompt: 'A yellow rubber duck toy, side view from right, white background, 3D render style',
+  output_path: 'temp/duck_right.png'
+});
+
+// Generate top view
+await tools.generate_image({
+  prompt: 'A yellow rubber duck toy, top-down view, white background, 3D render style',
+  output_path: 'temp/duck_top.png'
 });
 ```
 
-**Provider:** `adirik/mvdream` on Replicate
-- Multi-view diffusion for 3D
-- Good for concept art → 3D
-- Stylized outputs
+### Step 2: Reconstruct 3D with Trellis
 
----
+Pass the generated views to Trellis:
 
-## Use Case: Three.js Project Development
-
-The agent can use these tools to help develop a Three.js project:
-
-### Workflow Example
-
-```
-User: "Create a Three.js scene with a spaceship that the user can orbit around"
-
-Agent:
-1. generate_3d_from_text({ prompt: "sci-fi spaceship, sleek design" })
-   → Creates assets/models/spaceship.glb
-
-2. render_3d_asset({ model_path: "assets/models/spaceship.glb", views: ["perspective"] })
-   → Creates preview image for confirmation
-
-3. describe_image({ path: "renders/spaceship_perspective.png" })
-   → "A sleek silver spaceship with angular wings..."
-
-4. Writes Three.js code:
-   - Scene setup
-   - GLTFLoader for spaceship
-   - OrbitControls
-   - Lighting
-
-5. User: "The spaceship looks too plain, add some glow effects"
-
-6. Agent modifies code to add:
-   - UnrealBloomPass
-   - Emissive materials
+```typescript
+const result = await tools.generate_3d_from_image({
+  image_paths: [
+    'temp/duck_front.png',
+    'temp/duck_right.png',
+    'temp/duck_top.png'
+  ],
+  output_path: 'assets/models/duck.glb'
+});
 ```
 
-### Project Structure
+### Prompt Tips for Multi-View Generation
 
-```
-threejs-project/
-├── src/
-│   ├── main.ts           # Entry point
-│   ├── scene.ts          # Scene setup
-│   ├── loaders.ts        # Asset loaders
-│   └── controls.ts       # Camera controls
-├── assets/
-│   ├── models/           # 3D models (.glb)
-│   └── textures/         # Textures
-├── renders/              # Preview renders (from render_3d_asset)
-├── references/           # Reference images (for generate_3d_from_image)
-├── package.json
-├── tsconfig.json
-└── vite.config.ts
-```
-
----
-
-## Environment Variables
-
-```bash
-# Required for image tools
-GEMINI_API_KEY=your-gemini-key
-
-# Required for Replicate-based tools (OCR, 3D generation)
-REPLICATE_API_TOKEN=your-replicate-token
-```
+For consistent multi-view images:
+- Always specify "white background" or "transparent background"
+- Use "3D render style" or "clean render" for consistent look
+- Be explicit about the view: "front view", "side view from right", "top-down view"
+- Keep object centered: "centered in frame"
+- Maintain style consistency across all prompts
 
 ---
 
@@ -315,64 +302,61 @@ REPLICATE_API_TOKEN=your-replicate-token
 
 | Tool | Status | Provider |
 |------|--------|----------|
-| read_image | ✅ Done | Gemini / DeepSeek |
-| describe_image | ✅ Done | Gemini |
+| read_image | ✅ Done | Gemini Vision |
+| describe_image | ✅ Done | Gemini Vision |
 | list_images | ✅ Done | Local |
-| render_3d_asset | 🚧 Planned | Three.js headless |
-| generate_3d_from_image | 🚧 Planned | Replicate/Trellis |
-| generate_3d_from_text | 🚧 Planned | Replicate/MVDream |
+| generate_image | ✅ Done | Gemini 2.0 Flash |
+| render_3d_asset | ✅ Done | Three.js/Playwright |
+| generate_3d_from_image | ✅ Done | Replicate/Trellis |
 
 ---
 
-## Dependencies
+## Environment Variables
 
-### For Image Tools
-Already in ragforge-runtime:
-- `@google/genai` - Gemini Vision
+```bash
+# Required for all image tools
+GEMINI_API_KEY=your-gemini-key
 
-### For 3D Tools (to add)
-```json
-{
-  "three": "^0.160.0",
-  "@types/three": "^0.160.0",
-  "canvas": "^2.11.2",
-  "gl": "^6.0.2"
-}
+# Required for 3D generation (Trellis)
+REPLICATE_API_TOKEN=your-replicate-token
 ```
 
-**Playwright** is used for headless rendering (WebGL2 support, batch-optimized via browser contexts).
-
 ---
 
-## Future: Playwright for Web Rendering
-
-Playwright can also be leveraged for other code agent capabilities:
-
-- **Screenshot web pages** - Capture rendered HTML/CSS for visual debugging
-- **Render React/Vue components** - Generate preview images of UI components
-- **PDF generation** - Export pages as PDF
-- **Visual regression testing** - Compare rendered outputs
-- **Canvas/SVG export** - Capture `<canvas>` or SVG elements as images
-
-This would enable the agent to "see" what the code it writes actually looks like.
+## Enabling Media Tools in Agent
 
 ```typescript
-// Future tool idea: render_component
-{
-  name: 'render_component',
-  inputSchema: {
-    entry_point: string,    // Path to component file
-    props?: object,         // Props to pass
-    viewport?: { width, height },
-    output_path: string
-  }
-}
+const agent = await createRagAgent({
+  configPath: './ragforge.config.yaml',
+  ragClient: rag,
+  apiKey: process.env.GEMINI_API_KEY,
+
+  // Enable media tools
+  includeMediaTools: true,
+  projectRoot: '/path/to/project',
+});
+
+// Agent now has access to:
+// - read_image, describe_image, list_images, generate_image
+// - render_3d_asset, generate_3d_from_image
 ```
+
+---
+
+## Cost Considerations
+
+| Tool | Cost | Notes |
+|------|------|-------|
+| generate_image | ~$0.002/image | Gemini pricing |
+| generate_3d_from_image | ~$0.10/run | Trellis on Replicate |
+| render_3d_asset | Free | Local Three.js |
+| read_image / describe_image | ~$0.001/call | Gemini Vision |
+
+The text-to-3D workflow (Gemini + Trellis) costs ~$0.11 total vs $3+ for dedicated text-to-3D models.
 
 ---
 
 ## Related Documents
 
-- [HTML-PARSER-DESIGN.md](./HTML-PARSER-DESIGN.md) - WebDocument parsing
 - [PROJECT-OVERVIEW.md](./PROJECT-OVERVIEW.md) - Full project context
 - [AGENT-TESTING.md](./AGENT-TESTING.md) - Testing the code agent

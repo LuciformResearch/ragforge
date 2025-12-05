@@ -58,15 +58,19 @@ export {
 } from './tools/file-tools.js';
 export type { FileToolsContext, FileToolsResult } from './tools/file-tools.js';
 
-// Image Tools (OCR, describe, list images)
+// Image Tools (OCR, describe, list, generate images, multiview)
 export {
   generateImageTools,
   generateReadImageTool,
   generateDescribeImageTool,
   generateListImagesTool,
+  generateGenerateImageTool,
+  generateGenerateMultiviewImagesTool,
   generateReadImageHandler,
   generateDescribeImageHandler,
   generateListImagesHandler,
+  generateGenerateImageHandler,
+  generateGenerateMultiviewImagesHandler,
 } from './tools/image-tools.js';
 export type { ImageToolsContext, ImageToolsResult } from './tools/image-tools.js';
 

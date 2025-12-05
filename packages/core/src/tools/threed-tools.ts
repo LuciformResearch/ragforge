@@ -86,41 +86,46 @@ Example: render_3d_asset({
 export function generateGenerate3DFromImageTool(): GeneratedToolDefinition {
   return {
     name: 'generate_3d_from_image',
-    description: `Generate a 3D model from a reference image.
+    description: `Generate a 3D model from reference image(s).
 
-Uses Trellis (via Replicate) to convert an image into a 3D model.
+Uses Trellis (via Replicate) to convert images into a 3D model.
+Best results with multiple views (front, side, top, perspective).
 Good for creating game-ready 3D assets from concept art or photos.
 
 Parameters:
-- image_path: Path to input image
+- image_paths: Path(s) to input image(s) - string or array of strings
 - output_path: Where to save the generated .glb model
-- format: Output format ('glb' or 'obj', default: 'glb')
 
 Note: Requires REPLICATE_API_TOKEN environment variable.
-Processing time: ~30-60 seconds depending on complexity.
+Processing time: ~60-120 seconds depending on complexity.
 
-Example: generate_3d_from_image({
-  image_path: "references/spaceship-concept.png",
-  output_path: "assets/models/spaceship.glb"
-})`,
+Example with single image:
+  generate_3d_from_image({
+    image_paths: "references/spaceship-concept.png",
+    output_path: "assets/models/spaceship.glb"
+  })
+
+Example with multiple views (better quality):
+  generate_3d_from_image({
+    image_paths: ["renders/model_front.png", "renders/model_right.png", "renders/model_perspective.png"],
+    output_path: "assets/models/reconstructed.glb"
+  })`,
     inputSchema: {
       type: 'object',
       properties: {
-        image_path: {
-          type: 'string',
-          description: 'Path to input image',
+        image_paths: {
+          oneOf: [
+            { type: 'string', description: 'Path to single input image' },
+            { type: 'array', items: { type: 'string' }, description: 'Paths to multiple input images (better quality)' },
+          ],
+          description: 'Path(s) to input image(s)',
         },
         output_path: {
           type: 'string',
           description: 'Where to save the generated 3D model',
         },
-        format: {
-          type: 'string',
-          enum: ['glb', 'obj'],
-          description: 'Output format (default: glb)',
-        },
       },
-      required: ['image_path', 'output_path'],
+      required: ['image_paths', 'output_path'],
     },
   };
 }
@@ -725,82 +730,71 @@ function buildThreeJSPage(
  */
 export function generateGenerate3DFromImageHandler(ctx: ThreeDToolsContext): (args: any) => Promise<any> {
   return async (params: any) => {
-    const { image_path, output_path, format = 'glb' } = params;
+    const { image_paths, output_path } = params;
 
     const fs = await import('fs/promises');
     const pathModule = await import('path');
+    const Replicate = (await import('replicate')).default;
 
     const apiToken = process.env.REPLICATE_API_TOKEN;
     if (!apiToken) {
       return { error: 'REPLICATE_API_TOKEN environment variable is not set' };
     }
 
-    // Resolve paths
-    const absoluteImagePath = pathModule.isAbsolute(image_path)
-      ? image_path
-      : pathModule.join(ctx.projectRoot, image_path);
+    // Normalize to array
+    const imagePaths = Array.isArray(image_paths) ? image_paths : [image_paths];
 
     const absoluteOutputPath = pathModule.isAbsolute(output_path)
       ? output_path
       : pathModule.join(ctx.projectRoot, output_path);
 
-    // Check image exists
-    try {
-      await fs.stat(absoluteImagePath);
-    } catch (err: any) {
-      if (err.code === 'ENOENT') {
-        return { error: `Image not found: ${absoluteImagePath}` };
-      }
-      throw err;
-    }
+    // Read and encode all images
+    const dataUris: string[] = [];
+    for (const imagePath of imagePaths) {
+      const absoluteImagePath = pathModule.isAbsolute(imagePath)
+        ? imagePath
+        : pathModule.join(ctx.projectRoot, imagePath);
 
-    // Read and encode image
-    const imageBuffer = await fs.readFile(absoluteImagePath);
-    const base64Image = imageBuffer.toString('base64');
-    const ext = pathModule.extname(absoluteImagePath).toLowerCase();
-    const mimeType = ext === '.png' ? 'image/png' : 'image/jpeg';
-    const dataUri = `data:${mimeType};base64,${base64Image}`;
+      // Check image exists
+      try {
+        await fs.stat(absoluteImagePath);
+      } catch (err: any) {
+        if (err.code === 'ENOENT') {
+          return { error: `Image not found: ${absoluteImagePath}` };
+        }
+        throw err;
+      }
+
+      const imageBuffer = await fs.readFile(absoluteImagePath);
+      const base64Image = imageBuffer.toString('base64');
+      const ext = pathModule.extname(absoluteImagePath).toLowerCase();
+      const mimeType = ext === '.png' ? 'image/png' : 'image/jpeg';
+      dataUris.push(`data:${mimeType};base64,${base64Image}`);
+    }
 
     const startTime = Date.now();
 
     try {
-      // Call Replicate API (Trellis model)
-      const response = await fetch('https://api.replicate.com/v1/predictions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${apiToken}`,
-          'Content-Type': 'application/json',
+      // useFileOutput: false returns URLs instead of ReadableStreams
+      const replicate = new Replicate({ auth: apiToken, useFileOutput: false });
+
+      // Run Trellis model for image-to-3D
+      // Trellis accepts array of images and needs generate_model=true for GLB output
+      const output = await replicate.run('firtoz/trellis:e8f6c45206993f297372f5436b90350817bd9b4a0d52d2a76df50c1c8afa2b3c', {
+        input: {
+          images: dataUris,
+          generate_model: true,
+          texture_size: 1024,
         },
-        body: JSON.stringify({
-          // firtoz/trellis for image-to-3D
-          version: 'firtoz/trellis',
-          input: {
-            image: dataUri,
-            output_format: format,
-          },
-        }),
-      });
+      }) as any;
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        return { error: `Replicate API error: ${response.status} ${errorText}` };
+      // Output has model_file URL
+      const modelUrl = output?.model_file || output?.glb || output?.mesh;
+      if (!modelUrl || typeof modelUrl !== 'string') {
+        return { error: `No model URL in output: ${JSON.stringify(output)}` };
       }
 
-      const prediction = await response.json() as any;
-
-      // Poll for result
-      const result = await pollReplicateResult(prediction.id, apiToken, 300000); // 5 min timeout
-
-      if (result.error) {
-        return { error: result.error };
-      }
-
-      // Download the model
-      const modelUrl = result.output;
-      if (!modelUrl) {
-        return { error: 'No model URL in response' };
-      }
-
+      // Download the model from URL
       const modelResponse = await fetch(modelUrl);
       const modelBuffer = Buffer.from(await modelResponse.arrayBuffer());
 
@@ -811,7 +805,7 @@ export function generateGenerate3DFromImageHandler(ctx: ThreeDToolsContext): (ar
       return {
         model_path: output_path,
         absolute_path: absoluteOutputPath,
-        format,
+        input_images: imagePaths.length,
         processing_time_ms: Date.now() - startTime,
       };
     } catch (err: any) {
@@ -829,6 +823,7 @@ export function generateGenerate3DFromTextHandler(ctx: ThreeDToolsContext): (arg
 
     const fs = await import('fs/promises');
     const pathModule = await import('path');
+    const Replicate = (await import('replicate')).default;
 
     const apiToken = process.env.REPLICATE_API_TOKEN;
     if (!apiToken) {
@@ -852,43 +847,23 @@ export function generateGenerate3DFromTextHandler(ctx: ThreeDToolsContext): (arg
         enhancedPrompt = `${prompt}, stylized, game asset style`;
       }
 
-      // Call Replicate API (MVDream model)
-      const response = await fetch('https://api.replicate.com/v1/predictions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${apiToken}`,
-          'Content-Type': 'application/json',
+      // useFileOutput: false returns URLs instead of ReadableStreams
+      const replicate = new Replicate({ auth: apiToken, useFileOutput: false });
+
+      // Run MVDream text-to-3D model
+      const output = await replicate.run('adirik/mvdream:38af22609c9a779c2203c2009ff7451f115b44cde8d9a65ad132980714b82f34', {
+        input: {
+          prompt: enhancedPrompt,
         },
-        body: JSON.stringify({
-          // adirik/mvdream for text-to-3D
-          version: 'adirik/mvdream',
-          input: {
-            prompt: enhancedPrompt,
-            output_format: format,
-          },
-        }),
-      });
+      }) as any;
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        return { error: `Replicate API error: ${response.status} ${errorText}` };
-      }
-
-      const prediction = await response.json() as any;
-
-      // Poll for result (text-to-3D takes longer)
-      const result = await pollReplicateResult(prediction.id, apiToken, 600000); // 10 min timeout
-
-      if (result.error) {
-        return { error: result.error };
+      // Output format varies by model
+      const modelUrl = output?.mesh || output?.glb || (Array.isArray(output) ? output[0] : output);
+      if (!modelUrl || typeof modelUrl !== 'string') {
+        return { error: `No model URL in output: ${JSON.stringify(output)}` };
       }
 
       // Download the model
-      const modelUrl = result.output;
-      if (!modelUrl) {
-        return { error: 'No model URL in response' };
-      }
-
       const modelResponse = await fetch(modelUrl);
       const modelBuffer = Buffer.from(await modelResponse.arrayBuffer());
 
@@ -908,53 +883,6 @@ export function generateGenerate3DFromTextHandler(ctx: ThreeDToolsContext): (arg
       return { error: `Generation failed: ${err.message}` };
     }
   };
-}
-
-/**
- * Poll Replicate for prediction result
- */
-async function pollReplicateResult(
-  predictionId: string,
-  apiToken: string,
-  timeout: number
-): Promise<{ output?: string; error?: string }> {
-  const startTime = Date.now();
-  const pollInterval = 2000; // 2 seconds
-
-  while (Date.now() - startTime < timeout) {
-    const response = await fetch(`https://api.replicate.com/v1/predictions/${predictionId}`, {
-      headers: {
-        'Authorization': `Bearer ${apiToken}`,
-      },
-    });
-
-    if (!response.ok) {
-      return { error: `Replicate API error: ${response.status}` };
-    }
-
-    const prediction = await response.json() as any;
-
-    if (prediction.status === 'succeeded') {
-      // Output might be a string URL or an array
-      const output = Array.isArray(prediction.output)
-        ? prediction.output[0]
-        : prediction.output;
-      return { output };
-    }
-
-    if (prediction.status === 'failed') {
-      return { error: prediction.error || 'Prediction failed' };
-    }
-
-    if (prediction.status === 'canceled') {
-      return { error: 'Prediction was canceled' };
-    }
-
-    // Wait before polling again
-    await new Promise(resolve => setTimeout(resolve, pollInterval));
-  }
-
-  return { error: `Prediction timeout after ${timeout / 1000}s` };
 }
 
 // ============================================

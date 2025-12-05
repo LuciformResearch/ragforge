@@ -21,8 +21,8 @@
  * ```
  */
 
-import { generateToolsFromConfig, generateFileTools, IngestionLock, withIngestionLock } from '@luciformresearch/ragforge-core';
-import type { ToolGenerationOptions, GeneratedToolDefinition, ToolHandlerGenerator, RagForgeConfig, FileToolsContext } from '@luciformresearch/ragforge-core';
+import { generateToolsFromConfig, generateFileTools, generateImageTools, generate3DTools, IngestionLock, withIngestionLock } from '@luciformresearch/ragforge-core';
+import type { ToolGenerationOptions, GeneratedToolDefinition, ToolHandlerGenerator, RagForgeConfig, FileToolsContext, ImageToolsContext, ThreeDToolsContext } from '@luciformresearch/ragforge-core';
 import { StructuredLLMExecutor, BaseToolExecutor, type ToolCallRequest, type ToolExecutionResult } from '../llm/structured-llm-executor.js';
 import { GeminiAPIProvider } from '../reranking/gemini-api-provider.js';
 import { GeminiNativeToolProvider, type ToolDefinition } from '../llm/native-tool-calling/index.js';
@@ -241,6 +241,23 @@ export interface RagAgentOptions {
    * Use this to trigger re-ingestion of the file into the code graph
    */
   onFileModified?: (filePath: string, changeType: 'created' | 'updated' | 'deleted') => Promise<void>;
+
+  /**
+   * Include media tools (image and 3D)
+   * - Image: read_image (OCR), describe_image, list_images
+   * - 3D: render_3d_asset, generate_3d_from_image, generate_3d_from_text
+   * Requires GEMINI_API_KEY and optionally REPLICATE_API_TOKEN
+   * Default: false
+   */
+  includeMediaTools?: boolean;
+
+  /**
+   * Replicate API token for 3D generation tools
+   * Required if includeMediaTools is true and you want to use:
+   * - generate_3d_from_image (Trellis)
+   * - generate_3d_from_text (MVDream)
+   */
+  replicateApiToken?: string;
 }
 
 export interface AskResult {
@@ -766,6 +783,35 @@ export async function createRagAgent(options: RagAgentOptions): Promise<RagAgent
 
     if (options.verbose) {
       console.log(`   📁 File tools enabled (projectRoot: ${options.projectRoot})`);
+    }
+  }
+
+  // 3c. Add media tools if enabled
+  if (options.includeMediaTools) {
+    if (!options.projectRoot) {
+      throw new Error('projectRoot is required when includeMediaTools is true');
+    }
+
+    // Image tools context (uses GEMINI_API_KEY and REPLICATE_API_TOKEN from env)
+    const imageCtx: ImageToolsContext = {
+      projectRoot: options.projectRoot,
+    };
+
+    const imageTools = generateImageTools(imageCtx);
+    tools.push(...imageTools.tools);
+    Object.assign(boundHandlers, imageTools.handlers);
+
+    // 3D tools context (uses REPLICATE_API_TOKEN from env)
+    const threeDCtx: ThreeDToolsContext = {
+      projectRoot: options.projectRoot,
+    };
+
+    const threeDTools = generate3DTools(threeDCtx);
+    tools.push(...threeDTools.tools);
+    Object.assign(boundHandlers, threeDTools.handlers);
+
+    if (options.verbose) {
+      console.log(`   🎨 Media tools enabled (image: ${imageTools.tools.length}, 3D: ${threeDTools.tools.length})`);
     }
   }
 
