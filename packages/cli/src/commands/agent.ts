@@ -661,9 +661,6 @@ export async function createRagForgeAgent(options: AgentOptions) {
   await fs.mkdir(logsDir, { recursive: true });
   const logPath = path.join(logsDir, `agent-${getFilenameTimestamp()}.json`);
 
-  // Always show log path so user can access logs during execution
-  console.log(`📝 Logs: ${logPath}`);
-
   // Create agent with all tools (file tools always available, context-aware)
   const agent = await createRagAgent({
     configPath: ctx.isProjectLoaded ? configPath : undefined,
@@ -844,6 +841,8 @@ export async function runAgent(options: AgentOptions): Promise<void> {
   // Create agent with mutable context
   const { agent, context, hasProject, projectPath, logPath } = await createRagForgeAgent(options);
 
+  // Show log path FIRST so user can access logs during execution
+  console.log(`📝 Logs: ${logPath}`);
   console.log(`📁 Project: ${hasProject ? projectPath : '(no project loaded)'}`);
   console.log(`🔧 Tools: ${agent.getTools().map(t => t.name).join(', ')}`);
   console.log('');

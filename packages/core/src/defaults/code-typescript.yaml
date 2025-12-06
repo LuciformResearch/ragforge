@@ -5,11 +5,37 @@
 source:
   type: code
   adapter: typescript
+  # Include patterns for TypeScript/JavaScript projects with web assets
+  include:
+    # TypeScript/JavaScript
+    - "**/*.ts"
+    - "**/*.tsx"
+    - "**/*.js"
+    - "**/*.jsx"
+    - "**/*.mjs"
+    - "**/*.mts"
+    # Web/HTML
+    - "**/*.html"
+    - "**/*.htm"
+    - "**/*.vue"
+    - "**/*.svelte"
+    - "**/*.astro"
+    # Styles
+    - "**/*.css"
+    - "**/*.scss"
+    - "**/*.sass"
+    - "**/*.less"
+    # Config/Data
+    - "**/package.json"
   exclude:
     - "**/node_modules/**"
     - "**/dist/**"
+    - "**/build/**"
     - "**/*.test.ts"
     - "**/*.spec.ts"
+    - "**/*.test.tsx"
+    - "**/*.spec.tsx"
+    - "**/*.d.ts"
   track_changes: true
   options:
     exportXml: false

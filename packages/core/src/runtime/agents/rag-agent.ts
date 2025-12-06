@@ -23,6 +23,7 @@
 
 import { generateToolsFromConfig, generateFileTools, generateImageTools, generate3DTools, generateProjectTools, IngestionLock, withIngestionLock } from '../../index.js';
 import type { ToolGenerationOptions, GeneratedToolDefinition, ToolHandlerGenerator, RagForgeConfig, FileToolsContext, ImageToolsContext, ThreeDToolsContext, ProjectToolsContext } from '../../index.js';
+import { generatePlanActionsTool, type ActionPlan, type PlanExecutionResult } from '../../tools/planning-tools.js';
 import { formatLocalDate, getFilenameTimestamp } from '../utils/timestamp.js';
 import { StructuredLLMExecutor, BaseToolExecutor, type ToolCallRequest, type ToolExecutionResult } from '../llm/structured-llm-executor.js';
 import { GeminiAPIProvider } from '../reranking/gemini-api-provider.js';
@@ -319,6 +320,28 @@ export interface RagAgentOptions {
    * - null if no project is loaded (tools will return helpful errors)
    */
   contextGetter?: () => import('../../tools/types/index.js').ToolGenerationContext | null;
+
+  /**
+   * Include planning tools (plan_actions)
+   * Allows the agent to decompose complex tasks into steps and
+   * spawn a sub-agent to execute them in order or batches.
+   * Default: true (recommended for complex tasks)
+   */
+  includePlanningTools?: boolean;
+
+  /**
+   * Task context for sub-agent execution
+   * When set, the agent will show its current task in the system prompt
+   * This is used internally by plan_actions to spawn sub-agents
+   */
+  taskContext?: {
+    /** Overall goal of the plan */
+    goal: string;
+    /** All planned actions */
+    actions: Array<{ description: string; complexity?: string }>;
+    /** Index of current action being executed */
+    currentActionIndex: number;
+  };
 }
 
 export interface AskResult {
@@ -487,6 +510,7 @@ export class RagAgent {
   private toolCallMode: 'native' | 'structured' | 'auto';
   private outputSchema?: Record<string, any>;
   private logger?: AgentLogger;
+  private taskContext?: RagAgentOptions['taskContext'];
 
   constructor(
     config: RagForgeConfig,
@@ -506,6 +530,7 @@ export class RagAgent {
     this.verbose = options.verbose ?? false;
     this.toolCallMode = options.toolCallMode ?? 'auto';
     this.outputSchema = options.outputSchema;
+    this.taskContext = options.taskContext;
 
     // Create logger if logPath provided
     if (options.logPath) {
@@ -628,11 +653,13 @@ Example: After getting search results, use this to analyze each result with a cu
       answer: {
         type: 'string',
         description: 'Your answer based on the tool results',
+        prompt: 'Provide your answer ONLY when you have completed the task. If you still need to call tools, leave this empty.',
         required: true,
       },
       confidence: {
         type: 'string',
         description: 'Confidence level: high, medium, low',
+        prompt: 'Rate your confidence: high, medium, or low',
         required: false,
       },
     };
@@ -800,7 +827,7 @@ Example: After getting search results, use this to analyze each result with a cu
    * Build system prompt
    */
   private buildSystemPrompt(): string {
-    return `You are a helpful assistant with access to a database.
+    let basePrompt = `You are a helpful assistant with access to a database.
 
 Available tools will help you query the database. Use them to find information and answer questions.
 
@@ -808,6 +835,34 @@ Available tools will help you query the database. Use them to find information a
 1. Start by calling get_schema() to understand what entities and fields are available
 2. Use the schema information to construct proper queries
 3. Be precise with field names and entity types`;
+
+    // Add task context if this is a sub-agent executing a plan
+    if (this.taskContext) {
+      const { goal, actions, currentActionIndex } = this.taskContext;
+      const actionsList = actions.map((a, i) => {
+        const prefix = i === currentActionIndex ? '>>> ' : '    ';
+        const status = i < currentActionIndex ? '✓' : (i === currentActionIndex ? '🔄' : '○');
+        return `${prefix}${status} ${i + 1}. ${a.description}`;
+      }).join('\n');
+
+      basePrompt += `
+
+═══════════════════════════════════════════════════
+📋 CURRENT TASK CONTEXT
+═══════════════════════════════════════════════════
+
+**GOAL**: ${goal}
+
+**TASK LIST**:
+${actionsList}
+
+**CURRENT TASK**: ${actions[currentActionIndex]?.description || 'Complete remaining tasks'}
+
+Focus on completing the current task. Use the available tools to accomplish it.
+═══════════════════════════════════════════════════`;
+    }
+
+    return basePrompt;
   }
 
   /**
@@ -829,6 +884,18 @@ Available tools will help you query the database. Use them to find information a
    */
   getTools(): GeneratedToolDefinition[] {
     return this.tools;
+  }
+
+  /**
+   * Update task context for Complex mode execution
+   * This allows the sub-agent to track progress through a task list
+   */
+  updateTaskContext(taskContext: {
+    goal: string;
+    actions: Array<{ description: string; complexity?: string }>;
+    currentActionIndex: number;
+  }): void {
+    this.taskContext = taskContext;
   }
 }
 
@@ -973,6 +1040,181 @@ export async function createRagAgent(options: RagAgentOptions): Promise<RagAgent
 
     if (options.verbose) {
       console.log(`   🚀 Project tools enabled (${projectTools.tools.length} tools)`);
+    }
+  }
+
+  // 3e. Add planning tools (enabled by default)
+  if (options.includePlanningTools !== false) {
+    const planTool = generatePlanActionsTool();
+    tools.push(planTool.definition);
+
+    // Create sub-agent execution function
+    // Single agent with TASK_LIST tracking, uses task_completed/final_answer
+    const executeSubAgent = async (plan: ActionPlan): Promise<PlanExecutionResult> => {
+      const results: PlanExecutionResult['results'] = [];
+      let currentTaskIndex = 0;
+
+      console.log(`\n   🤖 [SubAgent] Starting plan execution`);
+      console.log(`      Goal: ${plan.goal}`);
+      console.log(`      Actions: ${plan.actions.length}`);
+      console.log(`      Strategy: ${plan.strategy}`);
+
+      // Create ONE sub-agent that will execute all tasks
+      const subAgent = await createRagAgent({
+        ...options,
+        // Disable planning tools in sub-agent to prevent infinite recursion
+        includePlanningTools: false,
+        // Use Complex mode output schema with task_completed and final_answer
+        outputSchema: {
+          reasoning: {
+            type: 'string',
+            description: 'Your reasoning about the current task',
+            prompt: 'Explain what you are doing and why',
+            required: false,
+          },
+          task_completed: {
+            type: 'string',
+            description: 'Summary when current task is done',
+            prompt: 'Fill this ONLY when you have finished the CURRENT TASK. Brief summary of what was done.',
+            required: false,
+          },
+          final_answer: {
+            type: 'string',
+            description: 'Final response when all tasks complete',
+            prompt: 'Fill this ONLY when ALL tasks in the TASK LIST are complete. This stops execution.',
+            required: false,
+          },
+        },
+        // Set task context so the system prompt shows TASK_LIST
+        taskContext: {
+          goal: plan.goal,
+          actions: plan.actions.map(a => ({ description: a.description, complexity: a.complexity })),
+          currentActionIndex: currentTaskIndex,
+        },
+        // Higher max iterations since we're doing all tasks
+        maxIterations: plan.actions.length * 5,
+        // Log sub-agent execution
+        logPath: options.logPath
+          ? options.logPath.replace('.json', '_subagent.json')
+          : undefined,
+      });
+
+      // Build the task list prompt
+      const buildTaskPrompt = (taskIndex: number): string => {
+        const taskListStr = plan.actions.map((a, i) => {
+          const status = i < taskIndex ? '[x]' : (i === taskIndex ? '[>]' : '[ ]');
+          const marker = i === taskIndex ? ' ← CURRENT' : '';
+          return `${i + 1}. ${status} ${a.description}${marker}`;
+        }).join('\n');
+
+        const completedTasks = results.map((r, i) =>
+          `Task ${i + 1}: ${r.success ? '✓' : '✗'} ${r.result || r.error}`
+        ).join('\n');
+
+        return `=== GOAL ===
+${plan.goal}
+
+=== TASK LIST ===
+${taskListStr}
+
+=== CURRENT TASK ===
+Task ${taskIndex + 1}: ${plan.actions[taskIndex]?.description || 'All tasks complete'}
+
+${completedTasks ? `=== COMPLETED TASKS ===\n${completedTasks}\n` : ''}
+=== INSTRUCTIONS ===
+Execute the CURRENT TASK by calling the appropriate tools.
+When this task is done, fill task_completed with a summary.
+Only fill final_answer when ALL ${plan.actions.length} tasks are complete.`;
+      };
+
+      // Execute tasks in a loop
+      while (currentTaskIndex < plan.actions.length) {
+        const action = plan.actions[currentTaskIndex];
+        console.log(`\n      📌 [${currentTaskIndex + 1}/${plan.actions.length}] ${action.description}`);
+
+        try {
+          // Update task context for current task
+          subAgent.updateTaskContext({
+            goal: plan.goal,
+            actions: plan.actions.map(a => ({ description: a.description, complexity: a.complexity })),
+            currentActionIndex: currentTaskIndex,
+          });
+
+          // Ask agent to execute current task
+          const result = await subAgent.ask(buildTaskPrompt(currentTaskIndex));
+
+          // Check for task_completed marker
+          if (result.task_completed) {
+            console.log(`      ✅ Task completed: ${result.task_completed.substring(0, 100)}`);
+            results.push({
+              action: action.description,
+              success: true,
+              result: result.task_completed,
+            });
+            currentTaskIndex++;
+          }
+
+          // Check for final_answer (all done)
+          if (result.final_answer) {
+            console.log(`      🎉 All tasks complete: ${result.final_answer.substring(0, 100)}`);
+            // Mark any remaining tasks as complete
+            while (currentTaskIndex < plan.actions.length) {
+              results.push({
+                action: plan.actions[currentTaskIndex].description,
+                success: true,
+                result: 'Completed as part of final execution',
+              });
+              currentTaskIndex++;
+            }
+            break;
+          }
+
+          // If neither task_completed nor final_answer, treat answer as task completion
+          if (!result.task_completed && !result.final_answer && result.answer) {
+            console.log(`      ✅ Task done (implicit): ${result.answer.substring(0, 100)}`);
+            results.push({
+              action: action.description,
+              success: true,
+              result: result.answer,
+            });
+            currentTaskIndex++;
+          }
+        } catch (error: any) {
+          console.log(`      ❌ Task failed: ${error.message}`);
+          results.push({
+            action: action.description,
+            success: false,
+            error: error.message,
+          });
+
+          // For sequential strategy, stop on first failure
+          if (plan.strategy === 'sequential') {
+            break;
+          }
+          currentTaskIndex++;
+        }
+      }
+
+      const successCount = results.filter(r => r.success).length;
+      return {
+        success: successCount === results.length,
+        results,
+        summary: `Executed ${successCount}/${results.length} actions successfully`,
+      };
+    };
+
+    // Create handler with context
+    const planHandler = planTool.handlerFactory({
+      tools,
+      handlers,
+      ragClient: options.ragClient,
+      executeSubAgent,
+    });
+
+    boundHandlers[planTool.definition.name] = planHandler(options.ragClient);
+
+    if (options.verbose) {
+      console.log(`   📋 Planning tools enabled (plan_actions)`);
     }
   }
 

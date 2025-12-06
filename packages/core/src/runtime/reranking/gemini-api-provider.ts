@@ -55,11 +55,12 @@ export class GeminiAPIProvider implements LLMProvider {
 
     // Calculate maxOutputTokens dynamically if not explicitly set via constructor
     // If user provided maxOutputTokens in constructor, use it; otherwise calculate
-    // Use 1x prompt size, with sensible min/max bounds
+    // For tool calling agents, responses can be large (multiple tool calls with file content)
+    // Use generous bounds to avoid truncation
     const calculatedMaxTokens = this.maxOutputTokens === 512 // Check if it's still the default
       ? Math.max(
-          Math.min(promptTokens, 8192), // Cap at 8k tokens (reasonable for most responses)
-          2048 // Minimum 2k tokens for decent responses
+          Math.min(promptTokens * 2, 16384), // Cap at 16k tokens, allow 2x prompt for tool calls
+          4096 // Minimum 4k tokens for tool call responses
         )
       : this.maxOutputTokens; // Use user-provided value
 

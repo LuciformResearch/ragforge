@@ -1085,8 +1085,7 @@ export class StructuredLLMExecutor {
       }
     }
 
-    instructions.push('');
-    instructions.push('Replace INDEX with 0, 1, 2, etc. for each item.');
+    // Note: INDEX is already filled in by the item template, no need to ask LLM to replace it
 
     return instructions.join('\n');
   }
@@ -2298,11 +2297,18 @@ When tools don't depend on each other's results, call them all at once:
 
 ## Important Guidelines
 
-1. **Call multiple tools in parallel** when they don't depend on each other's results
-2. **Provide all required parameters** - missing required parameters will cause errors
-3. **Use exact tool names** - tool names are case-sensitive
-4. **Return empty tool_calls** when you don't need any tool to complete the task
-5. **Sequential calls**: If tool B needs the result of tool A, call A first, wait for results, then call B`;
+1. **ALWAYS include tool_calls when action is needed** - Do NOT just explain what you will do. If the task requires action, CALL THE TOOLS immediately. You can explain your reasoning in the "answer" field while ALSO including tool_calls.
+2. **Call multiple tools in parallel** when they don't depend on each other's results
+3. **Provide all required parameters** - missing required parameters will cause errors
+4. **Use exact tool names** - tool names are case-sensitive
+5. **Return empty tool_calls ONLY** when you have completed the task and no more action is needed
+6. **Sequential calls**: If tool B needs the result of tool A, call A first, wait for results, then call B
+
+WRONG (just explaining):
+{ "answer": "I will create the file...", "tool_calls": [] }
+
+CORRECT (action + explanation):
+{ "answer": "Creating the file now.", "tool_calls": [{"tool_name": "write_file", "arguments": {...}}] }`;
   }
 
   /**
@@ -2442,14 +2448,15 @@ When tools don't depend on each other's results, call them all at once:
     const successCount = toolResults.filter(r => r.success).length;
     const failCount = toolResults.filter(r => !r.success).length;
 
-    return `${originalTask}
+    return `=== TASK ===
+${originalTask}
 
-=== TOOL EXECUTION RESULTS ===
+=== TOOL RESULTS ===
 ${successCount} succeeded, ${failCount} failed
 
 ${resultsStr}
 
-Based on these results, provide your final answer or call additional tools if needed.`;
+Continue executing tools until the task is fully complete.`;
   }
 
   /**
