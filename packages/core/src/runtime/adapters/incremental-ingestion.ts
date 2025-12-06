@@ -11,6 +11,7 @@ import type { TikaSourceConfig } from './document/tika-source-adapter.js';
 import { CodeSourceAdapter } from './code-source-adapter.js';
 import { TikaSourceAdapter } from './document/tika-source-adapter.js';
 import { ChangeTracker } from './change-tracker.js';
+import { isStructuralNode } from '../../utils/node-schema.js';
 
 export interface IncrementalStats {
   unchanged: number;
@@ -261,22 +262,26 @@ export class IncrementalIngestionManager {
 
     // 5. Upsert modified + created nodes
     const nodesToUpsert = [...modified, ...created];
-    if (nodesToUpsert.length > 0) {
+
+    // Always include structural nodes (everything except Scope)
+    // These should be upserted even if no scope changes
+    // Uses dynamic detection - no need to hardcode each type
+    const structuralNodes = nodes.filter(isStructuralNode);
+
+    if (nodesToUpsert.length > 0 || structuralNodes.length > 0) {
       if (verbose) {
-        console.log(`\n💾 Upserting ${nodesToUpsert.length} changed nodes...`);
+        console.log(`\n💾 Upserting ${nodesToUpsert.length} changed scopes + ${structuralNodes.length} structural nodes...`);
       }
 
-      // Include File nodes too (they have contentHash)
-      const fileNodes = nodes.filter(n => n.labels.includes('File'));
-
-      // Filter relationships to only include those related to changed nodes
-      const affectedUuids = new Set(nodesToUpsert.map(n => n.id));
+      // Include all node IDs for relationship filtering
+      const allNodesToIngest = [...nodesToUpsert, ...structuralNodes];
+      const affectedUuids = new Set(allNodesToIngest.map(n => n.id));
       const relevantRelationships = relationships.filter(rel =>
         affectedUuids.has(rel.from) || affectedUuids.has(rel.to)
       );
 
       await this.ingestNodes(
-        [...nodesToUpsert, ...fileNodes],
+        allNodesToIngest,
         relevantRelationships,
         true  // Mark changed scopes as embeddingsDirty
       );

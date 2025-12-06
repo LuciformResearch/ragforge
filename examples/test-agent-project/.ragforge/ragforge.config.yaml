@@ -1,0 +1,190 @@
+# RagForge Configuration
+# This file has been expanded with default settings for typescript
+#
+# Fields marked as "auto-added" come from adapter defaults and can be customized.
+# Your original values are preserved and will not be overwritten.
+#
+# See https://docs.ragforge.dev for more information.
+
+source:
+  type: code
+  adapter: typescript
+  exclude:
+    # Auto-added from Typescript defaults
+    # Node.js dependencies
+    - "**/node_modules/**"
+    # Build output
+    - "**/dist/**"
+    # Test files
+    - "**/*.test.ts"
+    # Spec files
+    - "**/*.spec.ts"
+  track_changes:
+    # Auto-added: enables incremental updates with change detection
+    true
+  options:
+    exportXml: false
+  root: /home/luciedefraiteur/LR_CodeRag/ragforge/examples/test-agent-project
+  include:
+    - src/**/*.ts
+    - lib/**/*.ts
+watch:
+  # Watch mode configuration (auto-added from Typescript defaults)
+  enabled: true
+  batch_interval: 1000
+  verbose: true
+  auto_embed: false
+summarization_llm:
+  # LLM for code summarization (auto-added from Typescript defaults)
+  provider: gemini
+  model: gemini-2.0-flash-exp
+  temperature: 0.3
+  max_tokens: 8000
+entities:
+  # Entity definitions (auto-detected from Typescript codebase)
+  # Scope entity - represents functions, classes, methods, etc. (auto-added)
+  - name: Scope
+    unique_field:
+      # Unique identifier for each scope
+      uuid
+    content_field: source
+    hierarchical_content:
+      children_relationship: HAS_PARENT
+      include_children: true
+    vector_indexes:
+      # Vector indexes for semantic search (auto-added)
+      - name: scopeSourceEmbeddings
+        field: source_embedding
+        source_field: source
+        dimension: 768
+        similarity: cosine
+        provider: gemini
+        model: text-embedding-004
+    searchable_fields:
+      # Fields that can be searched and filtered (auto-added)
+      - name: name
+        type: string
+      - name: file
+        type: string
+      - name: source
+        type: string
+        summarization:
+          enabled: true
+          strategy: code_analysis
+          threshold: 300
+          output_fields:
+            # What this code does
+            - purpose
+            # How it works
+            - operation
+            # What it depends on
+            - dependency
+            # Key concepts used
+            - concept
+            # Complexity assessment
+            - complexity
+            # Improvement suggestions
+            - suggestion
+          rerank_use: prefer_summary
+          context_query: |
+            MATCH (n:Scope {uuid: $uuid})-[:DEFINED_IN]->(file:File)
+            OPTIONAL MATCH (n)-[:IMPORTS]->(imported:Scope)
+            OPTIONAL MATCH (caller:Scope)-[:CALLS]->(n)
+            OPTIONAL MATCH (n)-[:CALLS]->(called:Scope)
+            RETURN
+              file.path as file_path,
+              n.type as scope_type,
+              n.startLine as start_line,
+              n.endLine as end_line,
+              n.exported as is_exported,
+              collect(DISTINCT imported.name)[..10] as imports_internal,
+              collect(DISTINCT caller.name)[..10] as called_by,
+              collect(DISTINCT called.name)[..10] as calls_internal
+          batch_order_query: |
+            MATCH (n:Scope)-[:DEFINED_IN]->(file:File)
+            WHERE n.source IS NOT NULL
+              AND size(n.source) > $threshold
+            WITH file, n
+            ORDER BY file.path, n.startLine
+            RETURN n.uuid AS uuid,
+                   n.source AS fieldValue
+    relationships:
+      # Graph relationships to other entities (auto-added)
+      - type: DEFINED_IN
+        direction: outgoing
+        target: File
+        description: Scope DEFINED_IN File
+        filters:
+          - name: whereFileName
+            description: Filter scopes defined in the provided file
+            parameter: fileName
+            direction: outgoing
+      - type: CONSUMES
+        direction: outgoing
+        target: Scope
+        description: Scope CONSUMES Scope
+        filters:
+          - name: whereConsumesScope
+            description: Filter scopes that consume the provided scope
+            parameter: scopeName
+            direction: outgoing
+          - name: whereConsumedByScope
+            description: Filter scopes consumed by the provided scope
+            parameter: scopeName
+            direction: incoming
+      - type: HAS_PARENT
+        direction: outgoing
+        target: Scope
+        description: Scope HAS_PARENT Scope
+        filters:
+          - name: whereParentScope
+            description: Filter scopes with the provided parent scope
+            parameter: scopeName
+            direction: outgoing
+      - type: USES_LIBRARY
+        direction: outgoing
+        target: ExternalLibrary
+        description: Scope USES_LIBRARY ExternalLibrary
+        filters:
+          - name: whereUsesLibrary
+            description: Filter scopes that use the provided library
+            parameter: libraryName
+            direction: outgoing
+      - type: INHERITS_FROM
+        direction: outgoing
+        target: Scope
+        description: Scope INHERITS_FROM Scope
+        filters:
+          - name: whereInheritsFrom
+            description: Filter scopes that inherit from the provided scope
+            parameter: scopeName
+            direction: outgoing
+embeddings:
+  # Vector embeddings for semantic search (auto-added from Typescript defaults)
+  provider: gemini
+  defaults:
+    model: text-embedding-004
+    dimension: 768
+    similarity: cosine
+  entities:
+    - entity: Scope
+      pipelines:
+        - name: scopeSourceEmbeddings
+          source: source
+          target_property: source_embedding
+          model: text-embedding-004
+          dimension: 768
+          similarity: cosine
+          preprocessors:
+            - normalizeWhitespace
+          batch_size: 10
+          concurrency: 3
+          throttle_ms: 300
+name: test-agent-project
+version: 1.0.0
+description: RAG-enabled codebase for test-agent-project
+neo4j:
+  uri: ${NEO4J_URI}
+  database: neo4j
+  username: ${NEO4J_USERNAME}
+  password: ${NEO4J_PASSWORD}

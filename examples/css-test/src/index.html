@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CSS Test</title>
+  <link rel="stylesheet" href="styles/main.css">
+  <link rel="stylesheet" href="styles/components.css" media="screen">
+  <script src="scripts/main.js" defer></script>
+</head>
+<body>
+  <header class="header">
+    <h1>CSS Integration Test</h1>
+  </header>
+
+  <main class="container">
+    <div id="main-content">
+      <section class="card">
+        <h2>Welcome</h2>
+        <p>This is a test page for CSS parsing.</p>
+        <button class="button">Click me</button>
+      </section>
+    </div>
+  </main>
+
+  <script>
+    // Inline script
+    document.querySelector('.button').addEventListener('click', () => {
+      console.log('Button clicked!');
+    });
+  </script>
+</body>
+</html>

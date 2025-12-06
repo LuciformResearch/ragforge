@@ -180,14 +180,27 @@ Examples:
 // ============================================
 
 export interface FileToolsContext {
-  /** Project root directory (for relative paths) */
-  projectRoot: string;
+  /**
+   * Project root directory (for relative paths)
+   * Can be a string or a getter function for dynamic resolution
+   */
+  projectRoot: string | (() => string | null);
   /** ChangeTracker instance (optional, for tracking changes) */
   changeTracker?: any;
   /** Callback after file modification (for re-ingestion) */
   onFileModified?: (filePath: string, changeType: 'created' | 'updated' | 'deleted') => Promise<void>;
   /** Ingestion lock for coordinating with RAG tools */
   ingestionLock?: IngestionLock;
+}
+
+/**
+ * Helper to resolve projectRoot from context (handles both string and getter)
+ */
+function getProjectRoot(ctx: FileToolsContext): string | null {
+  if (typeof ctx.projectRoot === 'function') {
+    return ctx.projectRoot();
+  }
+  return ctx.projectRoot;
 }
 
 /**
@@ -199,10 +212,19 @@ export function generateReadFileHandler(ctx: FileToolsContext): (args: any) => P
     const fs = await import('fs/promises');
     const pathModule = await import('path');
 
+    // Get dynamic project root
+    const projectRoot = getProjectRoot(ctx);
+    if (!projectRoot) {
+      return {
+        error: 'No project loaded. Use create_project, setup_project, or load_project first.',
+        suggestion: 'load_project',
+      };
+    }
+
     // Resolve path
     const absolutePath = pathModule.isAbsolute(filePath)
       ? filePath
-      : pathModule.join(ctx.projectRoot, filePath);
+      : pathModule.join(projectRoot, filePath);
 
     // Check file exists
     try {
@@ -269,10 +291,19 @@ export function generateWriteFileHandler(ctx: FileToolsContext): (args: any) => 
     const pathModule = await import('path');
     const crypto = await import('crypto');
 
+    // Get dynamic project root
+    const projectRoot = getProjectRoot(ctx);
+    if (!projectRoot) {
+      return {
+        error: 'No project loaded. Use create_project, setup_project, or load_project first.',
+        suggestion: 'load_project',
+      };
+    }
+
     // Resolve path
     const absolutePath = pathModule.isAbsolute(filePath)
       ? filePath
-      : pathModule.join(ctx.projectRoot, filePath);
+      : pathModule.join(projectRoot, filePath);
 
     // Acquire lock at START to block concurrent RAG queries
     const release = ctx.ingestionLock
@@ -304,7 +335,7 @@ export function generateWriteFileHandler(ctx: FileToolsContext): (args: any) => 
 
       // Track change if ChangeTracker is available
       if (ctx.changeTracker) {
-        const relativePath = pathModule.relative(ctx.projectRoot, absolutePath);
+        const relativePath = pathModule.relative(projectRoot, absolutePath);
         try {
           await ctx.changeTracker.trackEntityChange(
             'File',
@@ -385,10 +416,19 @@ export function generateEditFileHandler(ctx: FileToolsContext): (args: any) => P
     const pathModule = await import('path');
     const crypto = await import('crypto');
 
+    // Get dynamic project root
+    const projectRoot = getProjectRoot(ctx);
+    if (!projectRoot) {
+      return {
+        error: 'No project loaded. Use create_project, setup_project, or load_project first.',
+        suggestion: 'load_project',
+      };
+    }
+
     // Resolve path
     const absolutePath = pathModule.isAbsolute(filePath)
       ? filePath
-      : pathModule.join(ctx.projectRoot, filePath);
+      : pathModule.join(projectRoot, filePath);
 
     // Acquire lock at START to block concurrent RAG queries
     const release = ctx.ingestionLock
@@ -470,7 +510,7 @@ export function generateEditFileHandler(ctx: FileToolsContext): (args: any) => P
 
       // Track change
       if (ctx.changeTracker) {
-        const relativePath = pathModule.relative(ctx.projectRoot, absolutePath);
+        const relativePath = pathModule.relative(projectRoot, absolutePath);
         try {
           await ctx.changeTracker.trackEntityChange(
             'File',
@@ -937,12 +977,21 @@ export function generateInstallPackageHandler(ctx: FileToolsContext): (args: any
     const fs = await import('fs/promises');
     const pathModule = await import('path');
 
+    // Get dynamic project root
+    const projectRoot = getProjectRoot(ctx);
+    if (!projectRoot) {
+      return {
+        error: 'No project loaded. Use create_project, setup_project, or load_project first.',
+        suggestion: 'load_project',
+      };
+    }
+
     // Validate package name (basic security check)
     if (!/^(@[\w-]+\/)?[\w.-]+(@[\w.-]+)?$/.test(package_name)) {
       return { error: `Invalid package name: ${package_name}` };
     }
 
-    const packageJsonPath = pathModule.join(ctx.projectRoot, 'package.json');
+    const packageJsonPath = pathModule.join(projectRoot, 'package.json');
 
     // Check if package.json exists
     try {
@@ -976,7 +1025,7 @@ export function generateInstallPackageHandler(ctx: FileToolsContext): (args: any
     try {
       console.log(`📦 Installing ${package_name}${dev ? ' (dev)' : ''}...`);
       execSync(`npm install ${flag} ${package_name}`, {
-        cwd: ctx.projectRoot,
+        cwd: projectRoot,
         stdio: 'pipe', // Capture output
         encoding: 'utf-8',
       });
@@ -989,7 +1038,7 @@ export function generateInstallPackageHandler(ctx: FileToolsContext): (args: any
 
       // Notify about file modification for re-ingestion
       if (ctx.onFileModified) {
-        await ctx.onFileModified(packageJsonPath, 'modified');
+        await ctx.onFileModified(packageJsonPath, 'updated');
       }
 
       return {

@@ -618,28 +618,44 @@ function generateSemanticSearchHandler(context: ToolGenerationContext): ToolHand
       return { error: `No vector index for ${entity_type}` };
     }
 
-    const queryBuilder = rag.get(entity_type).semanticSearch(vectorIndex.name, query, {
-      topK: Math.min(top_k, 20),
-      minScore: min_score,
-    });
+    try {
+      const queryBuilder = rag.get(entity_type).semanticSearch(vectorIndex.name, query, {
+        topK: Math.min(top_k, 20),
+        minScore: min_score,
+      });
 
-    const results = await queryBuilder.execute();
+      const results = await queryBuilder.execute();
 
-    return {
-      entity_type,
-      query,
-      count: results.length,
-      index_used: vectorIndex.name,
-      unique_field: entityMeta.uniqueField,
-      results: results.map((r: any) => ({
-        [entityMeta.uniqueField]: r[entityMeta.uniqueField],
-        name: r.name || r.path || 'N/A',
-        type: r.type,
-        file: r.file,
-        score: r.score?.toFixed(3),
-        snippet: r[vectorIndex.sourceField]?.substring(0, 200),
-      })),
-    };
+      return {
+        entity_type,
+        query,
+        count: results.length,
+        index_used: vectorIndex.name,
+        unique_field: entityMeta.uniqueField,
+        results: results.map((r: any) => ({
+          [entityMeta.uniqueField]: r[entityMeta.uniqueField],
+          name: r.name || r.path || 'N/A',
+          type: r.type,
+          file: r.file,
+          score: r.score?.toFixed(3),
+          snippet: r[vectorIndex.sourceField]?.substring(0, 200),
+        })),
+      };
+    } catch (error: any) {
+      // Detect missing vector index error and provide actionable guidance
+      if (error.message?.includes('no such vector schema index') ||
+          error.message?.includes('There is no such vector schema index')) {
+        return {
+          error: `Embeddings not found for index "${vectorIndex.name}". ` +
+                 `Please use the "generate_embeddings" tool first to create vector indexes and generate embeddings for this project. ` +
+                 `This only needs to be done once per project.`,
+          suggestion: 'generate_embeddings',
+          index_missing: vectorIndex.name,
+        };
+      }
+      // Re-throw other errors
+      throw error;
+    }
   };
 }
 

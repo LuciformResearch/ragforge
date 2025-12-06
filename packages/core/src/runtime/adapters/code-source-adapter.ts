@@ -13,10 +13,13 @@ import {
   TypeScriptLanguageParser,
   PythonLanguageParser,
   HTMLDocumentParser,
+  CSSParser,
   type ScopeFileAnalysis,
   type ScopeInfo,
   type HTMLParseResult,
   type DocumentInfo,
+  type CSSParseResult,
+  type StylesheetInfo,
 } from '@luciformresearch/codeparsers';
 import {
   SourceAdapter,
@@ -82,6 +85,7 @@ export class CodeSourceAdapter extends SourceAdapter {
   readonly adapterName: string;
   private registry: ParserRegistry;
   private htmlParser: HTMLDocumentParser | null = null;
+  private cssParser: CSSParser | null = null;
   private uuidCache: Map<string, Map<string, string>>; // filePath -> (key -> uuid)
 
   constructor(adapterName: 'typescript' | 'python' | 'html' | 'auto') {
@@ -103,11 +107,30 @@ export class CodeSourceAdapter extends SourceAdapter {
   }
 
   /**
+   * Get or initialize CSS parser
+   */
+  private async getCssParser(): Promise<CSSParser> {
+    if (!this.cssParser) {
+      this.cssParser = new CSSParser();
+      await this.cssParser.initialize();
+    }
+    return this.cssParser;
+  }
+
+  /**
    * Check if a file is an HTML/Vue/Svelte file
    */
   private isHtmlFile(filePath: string): boolean {
     const ext = path.extname(filePath).toLowerCase();
     return ['.html', '.htm', '.vue', '.svelte', '.astro'].includes(ext);
+  }
+
+  /**
+   * Check if a file is a CSS file
+   */
+  private isCssFile(filePath: string): boolean {
+    const ext = path.extname(filePath).toLowerCase();
+    return ['.css', '.scss', '.sass', '.less'].includes(ext);
   }
 
   /**
@@ -206,7 +229,7 @@ export class CodeSourceAdapter extends SourceAdapter {
     });
 
     // Parse all files
-    const { codeFiles, htmlFiles, packageJsonFiles } = await this.parseFiles(files, config, (current) => {
+    const { codeFiles, htmlFiles, cssFiles, packageJsonFiles } = await this.parseFiles(files, config, (current) => {
       options.onProgress?.({
         phase: 'parsing',
         currentFile: current,
@@ -225,7 +248,7 @@ export class CodeSourceAdapter extends SourceAdapter {
     });
 
     // Build graph structure
-    const graph = await this.buildGraph({ codeFiles, htmlFiles }, config, resolver, projectInfo);
+    const graph = await this.buildGraph({ codeFiles, htmlFiles, cssFiles, packageJsonFiles }, config, resolver, projectInfo);
 
     // Export XML if requested
     if (config.options?.exportXml) {
@@ -250,7 +273,7 @@ export class CodeSourceAdapter extends SourceAdapter {
    * Discover files to parse based on include/exclude patterns
    */
   private async discoverFiles(config: CodeSourceConfig): Promise<string[]> {
-    const patterns = config.include || ['**/*.ts', '**/*.tsx', '**/*.py'];
+    const patterns = config.include || ['**/*.ts', '**/*.tsx', '**/*.py', 'package.json'];
     const ignore = config.exclude || [
       '**/node_modules/**',
       '**/dist/**',
@@ -259,11 +282,27 @@ export class CodeSourceAdapter extends SourceAdapter {
       '**/*.spec.ts'
     ];
 
-    return await globby(patterns, {
-      cwd: config.root || process.cwd(),
+    const cwd = config.root || process.cwd();
+
+    const files = await globby(patterns, {
+      cwd,
       ignore,
       absolute: true
     });
+
+    // Always include package.json from project root if it exists
+    const fs = await import('fs/promises');
+    const packageJsonPath = path.join(cwd, 'package.json');
+    try {
+      await fs.access(packageJsonPath);
+      if (!files.includes(packageJsonPath)) {
+        files.push(packageJsonPath);
+      }
+    } catch {
+      // No package.json in root, that's OK
+    }
+
+    return files;
   }
 
   /**
@@ -299,7 +338,7 @@ export class CodeSourceAdapter extends SourceAdapter {
   }
 
   /**
-   * Parse all files (code, HTML, and package.json)
+   * Parse all files (code, HTML, CSS, and package.json)
    */
   private async parseFiles(
     files: string[],
@@ -308,10 +347,12 @@ export class CodeSourceAdapter extends SourceAdapter {
   ): Promise<{
     codeFiles: Map<string, ScopeFileAnalysis>;
     htmlFiles: Map<string, HTMLParseResult>;
+    cssFiles: Map<string, CSSParseResult>;
     packageJsonFiles: Map<string, PackageJsonInfo>;
   }> {
     const codeFiles = new Map<string, ScopeFileAnalysis>();
     const htmlFiles = new Map<string, HTMLParseResult>();
+    const cssFiles = new Map<string, CSSParseResult>();
     const packageJsonFiles = new Map<string, PackageJsonInfo>();
 
     for (const file of files) {
@@ -334,6 +375,15 @@ export class CodeSourceAdapter extends SourceAdapter {
           const content = await import('fs').then(fs => fs.promises.readFile(file, 'utf-8'));
           const result = await htmlParser.parseFile(file, content, { parseScripts: true });
           htmlFiles.set(file, result);
+          continue;
+        }
+
+        // Handle CSS files
+        if (this.isCssFile(file)) {
+          const cssParser = await this.getCssParser();
+          const content = await import('fs').then(fs => fs.promises.readFile(file, 'utf-8'));
+          const result = await cssParser.parseFile(file, content);
+          cssFiles.set(file, result);
           continue;
         }
 
@@ -408,7 +458,7 @@ export class CodeSourceAdapter extends SourceAdapter {
       }
     }
 
-    return { codeFiles, htmlFiles };
+    return { codeFiles, htmlFiles, cssFiles, packageJsonFiles };
   }
 
   /**
@@ -451,12 +501,14 @@ export class CodeSourceAdapter extends SourceAdapter {
     parsedFiles: {
       codeFiles: Map<string, ScopeFileAnalysis>;
       htmlFiles: Map<string, HTMLParseResult>;
+      cssFiles: Map<string, CSSParseResult>;
+      packageJsonFiles: Map<string, PackageJsonInfo>;
     },
     config: CodeSourceConfig,
     resolver: ImportResolver,
     projectInfo: { name: string; gitRemote: string | null; rootPath: string }
   ): Promise<ParsedGraph> {
-    const { codeFiles, htmlFiles } = parsedFiles;
+    const { codeFiles, htmlFiles, cssFiles, packageJsonFiles } = parsedFiles;
     const nodes: ParsedNode[] = [];
     const relationships: ParsedRelationship[] = [];
     const scopeMap = new Map<string, ScopeInfo>(); // uuid -> ScopeInfo
@@ -467,6 +519,7 @@ export class CodeSourceAdapter extends SourceAdapter {
       labels: ['Project'],
       id: projectId,
       properties: {
+        uuid: projectId, // Required for relationship matching
         name: projectInfo.name,
         gitRemote: projectInfo.gitRemote || null,
         rootPath: projectInfo.rootPath,
@@ -474,11 +527,45 @@ export class CodeSourceAdapter extends SourceAdapter {
       }
     });
 
+    // Create PackageJson nodes
+    const projectRoot = config.root || process.cwd();
+    for (const [filePath, pkgInfo] of packageJsonFiles) {
+      const relPath = path.relative(projectRoot, filePath);
+      // Generate deterministic UUID for package.json
+      const pkgUuidRaw = UniqueIDHelper.GenerateDeterministicUUID(`packagejson:${filePath}`);
+      const pkgId = `pkg:${pkgUuidRaw}`; // Prefix for relationship matching
+
+      nodes.push({
+        labels: ['PackageJson'],
+        id: pkgId,
+        properties: {
+          uuid: pkgId,
+          file: relPath,
+          name: pkgInfo.name,
+          version: pkgInfo.version,
+          description: pkgInfo.description || null,
+          dependencies: pkgInfo.dependencies,
+          devDependencies: pkgInfo.devDependencies,
+          peerDependencies: pkgInfo.peerDependencies,
+          scripts: pkgInfo.scripts,
+          main: pkgInfo.main || null,
+          moduleType: pkgInfo.type || null,
+          hash: createHash('sha256').update(JSON.stringify(pkgInfo.raw)).digest('hex').slice(0, 16),
+          indexedAt: getLocalTimestamp()
+        }
+      });
+
+      // Link to Project
+      relationships.push({
+        type: 'PACKAGE_OF',
+        from: pkgId,
+        to: projectId,
+        properties: {}
+      });
+    }
+
     // Build global UUID mapping first (needed for parentUUID)
     const globalUUIDMapping = this.buildGlobalUUIDMapping(codeFiles);
-
-    // Get project root for relative path calculation
-    const projectRoot = config.root || process.cwd();
 
     // First pass: Create all scope nodes from code files
     for (const [filePath, analysis] of codeFiles) {
@@ -590,11 +677,13 @@ export class CodeSourceAdapter extends SourceAdapter {
       // Calculate content hash (SHA-256)
       const contentHash = createHash('sha256').update(analysis.scopes.map(s => s.content || '').join('')).digest('hex');
 
+      const fileUuid = `file:${relPath}`;
       nodes.push({
         labels: ['File'],
-        id: `file:${relPath}`, // Use relative path for ID consistency
+        id: fileUuid,
         properties: {
-          path: relPath, // Use relative path in properties
+          uuid: fileUuid, // Required for relationship matching
+          path: relPath,
           name: fileName,
           directory,
           extension,
@@ -650,11 +739,13 @@ export class CodeSourceAdapter extends SourceAdapter {
     // Create Directory nodes
     for (const dir of directories) {
       const depth = dir.split('/').filter(p => p.length > 0).length;
+      const dirUuid = `dir:${dir}`;
       nodes.push({
         labels: ['Directory'],
-        id: `dir:${dir}`,
+        id: dirUuid,
         properties: {
-          path: dir, // Already relative
+          uuid: dirUuid, // Required for relationship matching
+          path: dir,
           depth
         }
       });
@@ -846,7 +937,7 @@ export class CodeSourceAdapter extends SourceAdapter {
         labels: ['WebDocument'],
         id: docId,
         properties: {
-          uuid: doc.uuid,
+          uuid: docId, // Use prefixed ID for relationship matching
           file: relPath,
           type: doc.type, // 'html' | 'vue-sfc' | 'svelte' | 'astro'
           hash: doc.hash,
@@ -1005,11 +1096,144 @@ export class CodeSourceAdapter extends SourceAdapter {
       }
     }
 
+    // Create Stylesheet nodes for CSS files
+    for (const [filePath, cssResult] of cssFiles) {
+      const relPath = path.relative(projectRoot, filePath);
+      const stylesheet = cssResult.stylesheet;
+
+      // Create Stylesheet node
+      const stylesheetId = `stylesheet:${stylesheet.uuid}`;
+      nodes.push({
+        labels: ['Stylesheet'],
+        id: stylesheetId,
+        properties: {
+          uuid: stylesheetId,
+          file: relPath,
+          hash: stylesheet.hash,
+          linesOfCode: stylesheet.linesOfCode,
+          ruleCount: stylesheet.ruleCount,
+          selectorCount: stylesheet.selectorCount,
+          propertyCount: stylesheet.propertyCount,
+          variableCount: stylesheet.variables.length,
+          importCount: stylesheet.imports.length,
+          fontFaceCount: stylesheet.fontFaceCount,
+          keyframeNames: stylesheet.keyframeNames.length > 0 ? JSON.stringify(stylesheet.keyframeNames) : null,
+          mediaQueries: stylesheet.mediaQueries.length > 0 ? JSON.stringify(stylesheet.mediaQueries) : null,
+          indexedAt: getLocalTimestamp()
+        }
+      });
+
+      // Create BELONGS_TO relationship (Stylesheet -> Project)
+      relationships.push({
+        type: 'BELONGS_TO',
+        from: stylesheetId,
+        to: projectId
+      });
+
+      // Create File node for CSS file
+      const fileName = relPath.split('/').pop() || relPath;
+      const directory = relPath.includes('/') ? relPath.substring(0, relPath.lastIndexOf('/')) : '.';
+      const extension = fileName.includes('.') ? fileName.substring(fileName.lastIndexOf('.')) : '';
+      const fileUuid = `file:${relPath}`;
+
+      nodes.push({
+        labels: ['File'],
+        id: fileUuid,
+        properties: {
+          uuid: fileUuid,
+          path: relPath,
+          name: fileName,
+          directory,
+          extension,
+          contentHash: stylesheet.hash
+        }
+      });
+
+      // Create BELONGS_TO relationship (File -> Project)
+      relationships.push({
+        type: 'BELONGS_TO',
+        from: fileUuid,
+        to: projectId
+      });
+
+      // Create DEFINED_IN relationship (Stylesheet -> File)
+      relationships.push({
+        type: 'DEFINED_IN',
+        from: stylesheetId,
+        to: fileUuid
+      });
+
+      // Create IMPORTS relationships for @import
+      for (const importUrl of stylesheet.imports) {
+        relationships.push({
+          type: 'IMPORTS',
+          from: stylesheetId,
+          to: importUrl, // Will be resolved to file if it exists
+          properties: {}
+        });
+      }
+
+      // Create CSSVariable nodes
+      for (const variable of stylesheet.variables) {
+        const varId = `cssvar:${stylesheet.uuid}:${variable.name}`;
+        nodes.push({
+          labels: ['CSSVariable'],
+          id: varId,
+          properties: {
+            uuid: varId,
+            name: variable.name,
+            value: variable.value,
+            scope: variable.scope,
+            line: variable.line
+          }
+        });
+
+        // Create DEFINES_VARIABLE relationship (Stylesheet -> CSSVariable)
+        relationships.push({
+          type: 'DEFINES_VARIABLE',
+          from: stylesheetId,
+          to: varId
+        });
+      }
+
+      // Add directory to set for CSS files
+      let currentPath = relPath;
+      while (true) {
+        const dir = currentPath.includes('/') ? currentPath.substring(0, currentPath.lastIndexOf('/')) : '';
+        if (!dir || dir === '.' || dir === '') break;
+
+        if (!directories.has(dir)) {
+          directories.add(dir);
+          const dirUuid = `dir:${dir}`;
+          const depth = dir.split('/').filter(p => p.length > 0).length;
+          nodes.push({
+            labels: ['Directory'],
+            id: dirUuid,
+            properties: {
+              uuid: dirUuid,
+              path: dir,
+              depth
+            }
+          });
+        }
+
+        if (currentPath === relPath) {
+          relationships.push({
+            type: 'IN_DIRECTORY',
+            from: fileUuid,
+            to: `dir:${dir}`
+          });
+        }
+
+        currentPath = dir;
+      }
+    }
+
     return {
       nodes,
       relationships,
       metadata: {
-        filesProcessed: codeFiles.size + htmlFiles.size,
+        filesProcessed: codeFiles.size + htmlFiles.size + cssFiles.size,
         nodesGenerated: nodes.length,
         relationshipsGenerated: relationships.length,
         parseTimeMs: 0 // Will be set by caller

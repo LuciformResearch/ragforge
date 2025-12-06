@@ -1,0 +1,14 @@
+name: css-test
+description: Test project for CSS integration
+
+sources:
+  code:
+    include:
+      - "src/**/*.ts"
+      - "src/**/*.html"
+      - "src/**/*.css"
+    exclude:
+      - "**/node_modules/**"
+
+options:
+  verbose: true

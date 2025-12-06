@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment
+.env
+.env.local
+
+# RagForge workspace (optional: uncomment to exclude from git)
+# .ragforge/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store

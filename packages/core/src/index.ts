@@ -87,6 +87,31 @@ export {
 } from './tools/threed-tools.js';
 export type { ThreeDToolsContext, ThreeDToolsResult } from './tools/threed-tools.js';
 
+// Project Tools (create, setup, ingest, embeddings)
+export {
+  generateProjectTools,
+  generateCreateProjectTool,
+  generateSetupProjectTool,
+  generateIngestCodeTool,
+  generateEmbeddingsTool,
+  generateLoadProjectTool,
+  generateCreateProjectHandler,
+  generateSetupProjectHandler,
+  generateIngestCodeHandler,
+  generateEmbeddingsHandler,
+  generateLoadProjectHandler,
+} from './tools/project-tools.js';
+export type {
+  ProjectToolsContext,
+  ProjectToolsResult,
+  CreateProjectParams,
+  SetupProjectParams,
+  IngestCodeParams,
+  GenerateEmbeddingsParams,
+  LoadProjectParams,
+  ProjectToolResult,
+} from './tools/project-tools.js';
+
 // Ingestion Lock (coordinate file tools with RAG queries)
 export {
   IngestionLock,
@@ -122,6 +147,18 @@ export * from './database/index.js';
 // Runtime (merged from @luciformresearch/ragforge-runtime)
 // ============================================
 export * from './runtime/index.js';
+
+// ============================================
+// Utilities
+// ============================================
+export * from './utils/index.js';
+
+// Timestamp utilities (local timezone formatting)
+export {
+  getLocalTimestamp,
+  getFilenameTimestamp,
+  formatLocalDate,
+} from './runtime/utils/timestamp.js';
 
 // Version
 export const VERSION = '0.2.0';

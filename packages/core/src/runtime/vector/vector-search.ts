@@ -86,9 +86,10 @@ export class VectorSearch {
 
     let embeddingProvider = this.embeddingProviders.get(cacheKey);
     if (!embeddingProvider) {
-      const apiKey = config.apiKey || this.options.apiKey;
+      // Try multiple sources for API key: config, options, or environment variable
+      const apiKey = config.apiKey || this.options.apiKey || process.env.GEMINI_API_KEY;
       if (!apiKey) {
-        throw new Error('API key is required for embedding provider. Set it in config or pass apiKey option.');
+        throw new Error('API key is required for embedding provider. Set it in config, pass apiKey option, or set GEMINI_API_KEY environment variable.');
       }
       // Create provider from config
       embeddingProvider = new GeminiEmbeddingProvider({

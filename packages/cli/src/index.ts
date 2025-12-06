@@ -38,6 +38,11 @@ import {
   runCreate,
   printCreateHelp
 } from './commands/create.js';
+import {
+  parseAgentOptions,
+  runAgent,
+  printAgentHelp
+} from './commands/agent.js';
 
 import { VERSION } from './version.js';
 
@@ -56,6 +61,7 @@ Connection defaults from .env in current directory:
 Usage:
   ragforge quickstart [options]      Quick setup for code RAG with defaults
   ragforge create <name> [options]   Create a new TypeScript project
+  ragforge agent [options]           Launch RagForge agent (RAG + File + Project tools)
   ragforge init [options]            Complete setup (introspect + generate)
   ragforge help <command>            Show detailed help for a specific command
 
@@ -122,6 +128,9 @@ async function main(): Promise<void> {
           case 'create':
             printCreateHelp();
             break;
+          case 'agent':
+            printAgentHelp();
+            break;
           case 'init':
             printInitHelp();
             break;
@@ -148,6 +157,12 @@ async function main(): Promise<void> {
       case 'create': {
         const options = parseCreateOptions(rest);
         await runCreate(options);
+        return;
+      }
+
+      case 'agent': {
+        const options = parseAgentOptions(rest);
+        await runAgent(options);
         return;
       }
 

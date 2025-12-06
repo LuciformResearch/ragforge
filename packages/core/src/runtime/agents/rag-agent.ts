@@ -21,8 +21,9 @@
  * ```
  */
 
-import { generateToolsFromConfig, generateFileTools, generateImageTools, generate3DTools, IngestionLock, withIngestionLock } from '../../index.js';
-import type { ToolGenerationOptions, GeneratedToolDefinition, ToolHandlerGenerator, RagForgeConfig, FileToolsContext, ImageToolsContext, ThreeDToolsContext } from '../../index.js';
+import { generateToolsFromConfig, generateFileTools, generateImageTools, generate3DTools, generateProjectTools, IngestionLock, withIngestionLock } from '../../index.js';
+import type { ToolGenerationOptions, GeneratedToolDefinition, ToolHandlerGenerator, RagForgeConfig, FileToolsContext, ImageToolsContext, ThreeDToolsContext, ProjectToolsContext } from '../../index.js';
+import { formatLocalDate, getFilenameTimestamp } from '../utils/timestamp.js';
 import { StructuredLLMExecutor, BaseToolExecutor, type ToolCallRequest, type ToolExecutionResult } from '../llm/structured-llm-executor.js';
 import { GeminiAPIProvider } from '../reranking/gemini-api-provider.js';
 import { GeminiNativeToolProvider, type ToolDefinition } from '../llm/native-tool-calling/index.js';
@@ -66,7 +67,7 @@ class AgentLogger {
     this.currentSession = {
       sessionId: `session_${Date.now()}`,
       question,
-      startTime: new Date().toISOString(),
+      startTime: formatLocalDate(),
       mode,
       tools,
       entries: [],
@@ -75,7 +76,7 @@ class AgentLogger {
     };
 
     this.log({
-      timestamp: new Date().toISOString(),
+      timestamp: formatLocalDate(),
       type: 'start',
       data: { question, mode, tools },
     });
@@ -86,7 +87,7 @@ class AgentLogger {
     this.currentSession.totalIterations = iteration;
 
     this.log({
-      timestamp: new Date().toISOString(),
+      timestamp: formatLocalDate(),
       type: 'iteration',
       iteration,
       data: { llmResponse },
@@ -100,7 +101,7 @@ class AgentLogger {
     }
 
     this.log({
-      timestamp: new Date().toISOString(),
+      timestamp: formatLocalDate(),
       type: 'tool_call',
       data: { toolName, arguments: args },
     });
@@ -108,7 +109,7 @@ class AgentLogger {
 
   logToolResult(toolName: string, result: any, durationMs: number): void {
     this.log({
-      timestamp: new Date().toISOString(),
+      timestamp: formatLocalDate(),
       type: 'tool_result',
       data: { toolName, result, durationMs },
     });
@@ -117,15 +118,42 @@ class AgentLogger {
   logFinalAnswer(answer: string, confidence?: string): void {
     if (!this.currentSession) return;
     this.currentSession.finalAnswer = answer;
-    this.currentSession.endTime = new Date().toISOString();
+    this.currentSession.endTime = formatLocalDate();
 
     this.log({
-      timestamp: new Date().toISOString(),
+      timestamp: formatLocalDate(),
       type: 'final_answer',
       data: { answer, confidence },
     });
 
     // Write to file
+    this.writeSessionToFile();
+  }
+
+  logToolError(toolName: string, error: string, durationMs?: number): void {
+    if (!this.currentSession) return;
+
+    this.log({
+      timestamp: formatLocalDate(),
+      type: 'tool_result',
+      data: { toolName, error, durationMs, success: false },
+    });
+
+    // Write immediately on errors so we don't lose data
+    this.writeSessionToFile();
+  }
+
+  logError(error: string, context?: Record<string, any>): void {
+    if (!this.currentSession) return;
+    this.currentSession.endTime = formatLocalDate();
+
+    this.log({
+      timestamp: formatLocalDate(),
+      type: 'final_answer',
+      data: { error, context, success: false },
+    });
+
+    // Always write on error
     this.writeSessionToFile();
   }
 
@@ -153,6 +181,11 @@ class AgentLogger {
 
   getSession(): AgentSessionLog | undefined {
     return this.currentSession;
+  }
+
+  /** Force write the current session (call on error/abort) */
+  flush(): void {
+    this.writeSessionToFile();
   }
 }
 
@@ -227,8 +260,9 @@ export interface RagAgentOptions {
   /**
    * Project root for file tools (required if includeFileTools is true)
    * File paths will be resolved relative to this directory
+   * Can be a string or a getter function for dynamic resolution
    */
-  projectRoot?: string;
+  projectRoot?: string | (() => string | null);
 
   /**
    * ChangeTracker instance for tracking file modifications
@@ -258,6 +292,19 @@ export interface RagAgentOptions {
    * - generate_3d_from_text (MVDream)
    */
   replicateApiToken?: string;
+
+  /**
+   * Include project management tools (create_project, setup_project, ingest_code, generate_embeddings)
+   * Enables the agent to create and manage RagForge projects
+   * Default: false
+   */
+  includeProjectTools?: boolean;
+
+  /**
+   * Context for project tools (callbacks for CLI operations)
+   * Required if includeProjectTools is true
+   */
+  projectToolsContext?: Omit<ProjectToolsContext, 'workingDirectory' | 'verbose'>;
 }
 
 export interface AskResult {
@@ -280,21 +327,26 @@ export interface AskResult {
 // File tools that modify content (need to run before RAG queries)
 const FILE_MODIFICATION_TOOLS = new Set(['write_file', 'edit_file']);
 
+const PROJECT_MANAGEMENT_TOOLS = new Set(['create_project', 'setup_project', 'load_project']);
+
 class GeneratedToolExecutor extends BaseToolExecutor {
   private handlers: Record<string, (args: Record<string, any>) => Promise<any>>;
   private verbose: boolean;
   private logger?: AgentLogger;
   public toolsUsed: string[] = [];
+  private executionOrder: Set<string>[];
 
   constructor(
     handlers: Record<string, (args: Record<string, any>) => Promise<any>>,
     verbose: boolean = false,
-    logger?: AgentLogger
+    logger?: AgentLogger,
+    executionOrder: Set<string>[] = []
   ) {
     super();
     this.handlers = handlers;
     this.verbose = verbose;
     this.logger = logger;
+    this.executionOrder = executionOrder;
   }
 
   async execute(toolCall: ToolCallRequest): Promise<any> {
@@ -307,20 +359,36 @@ class GeneratedToolExecutor extends BaseToolExecutor {
 
     const handler = this.handlers[toolCall.tool_name];
     if (!handler) {
-      throw new Error(`Unknown tool: ${toolCall.tool_name}. Available: ${Object.keys(this.handlers).join(', ')}`);
+      const error = `Unknown tool: ${toolCall.tool_name}. Available: ${Object.keys(this.handlers).join(', ')}`;
+      this.logger?.logToolError(toolCall.tool_name, error);
+      throw new Error(error);
     }
 
     const startTime = Date.now();
-    const result = await handler(toolCall.arguments);
-    const durationMs = Date.now() - startTime;
+    try {
+      const result = await handler(toolCall.arguments);
+      const durationMs = Date.now() - startTime;
 
-    if (this.verbose) {
-      console.log(`   📤 Result (${durationMs}ms):`, JSON.stringify(result).substring(0, 200));
+      if (this.verbose) {
+        console.log(`   📤 Result (${durationMs}ms):`, JSON.stringify(result).substring(0, 200));
+      }
+
+      this.logger?.logToolResult(toolCall.tool_name, result, durationMs);
+
+      return result;
+    } catch (error: any) {
+      const durationMs = Date.now() - startTime;
+      const errorMsg = error.message || String(error);
+
+      if (this.verbose) {
+        console.log(`   ❌ Tool ${toolCall.tool_name} failed: ${errorMsg}`);
+      }
+
+      this.logger?.logToolError(toolCall.tool_name, errorMsg, durationMs);
+
+      // Re-throw to let the executor handle it
+      throw error;
     }
-
-    this.logger?.logToolResult(toolCall.tool_name, result, durationMs);
-
-    return result;
   }
 
   /**
@@ -333,44 +401,46 @@ class GeneratedToolExecutor extends BaseToolExecutor {
    * 2. Other tools (RAG queries, read_file, etc.) - parallel
    */
   async executeBatch(toolCalls: ToolCallRequest[]): Promise<ToolExecutionResult[]> {
-    // Separate file modification tools from other tools
-    const fileModTools: ToolCallRequest[] = [];
-    const otherTools: ToolCallRequest[] = [];
-
-    for (const toolCall of toolCalls) {
-      if (FILE_MODIFICATION_TOOLS.has(toolCall.tool_name)) {
-        fileModTools.push(toolCall);
-      } else {
-        otherTools.push(toolCall);
-      }
-    }
-
-    // If no file mod tools, run everything in parallel (default behavior)
-    if (fileModTools.length === 0) {
-      return super.executeBatch(toolCalls);
-    }
-
-    // If no other tools, just run file mod tools in parallel
-    if (otherTools.length === 0) {
-      return super.executeBatch(fileModTools);
-    }
-
-    // Mixed batch: run file mod tools FIRST, then other tools
-    if (this.verbose) {
-      console.log(`   ⏱️  Sequencing: ${fileModTools.length} file tool(s) first, then ${otherTools.length} other tool(s)`);
-    }
-
-    // Execute file modification tools first (they acquire locks and do ingestion)
-    const fileResults = await super.executeBatch(fileModTools);
-
-    // Then execute other tools (they can now see fresh data)
-    const otherResults = await super.executeBatch(otherTools);
-
-    // Combine results in original order
     const resultMap = new Map<ToolCallRequest, ToolExecutionResult>();
-    fileModTools.forEach((tc, i) => resultMap.set(tc, fileResults[i]));
-    otherTools.forEach((tc, i) => resultMap.set(tc, otherResults[i]));
+    let remainingToolCalls = [...toolCalls];
 
+    // Execute tools in stages based on the configured execution order
+    for (const stage of this.executionOrder) {
+      const stageTools: ToolCallRequest[] = [];
+      const nextStageTools: ToolCallRequest[] = [];
+
+      for (const toolCall of remainingToolCalls) {
+        if (stage.has(toolCall.tool_name)) {
+          stageTools.push(toolCall);
+        } else {
+          nextStageTools.push(toolCall);
+        }
+      }
+
+      if (stageTools.length > 0) {
+        if (this.verbose) {
+          console.log(`   ⏱️  Executing stage with ${stageTools.length} tool(s): ${stageTools.map(t => t.tool_name).join(', ')}`);
+        }
+        // Execute tools in a stage sequentially to ensure dependencies are met
+        for (const toolCall of stageTools) {
+          const result = await this.execute(toolCall);
+          resultMap.set(toolCall, result);
+        }
+      }
+
+      remainingToolCalls = nextStageTools;
+    }
+
+    // Execute any remaining tools (not in any defined stage) in parallel
+    if (remainingToolCalls.length > 0) {
+      if (this.verbose) {
+        console.log(`   ⏱️  Executing ${remainingToolCalls.length} remaining tool(s) in parallel: ${remainingToolCalls.map(t => t.tool_name).join(', ')}`);
+      }
+      const results = await super.executeBatch(remainingToolCalls);
+      remainingToolCalls.forEach((tc, i) => resultMap.set(tc, results[i]));
+    }
+
+    // Return results in the original order
     return toolCalls.map(tc => resultMap.get(tc)!);
   }
 }
@@ -536,65 +606,77 @@ Example: After getting search results, use this to analyze each result with a cu
       },
     };
 
-    if (mode === 'native') {
-      // Native tool calling (global mode)
-      const results = await this.executor.executeLLMBatchWithTools(
-        [{ question }],
-        {
-          inputFields: ['question'],
-          systemPrompt: this.buildSystemPrompt(),
-          userTask: 'Answer the question by using the available tools. Start by calling get_schema() to understand what data is available.',
-          outputSchema,
-          tools: this.getToolDefinitions(),
-          toolMode: 'global',
-          toolChoice: 'any',
-          nativeToolProvider: this.nativeToolProvider,
-          toolExecutor,
-          llmProvider: this.llmProvider,
-        }
-      );
+    try {
+      if (mode === 'native') {
+        // Native tool calling (global mode)
+        const results = await this.executor.executeLLMBatchWithTools(
+          [{ question }],
+          {
+            inputFields: ['question'],
+            systemPrompt: this.buildSystemPrompt(),
+            userTask: 'Answer the question by using the available tools. Start by calling get_schema() to understand what data is available.',
+            outputSchema,
+            tools: this.getToolDefinitions(),
+            toolMode: 'global',
+            toolChoice: 'any',
+            nativeToolProvider: this.nativeToolProvider,
+            toolExecutor,
+            llmProvider: this.llmProvider,
+          }
+        );
 
-      const items = Array.isArray(results) ? results : (results as any).items;
-      const result = items[0] as Record<string, any>;
+        const items = Array.isArray(results) ? results : (results as any).items;
+        const result = items[0] as Record<string, any>;
 
-      // Log final answer
-      this.logger?.logFinalAnswer(result.answer || 'No answer generated', result.confidence);
+        // Log final answer
+        this.logger?.logFinalAnswer(result.answer || 'No answer generated', result.confidence);
 
-      return {
-        answer: result.answer || 'No answer generated',
-        confidence: result.confidence,
+        return {
+          answer: result.answer || 'No answer generated',
+          confidence: result.confidence,
+          toolsUsed: [...new Set(toolExecutor.toolsUsed)],
+          ...this.extractCustomFields(result),
+        };
+      } else {
+        // Structured mode (per-item, XML-based)
+        const results = await this.executor.executeLLMBatchWithTools(
+          [{ question }],
+          {
+            inputFields: ['question'],
+            systemPrompt: this.buildSystemPrompt(),
+            userTask: 'Answer the question by using the available tools. Start by calling get_schema() to understand what data is available.',
+            outputSchema,
+            tools: this.getToolDefinitions(),
+            toolMode: 'per-item',
+            maxIterationsPerItem: this.maxIterations,
+            toolExecutor,
+            llmProvider: this.llmProvider,
+          }
+        );
+
+        const items = Array.isArray(results) ? results : (results as any).items;
+        const result = items[0] as Record<string, any>;
+
+        // Log final answer
+        this.logger?.logFinalAnswer(result.answer || 'No answer generated', result.confidence);
+
+        return {
+          answer: result.answer || 'No answer generated',
+          confidence: result.confidence,
+          toolsUsed: [...new Set(toolExecutor.toolsUsed)],
+          ...this.extractCustomFields(result),
+        };
+      }
+    } catch (error: any) {
+      // Log the error and ensure the session is written
+      const errorMsg = error.message || String(error);
+      this.logger?.logError(errorMsg, {
         toolsUsed: [...new Set(toolExecutor.toolsUsed)],
-        ...this.extractCustomFields(result),
-      };
-    } else {
-      // Structured mode (per-item, XML-based)
-      const results = await this.executor.executeLLMBatchWithTools(
-        [{ question }],
-        {
-          inputFields: ['question'],
-          systemPrompt: this.buildSystemPrompt(),
-          userTask: 'Answer the question by using the available tools. Start by calling get_schema() to understand what data is available.',
-          outputSchema,
-          tools: this.getToolDefinitions(),
-          toolMode: 'per-item',
-          maxIterationsPerItem: this.maxIterations,
-          toolExecutor,
-          llmProvider: this.llmProvider,
-        }
-      );
+        mode,
+      });
 
-      const items = Array.isArray(results) ? results : (results as any).items;
-      const result = items[0] as Record<string, any>;
-
-      // Log final answer
-      this.logger?.logFinalAnswer(result.answer || 'No answer generated', result.confidence);
-
-      return {
-        answer: result.answer || 'No answer generated',
-        confidence: result.confidence,
-        toolsUsed: [...new Set(toolExecutor.toolsUsed)],
-        ...this.extractCustomFields(result),
-      };
+      // Re-throw the error
+      throw error;
     }
   }
 
@@ -758,8 +840,9 @@ export async function createRagAgent(options: RagAgentOptions): Promise<RagAgent
       },
     });
 
+    // File tools accept dynamic projectRoot (string or getter function)
     const fileToolsCtx: FileToolsContext = {
-      projectRoot: options.projectRoot,
+      projectRoot: options.projectRoot!,  // Can be string or () => string | null
       changeTracker: options.changeTracker,
       onFileModified: options.onFileModified,
       ingestionLock,
@@ -792,9 +875,14 @@ export async function createRagAgent(options: RagAgentOptions): Promise<RagAgent
       throw new Error('projectRoot is required when includeMediaTools is true');
     }
 
+    // Resolve projectRoot to string for media tools (they don't support dynamic resolution)
+    const resolvedProjectRoot = typeof options.projectRoot === 'function'
+      ? options.projectRoot() || process.cwd()
+      : options.projectRoot || process.cwd();
+
     // Image tools context (uses GEMINI_API_KEY and REPLICATE_API_TOKEN from env)
     const imageCtx: ImageToolsContext = {
-      projectRoot: options.projectRoot,
+      projectRoot: resolvedProjectRoot,
     };
 
     const imageTools = generateImageTools(imageCtx);
@@ -803,7 +891,7 @@ export async function createRagAgent(options: RagAgentOptions): Promise<RagAgent
 
     // 3D tools context (uses REPLICATE_API_TOKEN from env)
     const threeDCtx: ThreeDToolsContext = {
-      projectRoot: options.projectRoot,
+      projectRoot: resolvedProjectRoot,
     };
 
     const threeDTools = generate3DTools(threeDCtx);
@@ -812,6 +900,28 @@ export async function createRagAgent(options: RagAgentOptions): Promise<RagAgent
 
     if (options.verbose) {
       console.log(`   🎨 Media tools enabled (image: ${imageTools.tools.length}, 3D: ${threeDTools.tools.length})`);
+    }
+  }
+
+  // 3d. Add project tools if enabled
+  if (options.includeProjectTools) {
+    // Resolve projectRoot to string for project tools context
+    const workingDir = typeof options.projectRoot === 'function'
+      ? options.projectRoot() || process.cwd()
+      : options.projectRoot || process.cwd();
+
+    const projectCtx: ProjectToolsContext = {
+      workingDirectory: workingDir,
+      verbose: options.verbose,
+      ...options.projectToolsContext,
+    };
+
+    const projectTools = generateProjectTools(projectCtx);
+    tools.push(...projectTools.tools);
+    Object.assign(boundHandlers, projectTools.handlers);
+
+    if (options.verbose) {
+      console.log(`   🚀 Project tools enabled (${projectTools.tools.length} tools)`);
     }
   }
 

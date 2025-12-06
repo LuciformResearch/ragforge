@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  neo4j:
+    image: neo4j:5.23-community
+    container_name: ragforge-.ragforge-553d3d29-neo4j
+    environment:
+      NEO4J_AUTH: ${NEO4J_USERNAME:-neo4j}/${NEO4J_PASSWORD}
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_server_memory_heap_initial__size: 512m
+      NEO4J_server_memory_heap_max__size: 2G
+      NEO4J_dbms_security_procedures_unrestricted: apoc.*
+    ports:
+      - "7694:7687"  # Bolt
+      - "7481:7474"  # HTTP Browser
+    volumes:
+      - ragforge-.ragforge-553d3d29_neo4j_data:/data
+      - ragforge-.ragforge-553d3d29_neo4j_logs:/logs
+
+volumes:
+  ragforge-.ragforge-553d3d29_neo4j_data:
+  ragforge-.ragforge-553d3d29_neo4j_logs:
