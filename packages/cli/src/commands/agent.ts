@@ -500,9 +500,8 @@ export async function createRagForgeAgent(options: AgentOptions) {
   await fs.mkdir(logsDir, { recursive: true });
   const logPath = path.join(logsDir, `agent-${getFilenameTimestamp()}.json`);
 
-  if (verbose) {
-    console.log(`   📝 Agent logs: ${logPath}`);
-  }
+  // Always show log path so user can access logs during execution
+  console.log(`📝 Logs: ${logPath}`);
 
   // Create agent with all tools (file tools always available, context-aware)
   const agent = await createRagAgent({

@@ -154,6 +154,14 @@ export interface LLMStructuredCallConfig<TInput = any, TOutput = any> {
   nativeToolProvider?: NativeToolCallingProvider; // Provider for native tool calling (global mode only)
   toolExecutor?: ToolExecutor; // Custom tool executor
 
+  /** Callback called with each LLM response (for logging reasoning, tool calls, etc.) */
+  onLLMResponse?: (response: {
+    iteration: number;
+    reasoning?: string;
+    toolCalls?: ToolCallRequest[];
+    output?: any;
+  }) => void;
+
   // === DEBUGGING ===
   logPrompts?: boolean | string; // true = console, string = file path
   logResponses?: boolean | string; // true = console, string = file path
@@ -2042,21 +2050,44 @@ export class StructuredLLMExecutor {
       // Call LLM with item + tool context
       const response = await this.callLLMForItemWithTools(item, toolContext, config);
 
-      // Check if we have tool calls
-      if (response.tool_calls && response.tool_calls.length > 0) {
-        console.log(`      → ${response.tool_calls.length} tool call(s)`);
+      // Check if we should return output or continue with tools
+      // Priority: if we have successful tool results AND output, return output (task is done)
+      const hasSuccessfulToolResults = toolContext.some(r => r.success);
+      const output = response.output as Record<string, any> | undefined;
+      const hasOutput = output && Object.keys(output).some(k =>
+        k !== 'tool_calls' && output[k] !== undefined && output[k] !== ''
+      );
+      const toolCalls = response.tool_calls;
+      const hasToolCalls = toolCalls && toolCalls.length > 0;
+
+      // Call callback with LLM response (for logging)
+      if (config.onLLMResponse) {
+        config.onLLMResponse({
+          iteration,
+          reasoning: output?.answer || output?.reasoning,
+          toolCalls: toolCalls,
+          output: output,
+        });
+      }
+
+      if (hasSuccessfulToolResults && hasOutput) {
+        // We have successful results and LLM provided output - task is complete
+        console.log(`      → Final output (tools succeeded)`);
+        return { ...item, ...output } as TInput & TOutput;
+      } else if (hasToolCalls) {
+        console.log(`      → ${toolCalls.length} tool call(s)`);
 
         // Execute tools
         const toolResults = await this.executeToolCalls(
-          response.tool_calls,
+          toolCalls,
           config.toolExecutor
         );
 
         toolContext.push(...toolResults);
-      } else if (response.output) {
+      } else if (hasOutput) {
         // We have final output
         console.log(`      → Final output`);
-        return { ...item, ...response.output } as TInput & TOutput;
+        return { ...item, ...output } as TInput & TOutput;
       } else {
         throw new Error(`Item iteration ${iteration}: LLM returned neither tool_calls nor output`);
       }
@@ -2343,13 +2374,14 @@ When tools don't depend on each other's results, call them all at once:
       }
     }
 
-    // If we have valid tool_calls, return them
+    // Return both output and tool_calls (if any)
+    // This allows the caller to access reasoning even when tools are called
     if (validToolCalls.length > 0) {
       console.log('      [DEBUG] Returning tool calls:', validToolCalls);
-      return { tool_calls: validToolCalls };
+      return { output: output as TOutput, tool_calls: validToolCalls };
     }
 
-    // Otherwise return the output
+    // No tool_calls, just return output
     console.log('      [DEBUG] Returning output (no valid tool calls)');
     return { output: output as TOutput };
   }
@@ -2401,21 +2433,26 @@ When tools don't depend on each other's results, call them all at once:
     }
 
     const resultsStr = toolResults
-      .filter(r => r.success)
       .map((r, i) => {
+        const status = r.success ? '✓ SUCCESS' : '✗ FAILED';
         const resultStr = typeof r.result === 'object'
           ? JSON.stringify(r.result, null, 2)
           : String(r.result);
-        return `Tool ${i + 1}: ${r.tool_name}\nResult: ${resultStr}`;
+        return `Tool ${i + 1}: ${r.tool_name} [${status}]\nResult: ${resultStr}`;
       })
       .join('\n\n');
 
+    const successCount = toolResults.filter(r => r.success).length;
+    const failCount = toolResults.filter(r => !r.success).length;
+
     return `${originalTask}
 
-Tool Results Available:
+=== TOOL EXECUTION RESULTS ===
+${successCount} succeeded, ${failCount} failed
+
 ${resultsStr}
 
-Use these tool results to enhance your analysis of each item.`;
+Based on these results, provide your final answer or call additional tools if needed.`;
   }
 
   /**

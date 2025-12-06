@@ -94,7 +94,7 @@ class AgentLogger {
     });
   }
 
-  logToolCall(toolName: string, args: any): void {
+  logToolCall(toolName: string, args: any, reasoning?: string): void {
     if (!this.currentSession) return;
     if (!this.currentSession.toolsUsed.includes(toolName)) {
       this.currentSession.toolsUsed.push(toolName);
@@ -103,7 +103,7 @@ class AgentLogger {
     this.log({
       timestamp: formatLocalDate(),
       type: 'tool_call',
-      data: { toolName, arguments: args },
+      data: { toolName, arguments: args, reasoning },
     });
   }
 
@@ -160,6 +160,8 @@ class AgentLogger {
   private log(entry: AgentLogEntry): void {
     if (!this.currentSession) return;
     this.currentSession.entries.push(entry);
+    // Write incrementally so logs are available even if agent crashes/is interrupted
+    this.writeSessionToFile();
   }
 
   private writeSessionToFile(): void {
@@ -423,8 +425,20 @@ class GeneratedToolExecutor extends BaseToolExecutor {
         }
         // Execute tools in a stage sequentially to ensure dependencies are met
         for (const toolCall of stageTools) {
-          const result = await this.execute(toolCall);
-          resultMap.set(toolCall, result);
+          try {
+            const result = await this.execute(toolCall);
+            resultMap.set(toolCall, {
+              tool_name: toolCall.tool_name,
+              success: true,
+              result,
+            });
+          } catch (error: any) {
+            resultMap.set(toolCall, {
+              tool_name: toolCall.tool_name,
+              success: false,
+              error: error.message,
+            });
+          }
         }
       }
 
@@ -590,7 +604,12 @@ Example: After getting search results, use this to analyze each result with a cu
       console.log(`   Available tools: ${this.tools.map(t => t.name).join(', ')}\n`);
     }
 
-    const toolExecutor = new GeneratedToolExecutor(this.boundHandlers, this.verbose, this.logger);
+    const toolExecutor = new GeneratedToolExecutor(
+      this.boundHandlers,
+      this.verbose,
+      this.logger,
+      [PROJECT_MANAGEMENT_TOOLS, FILE_MODIFICATION_TOOLS]
+    );
 
     // Build output schema (use custom or default)
     const outputSchema = this.outputSchema || {
@@ -651,6 +670,17 @@ Example: After getting search results, use this to analyze each result with a cu
             maxIterationsPerItem: this.maxIterations,
             toolExecutor,
             llmProvider: this.llmProvider,
+            // Log prompts/responses when verbose
+            logPrompts: this.verbose,
+            logResponses: this.verbose,
+            // Log each LLM response with reasoning
+            onLLMResponse: (response) => {
+              this.logger?.logIteration(response.iteration, {
+                reasoning: response.reasoning,
+                toolCalls: response.toolCalls?.map(tc => tc.tool_name),
+                hasOutput: !!response.output,
+              });
+            },
           }
         );
 
@@ -711,7 +741,12 @@ Example: After getting search results, use this to analyze each result with a cu
       console.log(`   Available tools: ${this.tools.map(t => t.name).join(', ')}\n`);
     }
 
-    const toolExecutor = new GeneratedToolExecutor(this.boundHandlers, this.verbose);
+    const toolExecutor = new GeneratedToolExecutor(
+      this.boundHandlers,
+      this.verbose,
+      this.logger,
+      [PROJECT_MANAGEMENT_TOOLS, FILE_MODIFICATION_TOOLS]
+    );
 
     const results = await this.executor.executeLLMBatchWithTools(
       questions.map(q => ({ question: q })),

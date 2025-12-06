@@ -1128,6 +1128,16 @@ async function setupDockerContainer(
     await generateDockerCompose(projectPath, containerName, boltPort, httpPort);
     console.log('✓ Generated docker-compose.yml');
 
+    // Clean up any orphan volumes from previous runs
+    // IMPORTANT: Neo4j ignores NEO4J_AUTH if volume already has auth data
+    // docker compose down -v removes both containers AND volumes
+    console.log('   Cleaning up orphan volumes (if any)...');
+    try {
+      await execAsync('docker compose down -v', { cwd: projectPath });
+    } catch {
+      // Ignore errors - volume might not exist
+    }
+
     // Start Docker Compose with explicit env vars
     console.log('   Starting Docker Compose...');
     try {
