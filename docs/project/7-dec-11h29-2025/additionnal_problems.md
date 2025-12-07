@@ -3,10 +3,10 @@
 ## 🔄 À UNIFIER
 
 ### 1. AgentProjectContext (CLI) et LoadedProject → même structure
-**Status**: EN COURS dans Phase 5
+**Status**: ✅ RÉSOLU dans Phase 5
 - `AgentProjectContext` dans `packages/cli/src/commands/agent.ts`
 - `LoadedProject` dans `packages/core/src/runtime/projects/project-registry.ts`
-- Solution: `AgentProjectContext` contient maintenant un `ProjectRegistry` et `syncContextFromRegistry()` synchronise les champs
+- Solution implémentée: `AgentProjectContext` contient un `ProjectRegistry` et `syncContextFromRegistry()` synchronise les champs
 
 ### 2. Création Neo4jClient dispersée
 **Locations**:

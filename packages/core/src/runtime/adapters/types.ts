@@ -7,13 +7,25 @@
 
 /**
  * Configuration for a source to be parsed
+ *
+ * Supports multiple source types with auto-detection:
+ * - 'files': Local files (code, documents, media) - parser auto-detected by extension
+ * - 'database': Database (PostgreSQL, Neo4j, MongoDB, etc.)
+ * - 'api': REST/GraphQL API
+ * - 'web': Web pages (crawler)
  */
 export interface SourceConfig {
-  /** Type of source (code, documents, database, api) */
-  type: string;
+  /**
+   * Type of source to ingest
+   * Legacy 'code' and 'document' types are mapped to 'files'
+   */
+  type: 'files' | 'database' | 'api' | 'web' | 'code' | 'document' | string;
 
-  /** Specific adapter to use for this source type */
-  adapter: string;
+  /**
+   * @deprecated Adapter is now auto-detected based on file extension.
+   * Kept for backward compatibility but ignored.
+   */
+  adapter?: string;
 
   /** Root directory or path to source */
   root?: string;
@@ -26,6 +38,31 @@ export interface SourceConfig {
 
   /** Track changes and store diffs in Neo4j (default: false) */
   track_changes?: boolean;
+
+  /** Database connection (for type: 'database') */
+  connection?: {
+    driver?: string;
+    uri: string;
+    tables?: string[];
+    excludeTables?: string[];
+  };
+
+  /** API config (for type: 'api') */
+  api?: {
+    baseUrl: string;
+    endpoints?: string[];
+    headers?: Record<string, string>;
+    format?: string;
+  };
+
+  /** Web crawler config (for type: 'web') */
+  web?: {
+    url: string;
+    depth?: number;
+    maxPages?: number;
+    includePatterns?: string[];
+    excludePatterns?: string[];
+  };
 
   /** Adapter-specific options */
   options?: Record<string, any>;

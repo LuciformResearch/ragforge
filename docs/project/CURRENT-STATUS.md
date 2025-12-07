@@ -1,4 +1,13 @@
-# RagForge - État Actuel (5 décembre 2025)
+# RagForge - État Actuel
+
+> **Note**: Ce document est un snapshot du 5 décembre 2025. Pour l'état actuel, voir:
+> - [7-dec-11h29-2025/README.md](./7-dec-11h29-2025/README.md) - Session du 7 décembre
+> - [7-dec-11h29-2025/ROADMAP-AGENT-BRAIN.md](./7-dec-11h29-2025/ROADMAP-AGENT-BRAIN.md) - Brain architecture
+> - [MEDIA-TOOLS.md](./MEDIA-TOOLS.md) - Media tools (à jour)
+
+---
+
+# Archive: État au 5 décembre 2025
 
 ## Merge Accompli !
 

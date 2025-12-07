@@ -123,6 +123,24 @@ export interface RelationshipMetadata {
 }
 
 /**
+ * Property schema with optional flag
+ */
+export interface ToolPropertySchema {
+  /** Property type (optional when using oneOf/anyOf) */
+  type?: string;
+  description?: string;
+  enum?: string[];
+  items?: any;
+  default?: any;
+  /** For union types */
+  oneOf?: any[];
+  anyOf?: any[];
+  /** Mark this property as optional (will be added to description) */
+  optional?: boolean;
+  [key: string]: any;
+}
+
+/**
  * Generated tool definition (before handler attachment)
  */
 export interface GeneratedToolDefinition {
@@ -130,9 +148,53 @@ export interface GeneratedToolDefinition {
   description: string;
   inputSchema: {
     type: 'object';
-    properties: Record<string, any>;
+    properties: Record<string, ToolPropertySchema>;
     required?: string[];
   };
+}
+
+/**
+ * Process a tool definition to enrich descriptions with "(optional)" markers.
+ * This should be called before sending tool definitions to the LLM API.
+ *
+ * @param tool - Tool definition with optional markers
+ * @returns Processed tool definition with enriched descriptions
+ */
+export function processToolSchema(tool: GeneratedToolDefinition): GeneratedToolDefinition {
+  const requiredFields = new Set(tool.inputSchema.required || []);
+  const processedProperties: Record<string, ToolPropertySchema> = {};
+
+  for (const [name, prop] of Object.entries(tool.inputSchema.properties)) {
+    const isRequired = requiredFields.has(name);
+    const isOptional = prop.optional === true || !isRequired;
+
+    // Clone the property without the 'optional' field
+    const { optional: _optional, ...cleanProp } = prop;
+
+    // Enrich description if optional
+    if (isOptional && cleanProp.description) {
+      cleanProp.description = `(optional) ${cleanProp.description}`;
+    } else if (isOptional && !cleanProp.description) {
+      cleanProp.description = '(optional)';
+    }
+
+    processedProperties[name] = cleanProp;
+  }
+
+  return {
+    ...tool,
+    inputSchema: {
+      ...tool.inputSchema,
+      properties: processedProperties,
+    },
+  };
+}
+
+/**
+ * Process multiple tool definitions
+ */
+export function processToolSchemas(tools: GeneratedToolDefinition[]): GeneratedToolDefinition[] {
+  return tools.map(processToolSchema);
 }
 
 /**

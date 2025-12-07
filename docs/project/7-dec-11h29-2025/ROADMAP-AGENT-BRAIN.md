@@ -1,7 +1,7 @@
 # Roadmap: Agent Brain Architecture
 
 **Created**: 2025-12-07 11:29
-**Status**: Planning
+**Status**: ✅ Phase 1-4 Done
 **Author**: Lucie Defraiteur
 **Related**: [ROADMAP-AGENT-INTEGRATION.md](./ROADMAP-AGENT-INTEGRATION.md)
 
@@ -347,72 +347,91 @@ Returns results from all known sources.`,
 
 ---
 
-## Phase 4: Web Knowledge
+## Phase 4: Web Knowledge ✅ IMPLEMENTED
 
-### 4.1 Web Crawl & Ingest
+### 4.1 Architecture: Agent-Controlled Web Ingestion
+
+Plutôt qu'un crawler automatique, l'agent contrôle explicitement ce qu'il veut ingérer.
+
+**Fichiers implémentés:**
+- `tools/web-tools.ts` - `fetch_web_page` avec cache LRU
+- `tools/brain-tools.ts` - `ingest_web_page` pour mémoire long-terme
+- `brain/brain-manager.ts` - `ingestWebPage()` avec MERGE Neo4j
+
+### 4.2 Cache LRU (Mémoire Court-Terme)
 
 ```typescript
-// packages/core/src/brain/web-crawler.ts
+// web-tools.ts
+export class WebFetchCache {
+  private cache: Map<string, CachedFetchResult> = new Map();
+  private order: string[] = [];  // LRU tracking
 
-interface WebCrawlOptions {
+  // Garde les 6 dernières pages en mémoire
+  // Utilisé par fetch_web_page et ingest_web_page
+}
+```
+
+### 4.3 Tool: fetch_web_page
+
+```typescript
+// Paramètres supportés:
+interface FetchWebPageParams {
   url: string;
-  depth?: number;           // Combien de niveaux de liens suivre
-  maxPages?: number;        // Limite de pages
-  includePatterns?: string[]; // URLs à inclure
-  excludePatterns?: string[]; // URLs à exclure
+  extractText?: boolean;      // default: true
+  extractLinks?: boolean;     // default: false (auto si depth > 0)
+  extractImages?: boolean;
+  screenshot?: boolean;
+  waitFor?: 'load' | 'domcontentloaded' | 'networkidle';
+  force?: boolean;            // bypass cache
+  ingest?: boolean;           // ingérer direct après fetch
+  projectName?: string;
+  depth?: number;             // 0=page unique, 1+=suivre liens
+  maxPages?: number;          // défaut: 10
+  includePatterns?: string[]; // regex pour filtrer URLs
+  excludePatterns?: string[];
 }
 
-async function crawlAndIngest(options: WebCrawlOptions): Promise<CrawlResult> {
-  const pages: WebPage[] = [];
-
-  // 1. Crawler avec Playwright
-  for await (const page of crawl(options)) {
-    // 2. Extraire contenu (HTML → Markdown)
-    const content = await extractContent(page.html);
-
-    // 3. Créer nodes
-    pages.push({
-      url: page.url,
-      title: page.title,
-      content: content.markdown,
-      links: content.links,
-      lastCrawled: new Date()
-    });
-  }
-
-  // 4. Ingérer dans le brain avec namespace web:
-  await brain.ingestWeb(options.url, pages);
-
-  return { pagesIngested: pages.length };
+// Résultat avec children si depth > 0
+interface FetchWebPageResult {
+  url: string;
+  title: string;
+  textContent?: string;
+  children?: FetchWebPageResult[];  // pages enfants
+  totalPagesFetched?: number;
+  // ...
 }
 ```
 
-### 4.2 Agent Tool: explore_web
+### 4.4 Tool: ingest_web_page
 
 ```typescript
-const exploreWebTool = {
-  name: 'explore_web',
-  description: `Crawl and ingest web pages into the agent's knowledge base.
+// Mêmes params depth/maxPages/patterns que fetch_web_page
+// + generate_embeddings pour recherche sémantique
 
-After crawling, the content becomes searchable via brain_search.
-
-Parameters:
-- url: Starting URL to crawl
-- depth: How many link levels to follow (default: 1)
-- max_pages: Maximum pages to crawl (default: 10)
-
-Example: explore_web({ url: "https://docs.python.org/3/library/asyncio.html", depth: 2 })`,
-  inputSchema: {
-    type: 'object',
-    properties: {
-      url: { type: 'string' },
-      depth: { type: 'number' },
-      max_pages: { type: 'number' }
-    },
-    required: ['url']
-  }
-};
+// Résultat:
+{
+  success: true,
+  url: "https://...",
+  pagesIngested: 5,
+  children: [{ url, title, nodeId }, ...]
+}
 ```
+
+### 4.5 UUID Déterministe
+
+```typescript
+// brain-manager.ts
+const nodeId = UniqueIDHelper.GenerateDeterministicUUID(params.url);
+
+// Même URL = même node (MERGE au lieu de CREATE)
+// Permet mise à jour sans dupliquer
+```
+
+### 4.6 Sécurité
+
+- Reste sur le même domaine uniquement (safety)
+- `maxPages` limite le nombre de requêtes
+- Patterns regex pour filtrer URLs
 
 ---
 
@@ -498,33 +517,37 @@ agent:
 
 ## Implementation Priority
 
-### Sprint 1: Brain Foundation
-1. `BrainManager` class avec Neo4j singleton
-2. `projects.yaml` registry
-3. `ragforge brain init/status` CLI
-4. Context resolution (project vs quick-ingest)
+### Sprint 1: Brain Foundation ✅ DONE
+1. ✅ `BrainManager` class avec Neo4j singleton (`brain/brain-manager.ts`)
+2. ✅ `ProjectRegistry` dans `runtime/projects/` (alternative à projects.yaml)
+3. ⏳ `ragforge brain init/status` CLI (à venir)
+4. ✅ Context resolution (project vs quick-ingest)
 
-### Sprint 2: Quick Ingest
-5. `ingest_directory` tool & CLI
-6. Auto-detect file types
-7. Subdir-of-project handling
-8. `.ragforge/brain-link.yaml` marker
+### Sprint 2: Quick Ingest ✅ DONE
+5. ✅ `ingest_directory` tool (`tools/brain-tools.ts`)
+6. ✅ Auto-detect file types via `UniversalSourceAdapter`
+7. ✅ Subdir-of-project handling
+8. ⏳ `.ragforge/brain-link.yaml` marker (à venir)
 
-### Sprint 3: Unified Search
-9. Cross-project semantic search
-10. `brain_search` tool
-11. Result ranking across sources
+### Sprint 3: Unified Search ✅ DONE
+9. ✅ Cross-project semantic search
+10. ✅ `brain_search` tool
+11. ✅ Result ranking across sources
 
-### Sprint 4: Web Knowledge
-12. Web crawler with Playwright
-13. `explore_web` tool
-14. Web content → nodes pipeline
+### Sprint 4: Web Knowledge ✅ DONE
+12. ✅ Web fetch with Playwright (`web-tools.ts`)
+13. ✅ `fetch_web_page` tool avec cache LRU (6 pages)
+14. ✅ `ingest_web_page` tool pour mémoire long-terme
+15. ✅ WebPage nodes avec UUID déterministe
+16. ✅ Option `ingest: true` sur fetch pour ingestion directe
+17. ✅ **Crawl récursif**: params `depth`, `maxPages`, `includePatterns`, `excludePatterns`
+18. ✅ Sécurité: reste sur même domaine uniquement
 
-### Sprint 5: Polish
-15. Conversation memory (optional)
-16. Garbage collection
-17. Cost tracking
-18. Agent config/preferences
+### Sprint 5: Polish (À VENIR)
+17. ⏳ Conversation memory (optional)
+18. ✅ Garbage collection (`forget_path` tool)
+19. ⏳ Cost tracking
+20. ⏳ Agent config/preferences
 
 ---
 

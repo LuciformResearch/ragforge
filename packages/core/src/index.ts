@@ -151,6 +151,41 @@ export {
 } from './tools/ingestion-lock.js';
 export type { IngestionStatus, IngestionLockOptions } from './tools/ingestion-lock.js';
 
+// Brain Tools (persistent knowledge base)
+export {
+  generateBrainTools,
+  generateBrainToolHandlers,
+  generateIngestDirectoryTool,
+  generateIngestDirectoryHandler,
+  generateBrainSearchTool,
+  generateBrainSearchHandler,
+  generateForgetPathTool,
+  generateForgetPathHandler,
+  generateListBrainProjectsTool,
+  generateListBrainProjectsHandler,
+} from './tools/brain-tools.js';
+export type { BrainToolsContext } from './tools/brain-tools.js';
+
+// Database Tools (query external databases)
+export {
+  generateDatabaseTools,
+  generateDatabaseToolHandlers,
+  generateQueryDatabaseTool,
+  generateQueryDatabaseHandler,
+  generateDescribeTableTool,
+  generateDescribeTableHandler,
+  generateListTablesTool,
+  generateListTablesHandler,
+  createDatabaseToolsContext,
+  addDatabaseConnection,
+  executeQuery,
+} from './tools/database-tools.js';
+export type {
+  DatabaseConnection,
+  DatabaseToolsContext,
+  QueryResult,
+} from './tools/database-tools.js';
+
 // Computed Fields (Phase 3)
 export {
   evaluateComputedField,
@@ -178,6 +213,11 @@ export * from './database/index.js';
 // Runtime (merged from @luciformresearch/ragforge-runtime)
 // ============================================
 export * from './runtime/index.js';
+
+// ============================================
+// Brain (persistent knowledge management)
+// ============================================
+export * from './brain/index.js';
 
 // ============================================
 // Utilities

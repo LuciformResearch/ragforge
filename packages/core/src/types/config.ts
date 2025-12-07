@@ -327,19 +327,42 @@ export interface EmbeddingRelationshipConfig {
 }
 
 /**
- * Configuration for source ingestion (code or documents)
+ * Configuration for source ingestion
+ *
+ * Supports multiple source types with auto-detection:
+ * - 'files': Local files (code, documents, media) - parser auto-detected by extension
+ * - 'database': Database (PostgreSQL, Neo4j, MongoDB, etc.)
+ * - 'api': REST/GraphQL API
+ * - 'web': Web pages (crawler)
+ *
+ * Legacy types 'code' and 'document' are mapped to 'files' for backward compatibility.
  */
 export interface SourceConfig {
-  /** Type of source to ingest */
-  type: 'code' | 'document';
+  /**
+   * Type of source to ingest
+   * - 'files': Local files with auto-detection (replaces 'code' and 'document')
+   * - 'database': Database connection
+   * - 'api': REST/GraphQL API
+   * - 'web': Web crawler
+   * - 'code': (deprecated) Maps to 'files'
+   * - 'document': (deprecated) Maps to 'files'
+   */
+  type: 'files' | 'database' | 'api' | 'web' | 'code' | 'document';
 
-  /** Adapter to use for parsing */
-  adapter: 'typescript' | 'python' | 'tika';
+  /**
+   * @deprecated Adapter is now auto-detected based on file extension.
+   * Kept for backward compatibility but ignored.
+   */
+  adapter?: 'typescript' | 'python' | 'tika' | string;
+
+  // ============================================
+  // Options for type: 'files' (or legacy 'code'/'document')
+  // ============================================
 
   /** Base path for resolving relative paths (optional, defaults to project root) */
   root?: string;
 
-  /** Glob patterns to include (relative to root). Optional - defaults come from adapter YAML config. */
+  /** Glob patterns to include (relative to root). Auto-detected if omitted. */
   include?: string[];
 
   /** Glob patterns to exclude (optional) */
@@ -347,6 +370,56 @@ export interface SourceConfig {
 
   /** Track changes and store diffs in Neo4j (default: false) */
   track_changes?: boolean;
+
+  // ============================================
+  // Options for type: 'database'
+  // ============================================
+
+  /** Database connection configuration */
+  connection?: {
+    /** Driver (auto-detected from URI if possible) */
+    driver?: 'postgresql' | 'neo4j' | 'mysql' | 'mongodb' | 'sqlite';
+    /** Connection URI */
+    uri: string;
+    /** Tables/collections to include (all if omitted) */
+    tables?: string[];
+    /** Tables/collections to exclude */
+    excludeTables?: string[];
+  };
+
+  // ============================================
+  // Options for type: 'api'
+  // ============================================
+
+  /** API configuration */
+  api?: {
+    /** Base URL */
+    baseUrl: string;
+    /** Endpoints to ingest */
+    endpoints?: string[];
+    /** Authentication headers */
+    headers?: Record<string, string>;
+    /** API format */
+    format?: 'rest' | 'graphql' | 'openapi';
+  };
+
+  // ============================================
+  // Options for type: 'web'
+  // ============================================
+
+  /** Web crawler configuration */
+  web?: {
+    /** Starting URL */
+    url: string;
+    /** Crawl depth (default: 1) */
+    depth?: number;
+    /** Maximum pages to crawl (default: 10) */
+    maxPages?: number;
+    /** URL patterns to include */
+    includePatterns?: string[];
+    /** URL patterns to exclude */
+    excludePatterns?: string[];
+  };
 
   /** Additional options passed to the adapter */
   options?: SourceAdapterOptions;

@@ -27,3 +27,5 @@ export * from './incremental-ingestion.js';
 export * from './ingestion-queue.js';
 export * from './file-watcher.js';
 export * from './change-tracker.js';
+export * from './universal-source-adapter.js';
+export * from './database-adapter.js';

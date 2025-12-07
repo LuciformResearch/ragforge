@@ -1,7 +1,7 @@
 # Roadmap: Agent Integration & Real-time Ingestion
 
 **Created**: 2025-12-07
-**Status**: In Progress (Phase 5)
+**Status**: ✅ Done (Phase 1-5)
 **Author**: Lucie Defraiteur
 
 ---
@@ -15,7 +15,7 @@
 | Phase 3: Embedding Auto-Trigger | ✅ Done | afterIngestion callback in IngestionQueue, uses runEmbeddingPipelines |
 | Phase 4: Deletion Cascade | ✅ Done | deleteNodesForFile/Files in IncrementalIngestionManager, pendingDeletes queue |
 | Phase 5: Multi-Project Registry | ✅ Done | ProjectRegistry + tools + agent.ts integration + syncContextFromRegistry |
-| Phase 6: Quick Directory Ingestion | ⏳ Pending | |
+| Phase 6: Quick Directory Ingestion | ✅ Done | ingest_directory tool in brain-tools.ts, BrainManager.quickIngest() |
 | Phase 7: Testing | ⏳ Pending | |
 
 ---
