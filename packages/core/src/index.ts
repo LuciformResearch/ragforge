@@ -186,6 +186,62 @@ export type {
   QueryResult,
 } from './tools/database-tools.js';
 
+// FS Helpers (file system operations)
+export * from './tools/fs-helpers.js';
+
+// FS Tools (file system agent tools)
+export {
+  generateFsTools,
+  generateListDirectoryTool,
+  generateListDirectoryHandler,
+  generateGlobFilesTool,
+  generateGlobFilesHandler,
+  generateFileExistsTool,
+  generateFileExistsHandler,
+  generateGetFileInfoTool,
+  generateGetFileInfoHandler,
+  generateDeletePathTool,
+  generateDeletePathHandler,
+  generateMoveFileTool,
+  generateMoveFileHandler,
+  generateCopyFileTool,
+  generateCopyFileHandler,
+  generateCreateDirectoryTool,
+  generateCreateDirectoryHandler,
+} from './tools/fs-tools.js';
+export type { FsToolsContext, FsToolsResult } from './tools/fs-tools.js';
+
+// Shell Helpers (command execution with validation)
+export * from './tools/shell-helpers.js';
+
+// Shell Tools (shell command agent tools)
+export {
+  generateShellTools,
+  generateRunCommandTool,
+  generateRunCommandHandler,
+  generateRunNpmScriptTool,
+  generateRunNpmScriptHandler,
+  generateGitStatusTool,
+  generateGitStatusHandler,
+  generateGitDiffTool,
+  generateGitDiffHandler,
+  generateListSafeCommandsTool,
+  generateListSafeCommandsHandler,
+} from './tools/shell-tools.js';
+export type { ShellToolsContext, ShellToolsResult } from './tools/shell-tools.js';
+
+// Context Tools (environment and project info)
+export {
+  generateContextTools,
+  generateGetWorkingDirectoryTool,
+  generateGetWorkingDirectoryHandler,
+  generateGetEnvironmentInfoTool,
+  generateGetEnvironmentInfoHandler,
+  generateGetProjectInfoTool,
+  generateGetProjectInfoHandler,
+} from './tools/context-tools.js';
+export type { ContextToolsContext, ContextToolsResult } from './tools/context-tools.js';
+
 // Computed Fields (Phase 3)
 export {
   evaluateComputedField,

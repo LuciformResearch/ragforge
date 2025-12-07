@@ -21,8 +21,8 @@
  * ```
  */
 
-import { generateToolsFromConfig, generateFileTools, generateImageTools, generate3DTools, generateProjectTools, generateProjectManagementTools, IngestionLock, withIngestionLock, webToolDefinitions, createWebToolHandlers } from '../../index.js';
-import type { ToolGenerationOptions, GeneratedToolDefinition, ToolHandlerGenerator, RagForgeConfig, FileToolsContext, ImageToolsContext, ThreeDToolsContext, ProjectToolsContext, WebToolsContext, ProjectManagementContext } from '../../index.js';
+import { generateToolsFromConfig, generateFileTools, generateImageTools, generate3DTools, generateProjectTools, generateProjectManagementTools, IngestionLock, withIngestionLock, webToolDefinitions, createWebToolHandlers, generateFsTools, generateShellTools, generateContextTools } from '../../index.js';
+import type { ToolGenerationOptions, GeneratedToolDefinition, ToolHandlerGenerator, RagForgeConfig, FileToolsContext, ImageToolsContext, ThreeDToolsContext, ProjectToolsContext, WebToolsContext, ProjectManagementContext, FsToolsContext, ShellToolsContext, ContextToolsContext } from '../../index.js';
 import { generatePlanActionsTool, type ActionPlan, type PlanExecutionResult } from '../../tools/planning-tools.js';
 import { formatLocalDate, getFilenameTimestamp } from '../utils/timestamp.js';
 import { StructuredLLMExecutor, BaseToolExecutor, type ToolCallRequest, type ToolExecutionResult } from '../llm/structured-llm-executor.js';
@@ -487,6 +487,34 @@ export interface RagAgentOptions {
    * Required if includeProjectManagementTools is true
    */
   projectManagementContext?: import('../../tools/project-management-tools.js').ProjectManagementContext;
+
+  /**
+   * Include file system tools (list_directory, glob_files, delete_path, move_file, copy_file, etc.)
+   * Enables the agent to explore and manipulate the file system
+   * Default: true (recommended - essential for autonomous operation)
+   */
+  includeFsTools?: boolean;
+
+  /**
+   * Include shell tools (run_command, run_npm_script, git_status, git_diff)
+   * Enables the agent to execute shell commands (with safety whitelist)
+   * Default: true (recommended - essential for build/test/git operations)
+   */
+  includeShellTools?: boolean;
+
+  /**
+   * Callback for shell commands requiring user confirmation
+   * Called when a command matches CONFIRMATION_REQUIRED patterns (git push, rm, mv)
+   * If not provided, confirmation-required commands will be blocked
+   */
+  onShellConfirmation?: (command: string, reason: string) => Promise<boolean>;
+
+  /**
+   * Include context tools (get_working_directory, get_environment_info, get_project_info)
+   * Enables the agent to understand its execution context
+   * Default: true (recommended - helps agent understand where it is)
+   */
+  includeContextTools?: boolean;
 }
 
 export interface AskResult {
@@ -1244,7 +1272,89 @@ export async function createRagAgent(options: RagAgentOptions): Promise<RagAgent
     }
   }
 
-  // 3f. Add planning tools (enabled by default)
+  // 3f. Add file system tools (enabled by default)
+  if (options.includeFsTools !== false) {
+    const fsCtx: FsToolsContext = {
+      projectRoot: options.projectRoot || process.cwd,
+      onFileDeleted: options.onFileModified
+        ? async (filePath: string) => { await options.onFileModified!(filePath, 'deleted'); }
+        : undefined,
+      onFileMoved: options.onFileModified
+        ? async (source: string, destination: string) => {
+            await options.onFileModified!(source, 'deleted');
+            await options.onFileModified!(destination, 'created');
+          }
+        : undefined,
+    };
+
+    const fsTools = generateFsTools(fsCtx);
+    tools.push(...fsTools.tools);
+    Object.assign(boundHandlers, fsTools.handlers);
+
+    if (options.verbose) {
+      console.log(`   📂 FS tools enabled (${fsTools.tools.length} tools: list_directory, glob_files, delete_path, move_file, copy_file, etc.)`);
+    }
+  }
+
+  // 3g. Add shell tools (enabled by default)
+  if (options.includeShellTools !== false) {
+    const shellCtx: ShellToolsContext = {
+      projectRoot: options.projectRoot || process.cwd,
+      onConfirmationRequired: options.onShellConfirmation,
+    };
+
+    const shellTools = generateShellTools(shellCtx);
+    tools.push(...shellTools.tools);
+    Object.assign(boundHandlers, shellTools.handlers);
+
+    if (options.verbose) {
+      console.log(`   🖥️  Shell tools enabled (${shellTools.tools.length} tools: run_command, run_npm_script, git_status, git_diff)`);
+    }
+  }
+
+  // 3h. Add context tools (enabled by default)
+  if (options.includeContextTools !== false) {
+    // Resolve dynamic values for context
+    const getProjectRoot = (): string | null => {
+      if (typeof options.projectRoot === 'function') {
+        return options.projectRoot();
+      }
+      return options.projectRoot || null;
+    };
+
+    const contextCtx: ContextToolsContext = {
+      projectRoot: getProjectRoot,
+      isProjectLoaded: () => !!getProjectRoot(),
+      projectName: () => {
+        // Try to get project name from loaded projects or path
+        const root = getProjectRoot();
+        if (!root) return null;
+        const path = require('path');
+        return path.basename(root);
+      },
+      getLoadedProjects: options.projectManagementContext?.registry
+        ? () => {
+            const projects = options.projectManagementContext!.registry.getAll();
+            const active = options.projectManagementContext!.registry.getActive();
+            return projects.map((p) => ({
+              id: p.id,
+              path: p.path,
+              active: p.id === active?.id,
+            }));
+          }
+        : undefined,
+    };
+
+    const contextTools = generateContextTools(contextCtx);
+    tools.push(...contextTools.tools);
+    Object.assign(boundHandlers, contextTools.handlers);
+
+    if (options.verbose) {
+      console.log(`   ℹ️  Context tools enabled (${contextTools.tools.length} tools: get_working_directory, get_environment_info, get_project_info)`);
+    }
+  }
+
+  // 3i. Add planning tools (enabled by default)
   if (options.includePlanningTools !== false) {
     const planTool = generatePlanActionsTool();
     tools.push(planTool.definition);
