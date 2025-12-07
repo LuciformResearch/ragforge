@@ -1,6 +1,6 @@
 # Media Tools - Images & 3D Assets
 
-**Last Updated**: 2025-12-05
+**Last Updated**: 2025-12-06
 **Status**: Working
 **Author**: Lucie Defraiteur
 
@@ -40,10 +40,11 @@ These tools are designed to help the agent work on visual/3D projects like Three
 ├─────────────────────────────────────────────────────────────┤
 │                                                              │
 │  IMAGE TOOLS (ragforge-core)                                │
-│  ├── read_image      - OCR text extraction                  │
-│  ├── describe_image  - Visual description (Gemini Vision)  │
-│  ├── list_images     - List image files                     │
-│  └── generate_image  - Text → Image (Gemini)               │
+│  ├── read_image             - OCR text extraction           │
+│  ├── describe_image         - Visual description (Gemini)   │
+│  ├── list_images            - List image files              │
+│  ├── generate_image         - Text → Image (Gemini)         │
+│  └── generate_multiview_images - 4 coherent views for 3D   │
 │                                                              │
 │  3D TOOLS (ragforge-core)                                   │
 │  ├── render_3d_asset       - Render model to images         │
@@ -60,7 +61,7 @@ These tools are designed to help the agent work on visual/3D projects like Three
 │  └── Gemini Vision (GEMINI_API_KEY)                         │
 │                                                              │
 │  Image Generation:                                          │
-│  └── Gemini 2.0 Flash (GEMINI_API_KEY)                     │
+│  └── gemini-2.5-flash-image-preview (GEMINI_API_KEY)       │
 │                                                              │
 │  3D Generation:                                             │
 │  └── firtoz/trellis (Images → 3D) - Replicate              │
@@ -130,9 +131,9 @@ List image files in a directory.
 }
 ```
 
-### generate_image ✨ NEW
+### generate_image
 
-Generate an image from a text prompt using Gemini.
+Generate an image from a text prompt using Gemini (`gemini-2.5-flash-image-preview`).
 
 ```typescript
 {
@@ -151,6 +152,44 @@ const result = await tools.generate_image({
 });
 // Returns: { output_path: "assets/robot-mascot.png", processing_time_ms: 3500 }
 ```
+
+### generate_multiview_images ✨ NEW
+
+Generate 4 coherent view images from a text description, optimized for 3D reconstruction.
+
+Uses a **prompt enhancer** (`gemini-2.0-flash` + `StructuredLLMExecutor`) to generate consistent prompts for all 4 views, then generates images with `gemini-2.5-flash-image-preview`.
+
+```typescript
+{
+  name: 'generate_multiview_images',
+  inputSchema: {
+    prompt: string,       // Object description
+    output_dir: string,   // Directory for 4 images
+    style?: '3d_render' | 'realistic' | 'cartoon' | 'lowpoly'
+  }
+}
+
+// Example
+const result = await tools.generate_multiview_images({
+  prompt: 'A yellow rubber duck toy',
+  output_dir: 'temp/duck-views',
+  style: '3d_render'
+});
+// Returns: {
+//   images: [
+//     { view: 'front', path: 'temp/duck-views/front.png' },
+//     { view: 'right', path: 'temp/duck-views/right.png' },
+//     { view: 'top', path: 'temp/duck-views/top.png' },
+//     { view: 'perspective', path: 'temp/duck-views/perspective.png' }
+//   ],
+//   view_prompts: { front: "...", right: "...", ... }
+// }
+```
+
+**How it works:**
+1. Prompt enhancer analyzes your description and creates a canonical object description
+2. Generates 4 view-specific prompts with consistent style, colors, and details
+3. Generates all 4 images in parallel
 
 ---
 
@@ -246,11 +285,52 @@ const result = await tools.generate_3d_from_image({
 
 ## Text-to-3D Workflow
 
-Since pure text-to-3D models (like MVDream) are expensive, we recommend a two-step workflow:
+### Recommended: Use `generate_multiview_images` + `generate_3d_from_image`
 
-### Step 1: Generate Views with Gemini
+This is the **recommended workflow** (~$0.11 total cost):
 
-Use `generate_image` to create multiple views from a text description:
+```typescript
+// Step 1: Generate 4 coherent views with prompt enhancer
+const views = await tools.generate_multiview_images({
+  prompt: 'A yellow rubber duck toy',
+  output_dir: 'temp/duck-views',
+  style: '3d_render'
+});
+
+// Step 2: Convert to 3D with Trellis
+const model = await tools.generate_3d_from_image({
+  image_paths: [
+    'temp/duck-views/front.png',
+    'temp/duck-views/right.png',
+    'temp/duck-views/top.png',
+    'temp/duck-views/perspective.png'
+  ],
+  output_path: 'assets/models/duck.glb'
+});
+```
+
+### `generate_3d_from_text` (refactored ✅)
+
+> **Now uses multiview + Trellis internally** (~$0.11 vs ~$3 for old MVDream)
+
+This tool now automatically:
+1. Calls `generate_multiview_images` to create 4 coherent views
+2. Calls `generate_3d_from_image` to convert to GLB
+
+```typescript
+// Simple one-step API
+const result = await tools.generate_3d_from_text({
+  prompt: 'A yellow rubber duck toy',
+  output_path: 'assets/models/duck.glb',
+  style: '3d_render'  // or 'realistic', 'cartoon', 'lowpoly'
+});
+// Processing time: ~3-4 minutes
+// Cost: ~$0.11
+```
+
+### Manual Workflow (alternative)
+
+If you need more control, you can manually generate views:
 
 ```typescript
 // Generate front view
@@ -270,31 +350,15 @@ await tools.generate_image({
   prompt: 'A yellow rubber duck toy, top-down view, white background, 3D render style',
   output_path: 'temp/duck_top.png'
 });
-```
 
-### Step 2: Reconstruct 3D with Trellis
-
-Pass the generated views to Trellis:
-
-```typescript
+// Then reconstruct with Trellis
 const result = await tools.generate_3d_from_image({
-  image_paths: [
-    'temp/duck_front.png',
-    'temp/duck_right.png',
-    'temp/duck_top.png'
-  ],
+  image_paths: ['temp/duck_front.png', 'temp/duck_right.png', 'temp/duck_top.png'],
   output_path: 'assets/models/duck.glb'
 });
 ```
 
-### Prompt Tips for Multi-View Generation
-
-For consistent multi-view images:
-- Always specify "white background" or "transparent background"
-- Use "3D render style" or "clean render" for consistent look
-- Be explicit about the view: "front view", "side view from right", "top-down view"
-- Keep object centered: "centered in frame"
-- Maintain style consistency across all prompts
+> **Tip:** Use `generate_multiview_images` instead - it uses a prompt enhancer to ensure all views are consistent in style, colors, and proportions.
 
 ---
 
@@ -305,9 +369,11 @@ For consistent multi-view images:
 | read_image | ✅ Done | Gemini Vision |
 | describe_image | ✅ Done | Gemini Vision |
 | list_images | ✅ Done | Local |
-| generate_image | ✅ Done | Gemini 2.0 Flash |
+| generate_image | ✅ Done | `gemini-2.5-flash-image-preview` |
+| generate_multiview_images | ✅ Done | `gemini-2.0-flash` (enhancer) + `gemini-2.5-flash-image-preview` |
 | render_3d_asset | ✅ Done | Three.js/Playwright |
 | generate_3d_from_image | ✅ Done | Replicate/Trellis |
+| generate_3d_from_text | ✅ Refactored | multiview + Trellis (~$0.11) |
 
 ---
 
@@ -337,7 +403,7 @@ const agent = await createRagAgent({
 });
 
 // Agent now has access to:
-// - read_image, describe_image, list_images, generate_image
+// - read_image, describe_image, list_images, generate_image, generate_multiview_images
 // - render_3d_asset, generate_3d_from_image
 ```
 
@@ -347,16 +413,25 @@ const agent = await createRagAgent({
 
 | Tool | Cost | Notes |
 |------|------|-------|
-| generate_image | ~$0.002/image | Gemini pricing |
+| generate_image | ~$0.002/image | `gemini-2.5-flash-image-preview` |
+| generate_multiview_images | ~$0.01/call | 4 images + prompt enhancer |
 | generate_3d_from_image | ~$0.10/run | Trellis on Replicate |
+| generate_3d_from_text | ~$0.11/model | Uses multiview + Trellis internally |
 | render_3d_asset | Free | Local Three.js |
 | read_image / describe_image | ~$0.001/call | Gemini Vision |
 
-The text-to-3D workflow (Gemini + Trellis) costs ~$0.11 total vs $3+ for dedicated text-to-3D models.
+### Text-to-3D Options
+
+| Method | Cost | Notes |
+|--------|------|-------|
+| `generate_3d_from_text` | **~$0.11** | Simple one-step API |
+| `generate_multiview_images` + `generate_3d_from_image` | **~$0.11** | More control over steps |
+| ~~MVDream (old)~~ | ~~$3.00~~ | **Removed** - 27x more expensive |
 
 ---
 
 ## Related Documents
 
+- [UNIVERSAL-FILE-INGESTION.md](./UNIVERSAL-FILE-INGESTION.md) - Universal file ingestion (code, data, media)
 - [PROJECT-OVERVIEW.md](./PROJECT-OVERVIEW.md) - Full project context
 - [AGENT-TESTING.md](./AGENT-TESTING.md) - Testing the code agent

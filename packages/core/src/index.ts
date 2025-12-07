@@ -114,6 +114,23 @@ export type {
   ProjectToolResult,
 } from './tools/project-tools.js';
 
+// Web Tools (search web, fetch web pages)
+export {
+  webToolDefinitions,
+  searchWebToolDefinition,
+  fetchWebPageToolDefinition,
+  createWebToolHandlers,
+  createSearchWebHandler,
+  createFetchWebPageHandler,
+} from './tools/web-tools.js';
+export type {
+  WebToolsContext,
+  WebSearchParams,
+  WebSearchResult,
+  FetchWebPageParams,
+  FetchWebPageResult,
+} from './tools/web-tools.js';
+
 // Ingestion Lock (coordinate file tools with RAG queries)
 export {
   IngestionLock,

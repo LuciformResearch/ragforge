@@ -132,29 +132,32 @@ Example with multiple views (better quality):
 
 /**
  * Generate generate_3d_from_text tool
+ *
+ * Internally uses generate_multiview_images + generate_3d_from_image (~$0.11 total)
  */
 export function generateGenerate3DFromTextTool(): GeneratedToolDefinition {
   return {
     name: 'generate_3d_from_text',
     description: `Generate a 3D model from a text description.
 
-Uses MVDream (via Replicate) to create 3D models from text prompts.
-Good for generating assets when you don't have reference images.
+This tool automatically:
+1. Generates 4 coherent view images using Gemini (with prompt enhancer)
+2. Converts them to a 3D GLB model using Trellis
+
+Total cost: ~$0.11 per model. Processing time: ~3-4 minutes.
 
 Parameters:
 - prompt: Text description of the 3D model to generate
 - output_path: Where to save the generated .glb model
-- format: Output format ('glb' or 'obj', default: 'glb')
-- style: Visual style ('realistic', 'stylized', 'lowpoly')
-
-Note: Requires REPLICATE_API_TOKEN environment variable.
-Processing time: ~60-120 seconds.
+- style: Visual style ('3d_render', 'realistic', 'cartoon', 'lowpoly')
 
 Example: generate_3d_from_text({
-  prompt: "A medieval castle with towers, fantasy style",
-  output_path: "assets/models/castle.glb",
-  style: "stylized"
-})`,
+  prompt: "A yellow rubber duck toy",
+  output_path: "assets/models/duck.glb",
+  style: "3d_render"
+})
+
+Note: Requires GEMINI_API_KEY and REPLICATE_API_TOKEN environment variables.`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -164,17 +167,12 @@ Example: generate_3d_from_text({
         },
         output_path: {
           type: 'string',
-          description: 'Where to save the generated 3D model',
-        },
-        format: {
-          type: 'string',
-          enum: ['glb', 'obj'],
-          description: 'Output format (default: glb)',
+          description: 'Where to save the generated .glb model',
         },
         style: {
           type: 'string',
-          enum: ['realistic', 'stylized', 'lowpoly'],
-          description: 'Visual style for generation',
+          enum: ['3d_render', 'realistic', 'cartoon', 'lowpoly'],
+          description: 'Visual style (default: 3d_render)',
         },
       },
       required: ['prompt', 'output_path'],
@@ -818,71 +816,106 @@ export function generateGenerate3DFromImageHandler(ctx: ThreeDToolsContext): (ar
 
 /**
  * Generate handler for generate_3d_from_text
+ *
+ * Internally uses generate_multiview_images + generate_3d_from_image (~$0.11 total)
+ * instead of MVDream (~$3/model).
  */
 export function generateGenerate3DFromTextHandler(ctx: ThreeDToolsContext): (args: any) => Promise<any> {
   return async (params: any) => {
-    const { prompt, output_path, format = 'glb', style = 'stylized' } = params;
+    const { prompt, output_path, style = '3d_render' } = params;
 
     const fs = await import('fs/promises');
     const pathModule = await import('path');
-    const Replicate = (await import('replicate')).default;
+    const os = await import('os');
 
-    const apiToken = process.env.REPLICATE_API_TOKEN;
-    if (!apiToken) {
-      return { error: 'REPLICATE_API_TOKEN environment variable is not set' };
-    }
-
-    const absoluteOutputPath = pathModule.isAbsolute(output_path)
-      ? output_path
-      : pathModule.join(ctx.projectRoot, output_path);
+    // Import image tools handlers
+    const { generateGenerateMultiviewImagesHandler, generateGenerateImageHandler } = await import('./image-tools.js');
 
     const startTime = Date.now();
 
+    // Create temp directory for intermediate images
+    const tempDir = pathModule.join(os.tmpdir(), `ragforge-3d-${Date.now()}`);
+    await fs.mkdir(tempDir, { recursive: true });
+
     try {
-      // Enhance prompt based on style
-      let enhancedPrompt = prompt;
-      if (style === 'realistic') {
-        enhancedPrompt = `${prompt}, photorealistic, highly detailed, 4k`;
-      } else if (style === 'lowpoly') {
-        enhancedPrompt = `${prompt}, low poly style, geometric, simple shapes`;
-      } else if (style === 'stylized') {
-        enhancedPrompt = `${prompt}, stylized, game asset style`;
+      console.log('🎨 Step 1/2: Generating 4 coherent view images...');
+
+      // Step 1: Generate multiview images
+      const multiviewHandler = generateGenerateMultiviewImagesHandler({ projectRoot: ctx.projectRoot });
+      const multiviewResult = await multiviewHandler({
+        prompt,
+        output_dir: tempDir,
+        style,
+      });
+
+      if (multiviewResult.error) {
+        return {
+          error: `Multiview generation failed: ${multiviewResult.error}`,
+          step: 'generate_multiview_images',
+        };
       }
 
-      // useFileOutput: false returns URLs instead of ReadableStreams
-      const replicate = new Replicate({ auth: apiToken, useFileOutput: false });
-
-      // Run MVDream text-to-3D model
-      const output = await replicate.run('adirik/mvdream:38af22609c9a779c2203c2009ff7451f115b44cde8d9a65ad132980714b82f34', {
-        input: {
-          prompt: enhancedPrompt,
-        },
-      }) as any;
-
-      // Output format varies by model
-      const modelUrl = output?.mesh || output?.glb || (Array.isArray(output) ? output[0] : output);
-      if (!modelUrl || typeof modelUrl !== 'string') {
-        return { error: `No model URL in output: ${JSON.stringify(output)}` };
+      // Get paths of generated images
+      const imagePaths = multiviewResult.images?.map((img: any) => img.absolute_path) || [];
+      if (imagePaths.length === 0) {
+        return {
+          error: 'No images generated from multiview step',
+          multiview_result: multiviewResult,
+        };
       }
 
-      // Download the model
-      const modelResponse = await fetch(modelUrl);
-      const modelBuffer = Buffer.from(await modelResponse.arrayBuffer());
+      console.log(`✅ Generated ${imagePaths.length} views`);
+      console.log('🔧 Step 2/2: Converting to 3D model with Trellis...');
 
-      // Create output directory and save
-      await fs.mkdir(pathModule.dirname(absoluteOutputPath), { recursive: true });
-      await fs.writeFile(absoluteOutputPath, modelBuffer);
+      // Step 2: Generate 3D from images
+      const generate3DHandler = generateGenerate3DFromImageHandler(ctx);
+      const result3D = await generate3DHandler({
+        image_paths: imagePaths,
+        output_path,
+      });
+
+      if (result3D.error) {
+        return {
+          error: `3D generation failed: ${result3D.error}`,
+          step: 'generate_3d_from_image',
+          multiview_result: multiviewResult,
+        };
+      }
+
+      console.log('✅ 3D model generated successfully!');
+
+      // Clean up temp directory
+      try {
+        await fs.rm(tempDir, { recursive: true });
+      } catch {
+        // Ignore cleanup errors
+      }
 
       return {
         prompt,
         style,
         model_path: output_path,
-        absolute_path: absoluteOutputPath,
-        format,
+        absolute_path: result3D.absolute_path,
+        format: 'glb',
         processing_time_ms: Date.now() - startTime,
+        steps: {
+          multiview: {
+            images_generated: imagePaths.length,
+            view_prompts: multiviewResult.view_prompts,
+          },
+          trellis: {
+            processing_time_ms: result3D.processing_time_ms,
+          },
+        },
       };
     } catch (err: any) {
-      return { error: `Generation failed: ${err.message}` };
+      // Clean up temp directory on error
+      try {
+        await fs.rm(tempDir, { recursive: true });
+      } catch {
+        // Ignore cleanup errors
+      }
+      return { error: `Text-to-3D failed: ${err.message}` };
     }
   };
 }

@@ -3,6 +3,13 @@
  *
  * Parses codebases (TypeScript, Python, etc.) into Neo4j graph structure
  * using @luciformresearch/codeparsers
+ *
+ * NOTE: Historically, this adapter required specifying a language type (typescript,
+ * python, html, auto) to determine which parser to use. This is becoming increasingly
+ * irrelevant as we evolve toward a generalist code agent that automatically handles
+ * all file types. The adapter now auto-detects file types and uses the appropriate
+ * parser regardless of the configured adapter type. Eventually, the adapter field
+ * may be deprecated entirely.
  */
 
 import { globby } from 'globby';
@@ -14,12 +21,26 @@ import {
   PythonLanguageParser,
   HTMLDocumentParser,
   CSSParser,
+  SCSSParser,
+  VueParser,
+  SvelteParser,
+  MarkdownParser,
+  GenericCodeParser,
+  // TODO: Migrate to UniversalScope/FileAnalysis from './base'
+  // These internal types (ScopeInfo, ScopeFileAnalysis) are used throughout this file
+  // and require a larger refactoring effort to replace with the universal types.
+  // See convertUniversalToScopeFileAnalysis() for the conversion layer.
   type ScopeFileAnalysis,
   type ScopeInfo,
   type HTMLParseResult,
   type DocumentInfo,
   type CSSParseResult,
   type StylesheetInfo,
+  type SCSSParseResult,
+  type VueSFCParseResult,
+  type SvelteParseResult,
+  type MarkdownParseResult,
+  type GenericFileAnalysis,
 } from '@luciformresearch/codeparsers';
 import {
   SourceAdapter,
@@ -37,14 +58,34 @@ import { ImportResolver } from '../utils/ImportResolver.js';
 import { getLocalTimestamp } from '../utils/timestamp.js';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import {
+  parseDataFile,
+  isDataFile,
+  type DataFileInfo,
+} from './data-file-parser.js';
+import {
+  parseMediaFile,
+  isMediaFile,
+  type MediaFileInfo,
+  type ImageFileInfo,
+  type ThreeDFileInfo,
+  type PDFFileInfo,
+} from './media-file-parser.js';
 
 const execAsync = promisify(exec);
 
 /**
  * Code-specific source configuration
+ *
+ * @deprecated The 'adapter' field is becoming irrelevant. The code adapter now
+ * auto-detects file types and uses appropriate parsers. Use 'auto' for new projects.
  */
 export interface CodeSourceConfig extends SourceConfig {
   type: 'code';
+  /**
+   * @deprecated Use 'auto' - file types are now auto-detected regardless of this setting.
+   * Kept for backward compatibility with existing configurations.
+   */
   adapter: 'typescript' | 'python' | 'html' | 'auto';
   options?: {
     /** Export XML for debugging */
@@ -86,6 +127,11 @@ export class CodeSourceAdapter extends SourceAdapter {
   private registry: ParserRegistry;
   private htmlParser: HTMLDocumentParser | null = null;
   private cssParser: CSSParser | null = null;
+  private scssParser: SCSSParser | null = null;
+  private vueParser: VueParser | null = null;
+  private svelteParser: SvelteParser | null = null;
+  private markdownParser: MarkdownParser | null = null;
+  private genericParser: GenericCodeParser | null = null;
   private uuidCache: Map<string, Map<string, string>>; // filePath -> (key -> uuid)
 
   constructor(adapterName: 'typescript' | 'python' | 'html' | 'auto') {
@@ -118,19 +164,113 @@ export class CodeSourceAdapter extends SourceAdapter {
   }
 
   /**
-   * Check if a file is an HTML/Vue/Svelte file
+   * Get or initialize SCSS parser
    */
-  private isHtmlFile(filePath: string): boolean {
-    const ext = path.extname(filePath).toLowerCase();
-    return ['.html', '.htm', '.vue', '.svelte', '.astro'].includes(ext);
+  private async getScssParser(): Promise<SCSSParser> {
+    if (!this.scssParser) {
+      this.scssParser = new SCSSParser();
+      await this.scssParser.initialize();
+    }
+    return this.scssParser;
   }
 
   /**
-   * Check if a file is a CSS file
+   * Get or initialize Vue parser
+   */
+  private async getVueParser(): Promise<VueParser> {
+    if (!this.vueParser) {
+      this.vueParser = new VueParser();
+      await this.vueParser.initialize();
+    }
+    return this.vueParser;
+  }
+
+  /**
+   * Get or initialize Svelte parser
+   */
+  private async getSvelteParser(): Promise<SvelteParser> {
+    if (!this.svelteParser) {
+      this.svelteParser = new SvelteParser();
+      await this.svelteParser.initialize();
+    }
+    return this.svelteParser;
+  }
+
+  /**
+   * Get or initialize Markdown parser
+   */
+  private async getMarkdownParser(): Promise<MarkdownParser> {
+    if (!this.markdownParser) {
+      this.markdownParser = new MarkdownParser();
+      await this.markdownParser.initialize();
+    }
+    return this.markdownParser;
+  }
+
+  /**
+   * Get or initialize Generic code parser (fallback for unknown languages)
+   */
+  private async getGenericParser(): Promise<GenericCodeParser> {
+    if (!this.genericParser) {
+      this.genericParser = new GenericCodeParser();
+      await this.genericParser.initialize();
+    }
+    return this.genericParser;
+  }
+
+  /**
+   * Check if a file is a plain HTML file (not Vue/Svelte)
+   */
+  private isHtmlFile(filePath: string): boolean {
+    const ext = path.extname(filePath).toLowerCase();
+    return ['.html', '.htm', '.astro'].includes(ext);
+  }
+
+  /**
+   * Check if a file is a Vue SFC
+   */
+  private isVueFile(filePath: string): boolean {
+    return path.extname(filePath).toLowerCase() === '.vue';
+  }
+
+  /**
+   * Check if a file is a Svelte component
+   */
+  private isSvelteFile(filePath: string): boolean {
+    return path.extname(filePath).toLowerCase() === '.svelte';
+  }
+
+  /**
+   * Check if a file is a plain CSS file
    */
   private isCssFile(filePath: string): boolean {
+    return path.extname(filePath).toLowerCase() === '.css';
+  }
+
+  /**
+   * Check if a file is an SCSS file
+   */
+  private isScssFile(filePath: string): boolean {
     const ext = path.extname(filePath).toLowerCase();
-    return ['.css', '.scss', '.sass', '.less'].includes(ext);
+    return ['.scss', '.sass'].includes(ext);
+  }
+
+  /**
+   * Check if a file is a Markdown file
+   */
+  private isMarkdownFile(filePath: string): boolean {
+    const ext = path.extname(filePath).toLowerCase();
+    return ['.md', '.mdx', '.markdown'].includes(ext);
+  }
+
+  /**
+   * Check if a file is a text file that should be chunked
+   */
+  private isTextFile(filePath: string): boolean {
+    const ext = path.extname(filePath).toLowerCase();
+    return ['.txt', '.log', '.env.example', '.gitignore', '.dockerignore'].includes(ext) ||
+           filePath.endsWith('.env.example') ||
+           path.basename(filePath).startsWith('.');
   }
 
   /**
@@ -229,7 +369,19 @@ export class CodeSourceAdapter extends SourceAdapter {
     });
 
     // Parse all files
-    const { codeFiles, htmlFiles, cssFiles, packageJsonFiles } = await this.parseFiles(files, config, (current) => {
+    const {
+      codeFiles,
+      htmlFiles,
+      cssFiles,
+      scssFiles,
+      vueFiles,
+      svelteFiles,
+      markdownFiles,
+      genericFiles,
+      packageJsonFiles,
+      dataFiles,
+      mediaFiles
+    } = await this.parseFiles(files, config, (current) => {
       options.onProgress?.({
         phase: 'parsing',
         currentFile: current,
@@ -248,7 +400,19 @@ export class CodeSourceAdapter extends SourceAdapter {
     });
 
     // Build graph structure
-    const graph = await this.buildGraph({ codeFiles, htmlFiles, cssFiles, packageJsonFiles }, config, resolver, projectInfo);
+    const graph = await this.buildGraph({
+      codeFiles,
+      htmlFiles,
+      cssFiles,
+      scssFiles,
+      vueFiles,
+      svelteFiles,
+      markdownFiles,
+      genericFiles,
+      packageJsonFiles,
+      dataFiles,
+      mediaFiles
+    }, config, resolver, projectInfo);
 
     // Export XML if requested
     if (config.options?.exportXml) {
@@ -338,7 +502,7 @@ export class CodeSourceAdapter extends SourceAdapter {
   }
 
   /**
-   * Parse all files (code, HTML, CSS, and package.json)
+   * Parse all files (code, HTML, CSS, Vue, Svelte, SCSS, Markdown, and package.json)
    */
   private async parseFiles(
     files: string[],
@@ -348,20 +512,48 @@ export class CodeSourceAdapter extends SourceAdapter {
     codeFiles: Map<string, ScopeFileAnalysis>;
     htmlFiles: Map<string, HTMLParseResult>;
     cssFiles: Map<string, CSSParseResult>;
+    scssFiles: Map<string, SCSSParseResult>;
+    vueFiles: Map<string, VueSFCParseResult>;
+    svelteFiles: Map<string, SvelteParseResult>;
+    markdownFiles: Map<string, MarkdownParseResult>;
+    genericFiles: Map<string, GenericFileAnalysis>;
     packageJsonFiles: Map<string, PackageJsonInfo>;
+    dataFiles: Map<string, DataFileInfo>;
+    mediaFiles: Map<string, MediaFileInfo>;
   }> {
     const codeFiles = new Map<string, ScopeFileAnalysis>();
     const htmlFiles = new Map<string, HTMLParseResult>();
     const cssFiles = new Map<string, CSSParseResult>();
+    const scssFiles = new Map<string, SCSSParseResult>();
+    const vueFiles = new Map<string, VueSFCParseResult>();
+    const svelteFiles = new Map<string, SvelteParseResult>();
+    const markdownFiles = new Map<string, MarkdownParseResult>();
+    const genericFiles = new Map<string, GenericFileAnalysis>();
     const packageJsonFiles = new Map<string, PackageJsonInfo>();
+    const dataFiles = new Map<string, DataFileInfo>();
+    const mediaFiles = new Map<string, MediaFileInfo>();
 
     for (const file of files) {
       onProgress(file);
 
       try {
+        // Handle media files first (binary, don't read as text)
+        if (isMediaFile(file)) {
+          try {
+            const mediaInfo = await parseMediaFile(file);
+            if (mediaInfo) {
+              mediaFiles.set(file, mediaInfo);
+            }
+          } catch (err) {
+            console.warn(`Failed to parse media file ${file}:`, err);
+          }
+          continue;
+        }
+
+        const content = await import('fs').then(fs => fs.promises.readFile(file, 'utf-8'));
+
         // Handle package.json files
         if (this.isPackageJson(file)) {
-          const content = await import('fs').then(fs => fs.promises.readFile(file, 'utf-8'));
           const pkgInfo = this.parsePackageJson(content, file);
           if (pkgInfo) {
             packageJsonFiles.set(file, pkgInfo);
@@ -369,96 +561,142 @@ export class CodeSourceAdapter extends SourceAdapter {
           continue;
         }
 
-        // Handle HTML/Vue/Svelte files separately
+        // Handle Vue SFC files
+        if (this.isVueFile(file)) {
+          const vueParser = await this.getVueParser();
+          const result = await vueParser.parseFile(file, content);
+          vueFiles.set(file, result);
+          continue;
+        }
+
+        // Handle Svelte component files
+        if (this.isSvelteFile(file)) {
+          const svelteParser = await this.getSvelteParser();
+          const result = await svelteParser.parseFile(file, content);
+          svelteFiles.set(file, result);
+          continue;
+        }
+
+        // Handle HTML files (not Vue/Svelte)
         if (this.isHtmlFile(file)) {
           const htmlParser = await this.getHtmlParser();
-          const content = await import('fs').then(fs => fs.promises.readFile(file, 'utf-8'));
           const result = await htmlParser.parseFile(file, content, { parseScripts: true });
           htmlFiles.set(file, result);
+          continue;
+        }
+
+        // Handle SCSS files
+        if (this.isScssFile(file)) {
+          const scssParser = await this.getScssParser();
+          const result = await scssParser.parseFile(file, content);
+          scssFiles.set(file, result);
           continue;
         }
 
         // Handle CSS files
         if (this.isCssFile(file)) {
           const cssParser = await this.getCssParser();
-          const content = await import('fs').then(fs => fs.promises.readFile(file, 'utf-8'));
           const result = await cssParser.parseFile(file, content);
           cssFiles.set(file, result);
           continue;
         }
 
-        // Handle TypeScript/Python files with ParserRegistry
-        const parser = this.registry.getParserForFile(file);
-        if (!parser) {
-          console.warn(`No parser found for file: ${file}`);
+        // Handle Markdown files
+        if (this.isMarkdownFile(file)) {
+          const mdParser = await this.getMarkdownParser();
+          const result = await mdParser.parseFile(file, content, { parseCodeBlocks: true });
+          markdownFiles.set(file, result);
           continue;
         }
 
-        // Initialize parser if not already initialized
-        if (!this.registry.isInitialized(parser.language)) {
-          await this.registry.initializeParser(parser.language);
+        // Handle data files (JSON, YAML, XML, TOML, ENV) - but not package.json which is handled separately
+        if (isDataFile(file) && !this.isPackageJson(file)) {
+          try {
+            const dataInfo = parseDataFile(file, content);
+            dataFiles.set(file, dataInfo);
+          } catch (err) {
+            console.warn(`Failed to parse data file ${file}:`, err);
+          }
+          continue;
         }
 
-        const content = await import('fs').then(fs => fs.promises.readFile(file, 'utf-8'));
-        const universalAnalysis = await parser.parseFile(file, content);
+        // Handle TypeScript/Python files with ParserRegistry
+        const parser = this.registry.getParserForFile(file);
+        if (parser) {
+          // Initialize parser if not already initialized
+          if (!this.registry.isInitialized(parser.language)) {
+            await this.registry.initializeParser(parser.language);
+          }
+          const universalAnalysis = await parser.parseFile(file, content);
 
-        // Convert universal analysis to ScopeFileAnalysis format
-        const analysis: ScopeFileAnalysis = {
-          filePath: file,
-          totalScopes: universalAnalysis.scopes.length,
-          imports: universalAnalysis.imports.map(imp => imp.source),
-          dependencies: [],
-          scopes: universalAnalysis.scopes.map(uScope => ({
-            name: uScope.name,
-            type: uScope.type as any,
-            filePath: uScope.filePath,
-            startLine: uScope.startLine,
-            endLine: uScope.endLine,
-            content: uScope.source || '',
-            contentDedented: uScope.source || '',
-            signature: uScope.signature || '',
-            returnType: uScope.returnType,
-            parameters: uScope.parameters || [],
-            parent: uScope.parentName,
-            depth: uScope.depth || 0,
-            linesOfCode: uScope.endLine - uScope.startLine + 1,
-            identifierReferences: uScope.references || [],
-            importReferences: uScope.imports || [],
-            modifiers: [],
-            complexity: 0,
-            children: [],
-            imports: [],
-            exports: [],
+          // LEGACY CONVERSION: Convert UniversalScope/FileAnalysis → ScopeInfo/ScopeFileAnalysis
+          // This conversion exists because the rest of this file uses the internal types.
+          // TODO: Refactor this file to use UniversalScope/FileAnalysis directly and remove this conversion.
+          const analysis: ScopeFileAnalysis = {
+            filePath: file,
+            totalScopes: universalAnalysis.scopes.length,
+            imports: universalAnalysis.imports.map(imp => imp.source),
             dependencies: [],
+            scopes: universalAnalysis.scopes.map(uScope => ({
+              name: uScope.name,
+              type: uScope.type as any,
+              filePath: uScope.filePath,
+              startLine: uScope.startLine,
+              endLine: uScope.endLine,
+              content: uScope.source || '',
+              contentDedented: uScope.source || '',
+              signature: uScope.signature || '',
+              returnType: uScope.returnType,
+              parameters: uScope.parameters || [],
+              parent: uScope.parentName,
+              depth: uScope.depth || 0,
+              linesOfCode: uScope.endLine - uScope.startLine + 1,
+              identifierReferences: uScope.references || [],
+              importReferences: uScope.imports || [],
+              modifiers: [],
+              complexity: 0,
+              children: [],
+              imports: [],
+              exports: [],
+              dependencies: [],
+              astValid: true,
+              astIssues: [],
+              astNotes: [],
+              decorators: (uScope as any).decorators,
+              docstring: (uScope as any).docstring,
+              value: uScope.value,
+              // Phase 3: Include languageSpecific metadata (heritage, generics, decorators, enums)
+              languageSpecific: uScope.languageSpecific
+            } as ScopeInfo)),
+            exports: universalAnalysis.exports.map(e => e.exported),
+            importReferences: universalAnalysis.imports.map(imp => ({
+              source: imp.source,
+              imported: imp.imported,
+              alias: imp.alias,
+              kind: imp.kind as any,
+              isLocal: imp.source.startsWith('.') || imp.source.startsWith('/')
+            })),
+            totalLines: universalAnalysis.linesOfCode,
             astValid: true,
-            astIssues: [],
-            astNotes: [],
-            decorators: (uScope as any).decorators,
-            docstring: (uScope as any).docstring,
-            value: uScope.value,
-            // Phase 3: Include languageSpecific metadata (heritage, generics, decorators, enums)
-            languageSpecific: uScope.languageSpecific
-          } as ScopeInfo)),
-          exports: universalAnalysis.exports.map(e => e.exported),
-          importReferences: universalAnalysis.imports.map(imp => ({
-            source: imp.source,
-            imported: imp.imported,
-            alias: imp.alias,
-            kind: imp.kind as any,
-            isLocal: imp.source.startsWith('.') || imp.source.startsWith('/')
-          })),
-          totalLines: universalAnalysis.linesOfCode,
-          astValid: true,
-          astIssues: universalAnalysis.errors?.map(e => e.message) || []
-        };
+            astIssues: universalAnalysis.errors?.map(e => e.message) || []
+          };
 
-        codeFiles.set(file, analysis);
+          codeFiles.set(file, analysis);
+          continue;
+        }
+
+        // Fallback: Use GenericCodeParser for unknown code files
+        // This handles any code file that doesn't have a dedicated parser
+        const genericParser = await this.getGenericParser();
+        const genericResult = await genericParser.parseFile(file, content);
+        genericFiles.set(file, genericResult);
+
       } catch (error) {
         console.error(`Error parsing file ${file}:`, error);
       }
     }
 
-    return { codeFiles, htmlFiles, cssFiles, packageJsonFiles };
+    return { codeFiles, htmlFiles, cssFiles, scssFiles, vueFiles, svelteFiles, markdownFiles, genericFiles, packageJsonFiles, dataFiles, mediaFiles };
   }
 
   /**
@@ -502,13 +740,32 @@ export class CodeSourceAdapter extends SourceAdapter {
       codeFiles: Map<string, ScopeFileAnalysis>;
       htmlFiles: Map<string, HTMLParseResult>;
       cssFiles: Map<string, CSSParseResult>;
+      scssFiles: Map<string, SCSSParseResult>;
+      vueFiles: Map<string, VueSFCParseResult>;
+      svelteFiles: Map<string, SvelteParseResult>;
+      markdownFiles: Map<string, MarkdownParseResult>;
+      genericFiles: Map<string, GenericFileAnalysis>;
       packageJsonFiles: Map<string, PackageJsonInfo>;
+      dataFiles: Map<string, DataFileInfo>;
+      mediaFiles: Map<string, MediaFileInfo>;
     },
     config: CodeSourceConfig,
     resolver: ImportResolver,
     projectInfo: { name: string; gitRemote: string | null; rootPath: string }
   ): Promise<ParsedGraph> {
-    const { codeFiles, htmlFiles, cssFiles, packageJsonFiles } = parsedFiles;
+    const {
+      codeFiles,
+      htmlFiles,
+      cssFiles,
+      scssFiles,
+      vueFiles,
+      svelteFiles,
+      markdownFiles,
+      genericFiles,
+      packageJsonFiles,
+      dataFiles,
+      mediaFiles
+    } = parsedFiles;
     const nodes: ParsedNode[] = [];
     const relationships: ParsedRelationship[] = [];
     const scopeMap = new Map<string, ScopeInfo>(); // uuid -> ScopeInfo
@@ -1229,16 +1486,782 @@ export class CodeSourceAdapter extends SourceAdapter {
       }
     }
 
+    // Create Stylesheet nodes for SCSS files (similar to CSS)
+    for (const [filePath, scssResult] of scssFiles) {
+      const relPath = path.relative(projectRoot, filePath);
+      const stylesheet = scssResult.stylesheet;
+
+      // Create Stylesheet node (same label as CSS, but with scss type)
+      const stylesheetId = `stylesheet:${stylesheet.uuid}`;
+      nodes.push({
+        labels: ['Stylesheet'],
+        id: stylesheetId,
+        properties: {
+          uuid: stylesheetId,
+          file: relPath,
+          type: 'scss',
+          hash: stylesheet.hash,
+          linesOfCode: stylesheet.linesOfCode,
+          ruleCount: stylesheet.ruleCount,
+          selectorCount: stylesheet.selectorCount,
+          propertyCount: stylesheet.propertyCount,
+          variableCount: stylesheet.variables.length,
+          importCount: stylesheet.imports.length,
+          mixinCount: stylesheet.mixins?.length ?? 0,
+          functionCount: stylesheet.functions?.length ?? 0,
+          indexedAt: getLocalTimestamp()
+        }
+      });
+
+      // Create BELONGS_TO relationship (Stylesheet -> Project)
+      relationships.push({
+        type: 'BELONGS_TO',
+        from: stylesheetId,
+        to: projectId
+      });
+
+      // Create File node
+      const fileName = relPath.split('/').pop() || relPath;
+      const directory = relPath.includes('/') ? relPath.substring(0, relPath.lastIndexOf('/')) : '.';
+      const extension = fileName.includes('.') ? fileName.substring(fileName.lastIndexOf('.')) : '';
+      const fileUuid = `file:${relPath}`;
+
+      nodes.push({
+        labels: ['File'],
+        id: fileUuid,
+        properties: {
+          uuid: fileUuid,
+          path: relPath,
+          name: fileName,
+          directory,
+          extension,
+          contentHash: stylesheet.hash
+        }
+      });
+
+      relationships.push({
+        type: 'BELONGS_TO',
+        from: fileUuid,
+        to: projectId
+      });
+
+      relationships.push({
+        type: 'DEFINED_IN',
+        from: stylesheetId,
+        to: fileUuid
+      });
+
+      // Add directory handling
+      this.ensureDirectoryNodes(relPath, directories, nodes, relationships, fileUuid);
+    }
+
+    // Create VueSFC nodes for Vue files
+    for (const [filePath, vueResult] of vueFiles) {
+      const relPath = path.relative(projectRoot, filePath);
+      const sfc = vueResult.sfc; // Access nested VueSFCInfo
+
+      const vueId = `vue:${sfc.uuid}`;
+      nodes.push({
+        labels: ['VueSFC'],
+        id: vueId,
+        properties: {
+          uuid: vueId,
+          file: relPath,
+          componentName: sfc.componentName || path.basename(relPath, '.vue'),
+          hash: sfc.hash,
+          hasTemplate: sfc.hasTemplate,
+          hasScript: sfc.hasScript,
+          hasStyle: sfc.hasStyle,
+          scriptLang: sfc.scriptLang || null,
+          styleLang: sfc.styleLang || null,
+          hasScriptSetup: sfc.hasScriptSetup || false,
+          styleScoped: sfc.styleScoped || false,
+          ...(sfc.props && sfc.props.length > 0 && { props: JSON.stringify(sfc.props) }),
+          ...(sfc.emits && sfc.emits.length > 0 && { emits: JSON.stringify(sfc.emits) }),
+          ...(sfc.componentUsages && sfc.componentUsages.length > 0 && { componentUsages: JSON.stringify(sfc.componentUsages) }),
+          indexedAt: getLocalTimestamp()
+        }
+      });
+
+      relationships.push({
+        type: 'BELONGS_TO',
+        from: vueId,
+        to: projectId
+      });
+
+      // Create File node
+      const fileName = relPath.split('/').pop() || relPath;
+      const directory = relPath.includes('/') ? relPath.substring(0, relPath.lastIndexOf('/')) : '.';
+      const extension = '.vue';
+      const fileUuid = `file:${relPath}`;
+
+      nodes.push({
+        labels: ['File'],
+        id: fileUuid,
+        properties: {
+          uuid: fileUuid,
+          path: relPath,
+          name: fileName,
+          directory,
+          extension,
+          contentHash: sfc.hash
+        }
+      });
+
+      relationships.push({
+        type: 'BELONGS_TO',
+        from: fileUuid,
+        to: projectId
+      });
+
+      relationships.push({
+        type: 'DEFINED_IN',
+        from: vueId,
+        to: fileUuid
+      });
+
+      // Add directory handling
+      this.ensureDirectoryNodes(relPath, directories, nodes, relationships, fileUuid);
+
+      // Note: Vue script scopes would require parsing the script block content
+      // This could be added later by extracting script content from vueResult.blocks
+    }
+
+    // Create SvelteComponent nodes for Svelte files
+    for (const [filePath, svelteResult] of svelteFiles) {
+      const relPath = path.relative(projectRoot, filePath);
+      const component = svelteResult.component; // Access nested SvelteComponentInfo
+
+      const svelteId = `svelte:${component.uuid}`;
+      nodes.push({
+        labels: ['SvelteComponent'],
+        id: svelteId,
+        properties: {
+          uuid: svelteId,
+          file: relPath,
+          componentName: component.componentName || path.basename(relPath, '.svelte'),
+          hash: component.hash,
+          hasScript: component.hasScript,
+          hasStyle: component.hasStyle,
+          scriptLang: component.scriptLang || null,
+          styleLang: component.styleLang || null,
+          ...(component.props && component.props.length > 0 && { props: JSON.stringify(component.props) }),
+          ...(component.componentUsages && component.componentUsages.length > 0 && { componentUsages: JSON.stringify(component.componentUsages) }),
+          indexedAt: getLocalTimestamp()
+        }
+      });
+
+      relationships.push({
+        type: 'BELONGS_TO',
+        from: svelteId,
+        to: projectId
+      });
+
+      // Create File node
+      const fileName = relPath.split('/').pop() || relPath;
+      const directory = relPath.includes('/') ? relPath.substring(0, relPath.lastIndexOf('/')) : '.';
+      const extension = '.svelte';
+      const fileUuid = `file:${relPath}`;
+
+      nodes.push({
+        labels: ['File'],
+        id: fileUuid,
+        properties: {
+          uuid: fileUuid,
+          path: relPath,
+          name: fileName,
+          directory,
+          extension,
+          contentHash: component.hash
+        }
+      });
+
+      relationships.push({
+        type: 'BELONGS_TO',
+        from: fileUuid,
+        to: projectId
+      });
+
+      relationships.push({
+        type: 'DEFINED_IN',
+        from: svelteId,
+        to: fileUuid
+      });
+
+      this.ensureDirectoryNodes(relPath, directories, nodes, relationships, fileUuid);
+
+      // Note: Svelte script scopes would require parsing the script block content
+      // This could be added later by extracting script content from svelteResult.blocks
+    }
+
+    // Create MarkupDocument nodes for Markdown files
+    for (const [filePath, mdResult] of markdownFiles) {
+      const relPath = path.relative(projectRoot, filePath);
+      const doc = mdResult.document;
+
+      const mdId = `markdown:${doc.uuid}`;
+      nodes.push({
+        labels: ['MarkupDocument'],
+        id: mdId,
+        properties: {
+          uuid: mdId,
+          file: relPath,
+          type: 'markdown',
+          hash: doc.hash,
+          title: doc.title || null,
+          sectionCount: doc.sections?.length ?? 0,
+          codeBlockCount: doc.codeBlocks?.length ?? 0,
+          linkCount: doc.links?.length ?? 0,
+          imageCount: doc.images?.length ?? 0,
+          wordCount: doc.wordCount ?? 0,
+          ...(doc.frontMatter && { frontMatter: JSON.stringify(doc.frontMatter) }),
+          ...(doc.sections && doc.sections.length > 0 && { sections: JSON.stringify(doc.sections.map(s => ({ title: s.title, level: s.level, slug: s.slug }))) }),
+          indexedAt: getLocalTimestamp()
+        }
+      });
+
+      relationships.push({
+        type: 'BELONGS_TO',
+        from: mdId,
+        to: projectId
+      });
+
+      // Create File node
+      const fileName = relPath.split('/').pop() || relPath;
+      const directory = relPath.includes('/') ? relPath.substring(0, relPath.lastIndexOf('/')) : '.';
+      const extension = fileName.includes('.') ? fileName.substring(fileName.lastIndexOf('.')) : '';
+      const fileUuid = `file:${relPath}`;
+
+      nodes.push({
+        labels: ['File'],
+        id: fileUuid,
+        properties: {
+          uuid: fileUuid,
+          path: relPath,
+          name: fileName,
+          directory,
+          extension,
+          contentHash: doc.hash
+        }
+      });
+
+      relationships.push({
+        type: 'BELONGS_TO',
+        from: fileUuid,
+        to: projectId
+      });
+
+      relationships.push({
+        type: 'DEFINED_IN',
+        from: mdId,
+        to: fileUuid
+      });
+
+      this.ensureDirectoryNodes(relPath, directories, nodes, relationships, fileUuid);
+
+      // Create CodeBlock nodes for embedded code
+      if (doc.codeBlocks && doc.codeBlocks.length > 0) {
+        for (let i = 0; i < doc.codeBlocks.length; i++) {
+          const block = doc.codeBlocks[i];
+          const blockId = `codeblock:${doc.uuid}:${i}`;
+
+          nodes.push({
+            labels: ['CodeBlock'],
+            id: blockId,
+            properties: {
+              uuid: blockId,
+              language: block.language || 'text',
+              code: block.code,
+              startLine: block.startLine,
+              endLine: block.endLine,
+              index: i
+            }
+          });
+
+          relationships.push({
+            type: 'CONTAINS_CODE',
+            from: mdId,
+            to: blockId
+          });
+        }
+      }
+    }
+
+    // Create GenericFile nodes for unknown code files
+    for (const [filePath, genericResult] of genericFiles) {
+      const relPath = path.relative(projectRoot, filePath);
+
+      // Generate UUID from hash since GenericFileAnalysis doesn't have uuid
+      const genericId = `generic:${genericResult.hash}`;
+      nodes.push({
+        labels: ['GenericFile'],
+        id: genericId,
+        properties: {
+          uuid: genericId,
+          file: relPath,
+          hash: genericResult.hash,
+          linesOfCode: genericResult.linesOfCode,
+          language: genericResult.languageHint || 'unknown',
+          braceStyle: genericResult.braceStyle || 'unknown',
+          ...(genericResult.imports && genericResult.imports.length > 0 && { imports: JSON.stringify(genericResult.imports) }),
+          indexedAt: getLocalTimestamp()
+        }
+      });
+
+      relationships.push({
+        type: 'BELONGS_TO',
+        from: genericId,
+        to: projectId
+      });
+
+      // Create File node
+      const fileName = relPath.split('/').pop() || relPath;
+      const directory = relPath.includes('/') ? relPath.substring(0, relPath.lastIndexOf('/')) : '.';
+      const extension = fileName.includes('.') ? fileName.substring(fileName.lastIndexOf('.')) : '';
+      const fileUuid = `file:${relPath}`;
+
+      nodes.push({
+        labels: ['File'],
+        id: fileUuid,
+        properties: {
+          uuid: fileUuid,
+          path: relPath,
+          name: fileName,
+          directory,
+          extension,
+          contentHash: genericResult.hash
+        }
+      });
+
+      relationships.push({
+        type: 'BELONGS_TO',
+        from: fileUuid,
+        to: projectId
+      });
+
+      relationships.push({
+        type: 'DEFINED_IN',
+        from: genericId,
+        to: fileUuid
+      });
+
+      this.ensureDirectoryNodes(relPath, directories, nodes, relationships, fileUuid);
+    }
+
+    // Create DataFile nodes for data files (JSON, YAML, XML, TOML, ENV)
+    // Track all file paths for cross-file reference resolution
+    const allFilePaths = new Set<string>();
+    for (const [filePath] of codeFiles) allFilePaths.add(path.relative(projectRoot, filePath));
+    for (const [filePath] of htmlFiles) allFilePaths.add(path.relative(projectRoot, filePath));
+    for (const [filePath] of cssFiles) allFilePaths.add(path.relative(projectRoot, filePath));
+    for (const [filePath] of scssFiles) allFilePaths.add(path.relative(projectRoot, filePath));
+    for (const [filePath] of vueFiles) allFilePaths.add(path.relative(projectRoot, filePath));
+    for (const [filePath] of svelteFiles) allFilePaths.add(path.relative(projectRoot, filePath));
+    for (const [filePath] of markdownFiles) allFilePaths.add(path.relative(projectRoot, filePath));
+    for (const [filePath] of genericFiles) allFilePaths.add(path.relative(projectRoot, filePath));
+    for (const [filePath] of dataFiles) allFilePaths.add(path.relative(projectRoot, filePath));
+    for (const [filePath] of mediaFiles) allFilePaths.add(path.relative(projectRoot, filePath));
+
+    // Track ExternalURLs for deduplication
+    const externalUrls = new Map<string, string>(); // url -> uuid
+
+    for (const [filePath, dataInfo] of dataFiles) {
+      const relPath = path.relative(projectRoot, filePath);
+
+      // Create DataFile node
+      const dataFileId = `datafile:${dataInfo.uuid}`;
+      nodes.push({
+        labels: ['DataFile'],
+        id: dataFileId,
+        properties: {
+          uuid: dataFileId,
+          file: relPath,
+          format: dataInfo.format,
+          hash: dataInfo.hash,
+          linesOfCode: dataInfo.linesOfCode,
+          sectionCount: dataInfo.sections.length,
+          referenceCount: dataInfo.references.length,
+          indexedAt: getLocalTimestamp()
+        }
+      });
+
+      relationships.push({
+        type: 'BELONGS_TO',
+        from: dataFileId,
+        to: projectId
+      });
+
+      // Create File node
+      const fileName = relPath.split('/').pop() || relPath;
+      const directory = relPath.includes('/') ? relPath.substring(0, relPath.lastIndexOf('/')) : '.';
+      const extension = fileName.includes('.') ? fileName.substring(fileName.lastIndexOf('.')) : '';
+      const fileUuid = `file:${relPath}`;
+
+      nodes.push({
+        labels: ['File'],
+        id: fileUuid,
+        properties: {
+          uuid: fileUuid,
+          path: relPath,
+          name: fileName,
+          directory,
+          extension,
+          contentHash: dataInfo.hash
+        }
+      });
+
+      relationships.push({
+        type: 'BELONGS_TO',
+        from: fileUuid,
+        to: projectId
+      });
+
+      relationships.push({
+        type: 'DEFINED_IN',
+        from: dataFileId,
+        to: fileUuid
+      });
+
+      this.ensureDirectoryNodes(relPath, directories, nodes, relationships, fileUuid);
+
+      // Create DataSection nodes for top-level sections
+      for (const section of dataInfo.sections) {
+        this.createDataSectionNodes(section, dataFileId, nodes, relationships, dataInfo.uuid);
+      }
+
+      // Create REFERENCES relationships for detected references
+      for (const ref of dataInfo.references) {
+        if (ref.type === 'url') {
+          // Create or reference ExternalURL node
+          let urlUuid = externalUrls.get(ref.value);
+          if (!urlUuid) {
+            urlUuid = `url:${createHash('sha256').update(ref.value).digest('hex').substring(0, 12)}`;
+            externalUrls.set(ref.value, urlUuid);
+
+            // Extract domain from URL
+            let domain = '';
+            try {
+              const urlObj = new URL(ref.value);
+              domain = urlObj.hostname;
+            } catch {
+              domain = ref.value.split('/')[2] || '';
+            }
+
+            nodes.push({
+              labels: ['ExternalURL'],
+              id: urlUuid,
+              properties: {
+                uuid: urlUuid,
+                url: ref.value,
+                domain
+              }
+            });
+          }
+
+          relationships.push({
+            type: 'LINKS_TO',
+            from: dataFileId,
+            to: urlUuid,
+            properties: { path: ref.path, line: ref.line }
+          });
+        } else if (ref.type === 'code' || ref.type === 'config' || ref.type === 'file') {
+          // Reference to a file - resolve relative path
+          const refPath = this.resolveReferencePath(ref.value, relPath, projectRoot);
+          if (refPath && allFilePaths.has(refPath)) {
+            relationships.push({
+              type: 'REFERENCES',
+              from: dataFileId,
+              to: `file:${refPath}`,
+              properties: { path: ref.path, refType: ref.type }
+            });
+          }
+        } else if (ref.type === 'image') {
+          // Reference to image - will link to MediaFile when created
+          const refPath = this.resolveReferencePath(ref.value, relPath, projectRoot);
+          if (refPath) {
+            relationships.push({
+              type: 'REFERENCES_IMAGE',
+              from: dataFileId,
+              to: `file:${refPath}`,
+              properties: { path: ref.path }
+            });
+          }
+        } else if (ref.type === 'directory') {
+          // Reference to directory
+          const refPath = this.resolveReferencePath(ref.value, relPath, projectRoot);
+          if (refPath && directories.has(refPath)) {
+            relationships.push({
+              type: 'REFERENCES',
+              from: dataFileId,
+              to: `dir:${refPath}`,
+              properties: { path: ref.path, refType: 'directory' }
+            });
+          }
+        } else if (ref.type === 'package') {
+          // Reference to npm/pip package - create ExternalLibrary node
+          const pkgUuid = `pkg:${ref.value}`;
+          // Check if already created (avoid duplicates)
+          if (!nodes.some(n => n.id === pkgUuid)) {
+            nodes.push({
+              labels: ['ExternalLibrary'],
+              id: pkgUuid,
+              properties: {
+                uuid: pkgUuid,
+                name: ref.value,
+                source: 'npm' // TODO: detect pip/cargo/etc
+              }
+            });
+          }
+
+          relationships.push({
+            type: 'USES_PACKAGE',
+            from: dataFileId,
+            to: pkgUuid,
+            properties: { path: ref.path, line: ref.line }
+          });
+        }
+      }
+    }
+
+    // Create MediaFile nodes for images, 3D models, PDFs (lazy loading - metadata only)
+    for (const [filePath, mediaInfo] of mediaFiles) {
+      const relPath = path.relative(projectRoot, filePath);
+
+      // Determine specific labels based on category
+      const labels = ['MediaFile'];
+      if (mediaInfo.category === 'image') labels.push('ImageFile');
+      if (mediaInfo.category === '3d') labels.push('ThreeDFile');
+      if (mediaInfo.category === 'document') labels.push('DocumentFile');
+
+      const mediaId = `media:${mediaInfo.uuid}`;
+      const properties: Record<string, unknown> = {
+        uuid: mediaId,
+        file: relPath,
+        format: mediaInfo.format,
+        category: mediaInfo.category,
+        hash: mediaInfo.hash,
+        sizeBytes: mediaInfo.sizeBytes,
+        analyzed: mediaInfo.analyzed,
+        indexedAt: getLocalTimestamp()
+      };
+
+      // Add category-specific properties
+      if (mediaInfo.category === 'image') {
+        const imageInfo = mediaInfo as ImageFileInfo;
+        if (imageInfo.dimensions) {
+          properties.width = imageInfo.dimensions.width;
+          properties.height = imageInfo.dimensions.height;
+        }
+      }
+
+      if (mediaInfo.category === '3d') {
+        const threeDInfo = mediaInfo as ThreeDFileInfo;
+        if (threeDInfo.gltfInfo) {
+          if (threeDInfo.gltfInfo.version) properties.gltfVersion = threeDInfo.gltfInfo.version;
+          if (threeDInfo.gltfInfo.generator) properties.gltfGenerator = threeDInfo.gltfInfo.generator;
+          if (threeDInfo.gltfInfo.meshCount !== undefined) properties.meshCount = threeDInfo.gltfInfo.meshCount;
+          if (threeDInfo.gltfInfo.materialCount !== undefined) properties.materialCount = threeDInfo.gltfInfo.materialCount;
+          if (threeDInfo.gltfInfo.textureCount !== undefined) properties.textureCount = threeDInfo.gltfInfo.textureCount;
+          if (threeDInfo.gltfInfo.animationCount !== undefined) properties.animationCount = threeDInfo.gltfInfo.animationCount;
+        }
+      }
+
+      if (mediaInfo.category === 'document') {
+        const pdfInfo = mediaInfo as PDFFileInfo;
+        if (pdfInfo.pdfInfo?.pageCount !== undefined) properties.pageCount = pdfInfo.pdfInfo.pageCount;
+        if (pdfInfo.pdfInfo?.title) properties.pdfTitle = pdfInfo.pdfInfo.title;
+        if (pdfInfo.pdfInfo?.author) properties.pdfAuthor = pdfInfo.pdfInfo.author;
+      }
+
+      nodes.push({
+        labels,
+        id: mediaId,
+        properties
+      });
+
+      relationships.push({
+        type: 'BELONGS_TO',
+        from: mediaId,
+        to: projectId
+      });
+
+      // Create File node for media file
+      const fileName = relPath.split('/').pop() || relPath;
+      const directory = relPath.includes('/') ? relPath.substring(0, relPath.lastIndexOf('/')) : '.';
+      const extension = path.extname(relPath);
+      const fileUuid = `file:${relPath}`;
+
+      nodes.push({
+        labels: ['File'],
+        id: fileUuid,
+        properties: {
+          uuid: fileUuid,
+          path: relPath,
+          name: fileName,
+          directory,
+          extension,
+          contentHash: mediaInfo.hash
+        }
+      });
+
+      relationships.push({
+        type: 'BELONGS_TO',
+        from: fileUuid,
+        to: projectId
+      });
+
+      relationships.push({
+        type: 'DEFINED_IN',
+        from: mediaId,
+        to: fileUuid
+      });
+
+      this.ensureDirectoryNodes(relPath, directories, nodes, relationships, fileUuid);
+    }
+
     return {
       nodes,
       relationships,
       metadata: {
-        filesProcessed: codeFiles.size + htmlFiles.size + cssFiles.size,
+        filesProcessed: codeFiles.size + htmlFiles.size + cssFiles.size + scssFiles.size + vueFiles.size + svelteFiles.size + markdownFiles.size + genericFiles.size + dataFiles.size + mediaFiles.size,
         nodesGenerated: nodes.length,
         relationshipsGenerated: relationships.length,
         parseTimeMs: 0 // Will be set by caller
       }
     };
+  }
+
+  /**
+   * Helper to ensure directory nodes exist and create relationships
+   */
+  private ensureDirectoryNodes(
+    relPath: string,
+    directories: Set<string>,
+    nodes: ParsedNode[],
+    relationships: ParsedRelationship[],
+    fileUuid: string
+  ): void {
+    let currentPath = relPath;
+    while (true) {
+      const dir = currentPath.includes('/') ? currentPath.substring(0, currentPath.lastIndexOf('/')) : '';
+      if (!dir || dir === '.' || dir === '') break;
+
+      if (!directories.has(dir)) {
+        directories.add(dir);
+        const dirUuid = `dir:${dir}`;
+        const depth = dir.split('/').filter(p => p.length > 0).length;
+        nodes.push({
+          labels: ['Directory'],
+          id: dirUuid,
+          properties: {
+            uuid: dirUuid,
+            path: dir,
+            depth
+          }
+        });
+      }
+
+      if (currentPath === relPath) {
+        relationships.push({
+          type: 'IN_DIRECTORY',
+          from: fileUuid,
+          to: `dir:${dir}`
+        });
+      }
+
+      currentPath = dir;
+    }
+  }
+
+  /**
+   * Recursively create DataSection nodes for nested data structures
+   */
+  private createDataSectionNodes(
+    section: import('./data-file-parser.js').DataSection,
+    parentId: string,
+    nodes: ParsedNode[],
+    relationships: ParsedRelationship[],
+    fileUuid: string,
+    isRoot: boolean = true
+  ): void {
+    const sectionId = `datasection:${fileUuid}:${section.path}`;
+
+    nodes.push({
+      labels: ['DataSection'],
+      id: sectionId,
+      properties: {
+        uuid: sectionId,
+        path: section.path,
+        key: section.key,
+        content: section.content.length > 10000
+          ? section.content.substring(0, 10000) + '...[truncated]'
+          : section.content,
+        depth: section.depth,
+        valueType: section.valueType,
+        childCount: section.children?.length ?? 0
+      }
+    });
+
+    // Link to parent (DataFile or parent DataSection)
+    relationships.push({
+      type: isRoot ? 'HAS_SECTION' : 'HAS_CHILD',
+      from: parentId,
+      to: sectionId
+    });
+
+    // Recursively create child sections (limit depth to avoid explosion)
+    if (section.children && section.depth < 3) {
+      for (const child of section.children) {
+        this.createDataSectionNodes(child, sectionId, nodes, relationships, fileUuid, false);
+      }
+    }
+  }
+
+  /**
+   * Resolve a reference path relative to the source file
+   */
+  private resolveReferencePath(
+    refValue: string,
+    sourceRelPath: string,
+    projectRoot: string
+  ): string | null {
+    // Skip absolute URLs
+    if (refValue.startsWith('http://') || refValue.startsWith('https://')) {
+      return null;
+    }
+
+    // Handle relative paths
+    if (refValue.startsWith('./') || refValue.startsWith('../')) {
+      const sourceDir = sourceRelPath.includes('/')
+        ? sourceRelPath.substring(0, sourceRelPath.lastIndexOf('/'))
+        : '.';
+
+      // Resolve relative to source file directory
+      const parts = sourceDir.split('/').filter(p => p && p !== '.');
+      const refParts = refValue.split('/');
+
+      for (const part of refParts) {
+        if (part === '..') {
+          parts.pop();
+        } else if (part !== '.') {
+          parts.push(part);
+        }
+      }
+
+      return parts.join('/');
+    }
+
+    // Absolute path from project root (starts with /)
+    if (refValue.startsWith('/')) {
+      return refValue.substring(1);
+    }
+
+    // Bare path - assume relative to source
+    const sourceDir = sourceRelPath.includes('/')
+      ? sourceRelPath.substring(0, sourceRelPath.lastIndexOf('/'))
+      : '';
+
+    return sourceDir ? `${sourceDir}/${refValue}` : refValue;
   }
 
   /**

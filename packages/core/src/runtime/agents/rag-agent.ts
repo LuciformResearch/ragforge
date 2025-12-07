@@ -21,8 +21,8 @@
  * ```
  */
 
-import { generateToolsFromConfig, generateFileTools, generateImageTools, generate3DTools, generateProjectTools, IngestionLock, withIngestionLock } from '../../index.js';
-import type { ToolGenerationOptions, GeneratedToolDefinition, ToolHandlerGenerator, RagForgeConfig, FileToolsContext, ImageToolsContext, ThreeDToolsContext, ProjectToolsContext } from '../../index.js';
+import { generateToolsFromConfig, generateFileTools, generateImageTools, generate3DTools, generateProjectTools, IngestionLock, withIngestionLock, webToolDefinitions, createWebToolHandlers } from '../../index.js';
+import type { ToolGenerationOptions, GeneratedToolDefinition, ToolHandlerGenerator, RagForgeConfig, FileToolsContext, ImageToolsContext, ThreeDToolsContext, ProjectToolsContext, WebToolsContext } from '../../index.js';
 import { generatePlanActionsTool, type ActionPlan, type PlanExecutionResult } from '../../tools/planning-tools.js';
 import { formatLocalDate, getFilenameTimestamp } from '../utils/timestamp.js';
 import { StructuredLLMExecutor, BaseToolExecutor, type ToolCallRequest, type ToolExecutionResult } from '../llm/structured-llm-executor.js';
@@ -308,6 +308,14 @@ export interface RagAgentOptions {
    * Required if includeProjectTools is true
    */
   projectToolsContext?: Omit<ProjectToolsContext, 'workingDirectory' | 'verbose'>;
+
+  /**
+   * Include web tools (search_web, fetch_web_page)
+   * - search_web: Search the web via Gemini grounding
+   * - fetch_web_page: Render and extract content from web pages via Playwright
+   * Default: false
+   */
+  includeWebTools?: boolean;
 
   /**
    * Context getter for dynamic tool context resolution
@@ -1070,7 +1078,23 @@ export async function createRagAgent(options: RagAgentOptions): Promise<RagAgent
     }
   }
 
-  // 3e. Add planning tools (enabled by default)
+  // 3e. Add web tools if enabled
+  if (options.includeWebTools) {
+    const webCtx: WebToolsContext = {
+      geminiApiKey: options.apiKey,
+      playwrightAvailable: true, // Assume available, will error if not
+    };
+
+    const webHandlers = createWebToolHandlers(webCtx);
+    tools.push(...webToolDefinitions);
+    Object.assign(boundHandlers, webHandlers);
+
+    if (options.verbose) {
+      console.log(`   🌐 Web tools enabled (${webToolDefinitions.length} tools: search_web, fetch_web_page)`);
+    }
+  }
+
+  // 3f. Add planning tools (enabled by default)
   if (options.includePlanningTools !== false) {
     const planTool = generatePlanActionsTool();
     tools.push(planTool.definition);

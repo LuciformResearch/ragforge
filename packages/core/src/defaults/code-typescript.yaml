@@ -20,11 +20,10 @@ source:
     - "**/*.vue"
     - "**/*.svelte"
     - "**/*.astro"
-    # Styles
+    # Styles (CSS and SCSS have dedicated parsers, Astro uses HTML fallback)
     - "**/*.css"
     - "**/*.scss"
-    - "**/*.sass"
-    - "**/*.less"
+    # Note: .sass (indented syntax) and .less are not supported - no tree-sitter grammars
     # Config/Data
     - "**/package.json"
   exclude:
