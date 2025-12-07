@@ -103,6 +103,60 @@ export class IncrementalIngestionManager {
   }
 
   /**
+   * Delete all nodes associated with a file path
+   * Used when a file is deleted (unlink event)
+   *
+   * Deletes:
+   * - File node itself
+   * - All content nodes with matching file property (Scope, DocumentFile, etc.)
+   * - All related nodes (via cascade relationships like HAS_PARENT, CONTAINS, etc.)
+   *
+   * @returns Number of nodes deleted
+   */
+  async deleteNodesForFile(filePath: string): Promise<number> {
+    // First, find all nodes associated with this file
+    // This includes:
+    // - Nodes with file = filePath (Scope, Chunk, etc.)
+    // - Nodes with path = filePath (File node)
+    // - Nodes with source_file = filePath (some adapters use this)
+    const result = await this.client.run(
+      `
+      MATCH (n)
+      WHERE n.file = $filePath
+         OR n.path = $filePath
+         OR n.source_file = $filePath
+      DETACH DELETE n
+      RETURN count(n) AS deleted
+      `,
+      { filePath }
+    );
+
+    return result.records[0]?.get('deleted')?.toNumber() || 0;
+  }
+
+  /**
+   * Delete all nodes for multiple files at once
+   * More efficient than calling deleteNodesForFile in a loop
+   */
+  async deleteNodesForFiles(filePaths: string[]): Promise<number> {
+    if (filePaths.length === 0) return 0;
+
+    const result = await this.client.run(
+      `
+      MATCH (n)
+      WHERE n.file IN $filePaths
+         OR n.path IN $filePaths
+         OR n.source_file IN $filePaths
+      DETACH DELETE n
+      RETURN count(n) AS deleted
+      `,
+      { filePaths }
+    );
+
+    return result.records[0]?.get('deleted')?.toNumber() || 0;
+  }
+
+  /**
    * Delete outgoing relationships from nodes before re-upserting
    * This ensures stale relationships are cleaned up when content changes
    *

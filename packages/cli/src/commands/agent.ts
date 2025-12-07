@@ -24,6 +24,13 @@ import {
   createClient,
   ConfigLoader,
   getFilenameTimestamp,
+  FileWatcher,
+  IncrementalIngestionManager,
+  Neo4jClient,
+  runEmbeddingPipelines,
+  GeminiEmbeddingProvider,
+  ProjectRegistry,
+  generateProjectManagementTools,
   type ProjectToolResult,
   type CreateProjectParams,
   type SetupProjectParams,
@@ -31,11 +38,15 @@ import {
   type GenerateEmbeddingsParams,
   type ToolGenerationContext,
   type RagForgeConfig,
+  type CodeSourceConfig,
+  type AgentLogger,
+  type LoadedProject,
 } from '@luciformresearch/ragforge';
 import { runCreate, type CreateOptions } from './create.js';
 import { runQuickstart, type QuickstartOptions } from './quickstart.js';
 import { runEmbeddingsIndex, runEmbeddingsGenerate, parseEmbeddingsOptions } from './embeddings.js';
 import { ensureEnvLoaded, getEnv } from '../utils/env.js';
+import { toRuntimeEmbeddingsConfig } from '../utils/embedding-transform.js';
 
 // ============================================
 // Types
@@ -70,6 +81,9 @@ export interface AgentOptions {
 /**
  * Mutable context shared between all tools
  * Allows dynamic project switching without recreating the agent
+ *
+ * Uses ProjectRegistry internally for multi-project support.
+ * The context exposes the "active" project from the registry.
  */
 export interface AgentProjectContext {
   /** Currently loaded project path (null if no project loaded) */
@@ -93,6 +107,21 @@ export interface AgentProjectContext {
   /** API keys for embeddings and media generation */
   geminiKey?: string;
   replicateToken?: string;
+
+  /** File watcher for auto-ingestion on file changes */
+  fileWatcher?: FileWatcher;
+
+  /** Incremental ingestion manager for the current project */
+  incrementalManager?: IncrementalIngestionManager;
+
+  /** Neo4j client for direct queries */
+  neo4jClient?: Neo4jClient;
+
+  /** Agent logger for structured logging */
+  logger?: AgentLogger;
+
+  /** Project registry for multi-project support */
+  registry: ProjectRegistry;
 }
 
 // ============================================
@@ -102,6 +131,7 @@ export interface AgentProjectContext {
 /**
  * Load a project into the mutable context
  * This connects to Neo4j and enables file/RAG tools
+ * Also registers the project in the registry for multi-project support
  */
 async function loadProjectIntoContext(
   ctx: AgentProjectContext,
@@ -119,13 +149,16 @@ async function loadProjectIntoContext(
     };
   }
 
-  // Close existing connection if any
-  if (ctx.ragClient) {
-    try {
-      await ctx.ragClient.close();
-    } catch {
-      // Ignore close errors
-    }
+  // Check if this project is already loaded in the registry
+  const existingProject = ctx.registry.findByPath(projectPath);
+  if (existingProject) {
+    // Just switch to it instead of reloading
+    ctx.registry.switch(existingProject.id);
+    syncContextFromRegistry(ctx);
+    return {
+      success: true,
+      message: `Switched to already-loaded project: ${projectPath}`,
+    };
   }
 
   // Load project env and connect to Neo4j
@@ -148,7 +181,7 @@ async function loadProjectIntoContext(
   }
 
   try {
-    const client = createClient({
+    const ragClient = createClient({
       neo4j: {
         uri: env.NEO4J_URI,
         username: env.NEO4J_USERNAME,
@@ -157,24 +190,211 @@ async function loadProjectIntoContext(
       }
     });
 
-    // Update context
-    ctx.currentProjectPath = projectPath;
-    ctx.generatedPath = generatedPath;
-    ctx.ragClient = client;
-    ctx.isProjectLoaded = true;
+    // Create Neo4j client for incremental ingestion
+    const neo4jClient = new Neo4jClient({
+      uri: env.NEO4J_URI,
+      username: env.NEO4J_USERNAME,
+      password: env.NEO4J_PASSWORD,
+      database: env.NEO4J_DATABASE,
+    });
 
-    console.log(`   ✓ Loaded project: ${projectPath}`);
+    // Load project config
+    const configPath = path.join(projectPath, 'ragforge.config.yaml');
+    let config: RagForgeConfig;
+    try {
+      config = await ConfigLoader.load(configPath);
+    } catch {
+      // Try generated path as fallback
+      const generatedConfigPath = path.join(generatedPath, 'ragforge.config.yaml');
+      config = await ConfigLoader.load(generatedConfigPath);
+    }
+
+    // Generate project ID
+    const projectId = ProjectRegistry.generateId(projectPath);
+
+    // Create LoadedProject for the registry
+    const loadedProject: LoadedProject = {
+      id: projectId,
+      path: projectPath,
+      type: 'ragforge-project',
+      config,
+      neo4jClient,
+      ragClient,
+      status: 'active',
+      lastAccessed: new Date(),
+      logger: ctx.logger,
+    };
+
+    // Register the project (this will make it active)
+    ctx.registry.register(loadedProject);
+
+    // Sync context from registry
+    syncContextFromRegistry(ctx);
+
+    console.log(`   ✓ Loaded project: ${projectPath} (${projectId})`);
     console.log(`   ✓ Connected to Neo4j: ${env.NEO4J_URI}`);
+    console.log(`   ✓ Projects loaded: ${ctx.registry.count}`);
+
+    // Start file watcher for auto-ingestion
+    await startFileWatcherForProject(ctx, projectPath, config);
 
     return {
       success: true,
-      message: `Project loaded: ${projectPath}. File tools and RAG tools are now available.`,
+      message: `Project loaded: ${projectPath}. File tools, RAG tools, and file watcher are now active.`,
     };
   } catch (error: any) {
     return {
       success: false,
       message: `Failed to connect to Neo4j: ${error.message}`,
     };
+  }
+}
+
+/**
+ * Sync the mutable context fields from the active project in the registry
+ * Call this after any registry operation that might change the active project
+ */
+function syncContextFromRegistry(ctx: AgentProjectContext): void {
+  const active = ctx.registry.getActive();
+
+  if (active) {
+    ctx.currentProjectPath = active.path;
+    ctx.generatedPath = path.join(active.path, '.ragforge', 'generated');
+    ctx.ragClient = active.ragClient;
+    ctx.neo4jClient = active.neo4jClient;
+    ctx.fileWatcher = active.fileWatcher;
+    ctx.incrementalManager = active.incrementalManager;
+    ctx.isProjectLoaded = true;
+  } else {
+    ctx.currentProjectPath = null;
+    ctx.generatedPath = null;
+    ctx.ragClient = null;
+    ctx.neo4jClient = undefined;
+    ctx.fileWatcher = undefined;
+    ctx.incrementalManager = undefined;
+    ctx.isProjectLoaded = false;
+  }
+}
+
+/**
+ * Start file watcher for a loaded project
+ * Uses provided config to avoid reloading
+ * Updates the registry's LoadedProject with watcher/manager references
+ */
+async function startFileWatcherForProject(
+  ctx: AgentProjectContext,
+  projectPath: string,
+  providedConfig?: RagForgeConfig
+): Promise<void> {
+  if (!ctx.neo4jClient) {
+    console.warn('   ⚠ Cannot start file watcher: no Neo4j client');
+    return;
+  }
+
+  // Use provided config or load it
+  let config: RagForgeConfig;
+  if (providedConfig) {
+    config = providedConfig;
+  } else {
+    const configPath = path.join(projectPath, 'ragforge.config.yaml');
+    try {
+      config = await ConfigLoader.load(configPath);
+    } catch {
+      console.warn(`   ⚠ Cannot start file watcher: config not found at ${configPath}`);
+      return;
+    }
+  }
+
+  // Find code source config
+  const configSource = config.source;
+  if (!configSource || configSource.type !== 'code') {
+    console.warn('   ⚠ Cannot start file watcher: no code source in config');
+    return;
+  }
+
+  // Create incremental ingestion manager
+  const incrementalManager = new IncrementalIngestionManager(ctx.neo4jClient);
+  ctx.incrementalManager = incrementalManager;
+
+  // Create source config with absolute root
+  const watcherSourceConfig: CodeSourceConfig = {
+    ...(configSource as CodeSourceConfig),
+    root: path.resolve(projectPath, configSource.root || '.'),
+  };
+
+  // Create afterIngestion callback to auto-generate embeddings
+  const afterIngestion = async (stats: { created: number; updated: number }) => {
+    if (stats.created + stats.updated === 0) return;
+
+    // Check if embeddings config exists
+    if (!config.embeddings?.entities || config.embeddings.entities.length === 0) {
+      return;
+    }
+
+    // Check for Gemini API key
+    const geminiKey = getEnv(['GEMINI_API_KEY'], true) || process.env.GEMINI_API_KEY;
+    if (!geminiKey) {
+      ctx.logger?.logSystem('embeddings', 'Skipping auto-embed: no GEMINI_API_KEY');
+      return;
+    }
+
+    // Reuse existing Neo4j client from context
+    if (!ctx.neo4jClient) {
+      ctx.logger?.logSystem('embeddings', 'Skipping auto-embed: no Neo4j client');
+      return;
+    }
+
+    try {
+      // Convert config to runtime format
+      const embeddingsConfig = toRuntimeEmbeddingsConfig(config.embeddings);
+      if (!embeddingsConfig) {
+        return;
+      }
+
+      // Create embedding provider
+      const provider = new GeminiEmbeddingProvider({
+        apiKey: geminiKey,
+        model: embeddingsConfig.defaults?.model || 'text-embedding-004',
+      });
+
+      // Run embeddings for each entity (only dirty nodes)
+      for (const entityConfig of embeddingsConfig.entities) {
+        await runEmbeddingPipelines({
+          neo4j: ctx.neo4jClient,
+          entity: entityConfig,
+          provider,
+          defaults: embeddingsConfig.defaults,
+          onlyDirty: true, // Only dirty nodes
+        });
+      }
+    } catch (error: any) {
+      // Don't fail, just log
+      ctx.logger?.logSystem('embeddings', `Auto-embed failed: ${error.message}`);
+    }
+  };
+
+  // Create and start file watcher
+  const fileWatcher = new FileWatcher(incrementalManager, watcherSourceConfig, {
+    logger: ctx.logger,
+    verbose: false, // Use logger instead
+    batchInterval: 1000, // 1 second batching
+    afterIngestion,
+  });
+
+  try {
+    await fileWatcher.start();
+    ctx.fileWatcher = fileWatcher;
+
+    // Update the registry's LoadedProject with watcher/manager references
+    const activeProject = ctx.registry.getActive();
+    if (activeProject) {
+      activeProject.fileWatcher = fileWatcher;
+      activeProject.incrementalManager = incrementalManager;
+    }
+
+    // Logger already logs via logWatcherStarted
+  } catch (error: any) {
+    console.warn(`   ⚠ Failed to start file watcher: ${error.message}`);
   }
 }
 
@@ -557,6 +777,19 @@ export async function createRagForgeAgent(options: AgentOptions) {
   const geminiKey = getEnv(['GEMINI_API_KEY'], true) || process.env.GEMINI_API_KEY;
   const replicateToken = getEnv(['REPLICATE_API_TOKEN'], true) || process.env.REPLICATE_API_TOKEN;
 
+  // Create project registry for multi-project support
+  const registry = new ProjectRegistry({
+    memoryPolicy: {
+      maxLoadedProjects: 3,
+      idleUnloadTimeout: 5 * 60 * 1000, // 5 minutes
+    },
+    onActiveProjectChanged: (projectId) => {
+      if (verbose) {
+        console.log(`   🔄 Active project: ${projectId || '(none)'}`);
+      }
+    },
+  });
+
   // Create mutable context - this is shared by all tools
   const ctx: AgentProjectContext = {
     currentProjectPath: null,
@@ -567,6 +800,7 @@ export async function createRagForgeAgent(options: AgentOptions) {
     rootDir,
     geminiKey,
     replicateToken,
+    registry,
   };
 
   // Cache for the current project config (updated when project changes)
@@ -703,6 +937,12 @@ export async function createRagForgeAgent(options: AgentOptions) {
       onIngest: createIngestHandler(ctx),
       onEmbeddings: createEmbeddingsHandler(ctx),
       onLoadProject: createLoadProjectHandler(ctx),
+    },
+
+    // Project management tools (multi-project support)
+    includeProjectManagementTools: true,
+    projectManagementContext: {
+      registry: ctx.registry,
     },
 
     // Agent persona for conversational responses
@@ -901,9 +1141,7 @@ export async function runAgent(options: AgentOptions): Promise<void> {
       console.log('   Use --script script.ts to run agent scripts.');
     }
   } finally {
-    // Close the context's ragClient if it exists
-    if (context.ragClient) {
-      await context.ragClient.close();
-    }
+    // Dispose of all loaded projects (closes Neo4j connections, stops file watchers)
+    await context.registry.dispose();
   }
 }

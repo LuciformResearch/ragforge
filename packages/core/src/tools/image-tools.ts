@@ -226,6 +226,8 @@ export interface ImageToolsContext {
   projectRoot: string;
   /** OCR Service instance (from ragforge) */
   ocrService?: any;
+  /** Callback to ingest a created/modified file */
+  onFileCreated?: (filePath: string, fileType: 'image' | '3d' | 'document') => Promise<void>;
 }
 
 /**
@@ -457,6 +459,15 @@ export function generateGenerateImageHandler(ctx: ImageToolsContext): (args: any
           const buffer = Buffer.from(imgPart.inlineData!.data!, 'base64');
           await fs.mkdir(pathModule.dirname(absoluteOutputPath), { recursive: true });
           await fs.writeFile(absoluteOutputPath, buffer);
+
+          // Ingest the created image into the knowledge graph
+          if (ctx.onFileCreated) {
+            try {
+              await ctx.onFileCreated(absoluteOutputPath, 'image');
+            } catch (e) {
+              console.warn(`[image-tools] Failed to ingest created image: ${e}`);
+            }
+          }
 
           return {
             prompt,

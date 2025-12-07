@@ -187,6 +187,11 @@ Note: Requires GEMINI_API_KEY and REPLICATE_API_TOKEN environment variables.`,
 export interface ThreeDToolsContext {
   /** Project root directory */
   projectRoot: string;
+  /**
+   * Callback when a file is created by 3D tools
+   * Used for automatic ingestion
+   */
+  onFileCreated?: (filePath: string, fileType: 'image' | '3d' | 'document') => Promise<void>;
 }
 
 /**
@@ -268,6 +273,14 @@ export function generateRender3DAssetHandler(ctx: ThreeDToolsContext): (args: an
         background,
         precise_framing
       );
+
+      // Trigger ingestion callback for each rendered image
+      if (ctx.onFileCreated) {
+        for (const render of renders) {
+          const absolutePath = pathModule.join(absoluteOutputDir, pathModule.basename(render.path));
+          await ctx.onFileCreated(absolutePath, 'image');
+        }
+      }
 
       return {
         model_path,
@@ -799,6 +812,11 @@ export function generateGenerate3DFromImageHandler(ctx: ThreeDToolsContext): (ar
       // Create output directory and save
       await fs.mkdir(pathModule.dirname(absoluteOutputPath), { recursive: true });
       await fs.writeFile(absoluteOutputPath, modelBuffer);
+
+      // Trigger ingestion callback for the 3D model
+      if (ctx.onFileCreated) {
+        await ctx.onFileCreated(absoluteOutputPath, '3d');
+      }
 
       return {
         output_path,

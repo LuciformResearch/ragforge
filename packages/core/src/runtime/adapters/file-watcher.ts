@@ -183,7 +183,13 @@ export class FileWatcher {
       this.config.onFileChange(filePath, eventType);
     }
 
-    // Add to ingestion queue
-    this.queue.addFile(filePath);
+    // Add to appropriate queue based on event type
+    if (eventType === 'unlink') {
+      // File deleted - queue for node deletion
+      this.queue.addDeletedFile(filePath);
+    } else {
+      // File added or changed - queue for ingestion
+      this.queue.addFile(filePath);
+    }
   }
 }

@@ -1,8 +1,22 @@
 # Roadmap: Agent Integration & Real-time Ingestion
 
 **Created**: 2025-12-07
-**Status**: Planning
+**Status**: In Progress (Phase 5)
 **Author**: Lucie Defraiteur
+
+---
+
+## Progress Summary (Updated 2025-12-07)
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| Phase 1: Media Ingestion | ✅ Done | image-tools.ts, threed-tools.ts updated |
+| Phase 2: File Tracker Auto-Start | ✅ Done | FileWatcher starts on project load, AgentLogger integrated |
+| Phase 3: Embedding Auto-Trigger | ✅ Done | afterIngestion callback in IngestionQueue, uses runEmbeddingPipelines |
+| Phase 4: Deletion Cascade | ✅ Done | deleteNodesForFile/Files in IncrementalIngestionManager, pendingDeletes queue |
+| Phase 5: Multi-Project Registry | ✅ Done | ProjectRegistry + tools + agent.ts integration + syncContextFromRegistry |
+| Phase 6: Quick Directory Ingestion | ⏳ Pending | |
+| Phase 7: Testing | ⏳ Pending | |
 
 ---
 
@@ -473,7 +487,161 @@ Expected flow:
 
 ---
 
-## Phase 6: Testing Infrastructure
+## Phase 6: Quick Directory Ingestion
+
+**Goal**: Allow ingesting any directory without full project setup.
+
+### 6.1 Use Case
+
+```bash
+# User wants to analyze a random codebase without creating a ragforge.config.yaml
+ragforge ingest /path/to/random-code
+
+# Or via agent
+"Ingest and analyze the code in ~/Downloads/some-library"
+```
+
+### 6.2 Minimal Project Bootstrap
+
+When ingesting a directory that isn't a RagForge project:
+
+```typescript
+async function ingestCustomDirectory(dirPath: string, options?: QuickIngestOptions) {
+  // 1. Create minimal .ragforge folder
+  const ragforgeDir = path.join(dirPath, '.ragforge');
+  await fs.mkdir(ragforgeDir, { recursive: true });
+
+  // 2. Auto-generate config based on detected file types
+  const detectedTypes = await detectFileTypes(dirPath);
+  const autoConfig = generateMinimalConfig(detectedTypes);
+  await fs.writeFile(
+    path.join(ragforgeDir, 'auto-config.yaml'),
+    yaml.stringify(autoConfig)
+  );
+
+  // 3. Connect to shared/project-specific Neo4j
+  const neo4j = options?.sharedNeo4j ?? await createTempNeo4jConnection();
+
+  // 4. Ingest everything found
+  const manager = new IncrementalIngestionManager(neo4j);
+  const stats = await manager.ingestFromPaths({
+    root: dirPath,
+    include: detectedTypes.patterns, // e.g., ['**/*.ts', '**/*.py', '**/*.md']
+    exclude: ['node_modules', '.git', 'dist']
+  });
+
+  return { stats, configPath: path.join(ragforgeDir, 'auto-config.yaml') };
+}
+```
+
+### 6.3 Auto-Detection Logic
+
+```typescript
+interface DetectedFileTypes {
+  patterns: string[];
+  primaryLanguage: string | null;
+  hasPackageJson: boolean;
+  hasRequirementsTxt: boolean;
+  hasCargoToml: boolean;
+  mediaFiles: number;
+  documentFiles: number;
+}
+
+async function detectFileTypes(dirPath: string): Promise<DetectedFileTypes> {
+  // Scan directory and detect:
+  // - Programming languages (by extension)
+  // - Build/package files
+  // - Media files (images, 3D, audio)
+  // - Documents (PDF, DOCX, MD)
+}
+
+function generateMinimalConfig(detected: DetectedFileTypes): RagForgeConfig {
+  return {
+    source: {
+      type: detected.primaryLanguage ?? 'mixed',
+      root: '.',
+      include: detected.patterns,
+      exclude: ['node_modules', '.git', 'dist', '__pycache__', 'target']
+    },
+    neo4j: {
+      // Use environment defaults or embedded
+      uri: process.env.NEO4J_URI ?? 'bolt://localhost:7687'
+    },
+    embeddings: {
+      // Minimal embedding config
+      defaults: { model: 'text-embedding-004' }
+    }
+  };
+}
+```
+
+### 6.4 CLI Command
+
+```typescript
+// packages/cli/src/commands/ingest.ts
+program
+  .command('ingest <directory>')
+  .description('Quick-ingest any directory (creates .ragforge/ if needed)')
+  .option('-w, --watch', 'Keep watching for changes after initial ingest')
+  .option('--no-embeddings', 'Skip embedding generation')
+  .option('-p, --project <name>', 'Project name for Neo4j namespace')
+  .action(async (directory, options) => {
+    const result = await ingestCustomDirectory(directory, {
+      watch: options.watch,
+      generateEmbeddings: options.embeddings !== false,
+      projectName: options.project
+    });
+
+    console.log(`Ingested ${result.stats.total} files`);
+    if (options.watch) {
+      console.log('Watching for changes... (Ctrl+C to stop)');
+    }
+  });
+```
+
+### 6.5 Agent Tool
+
+```typescript
+const ingestDirectoryTool = {
+  name: 'ingest_directory',
+  description: `Quickly ingest and index any directory for RAG queries.
+
+Creates a minimal .ragforge/ folder if the directory isn't already a RagForge project.
+Auto-detects file types and configures ingestion accordingly.
+
+Parameters:
+- path: Directory path to ingest
+- watch: Keep watching for changes (default: false)
+
+Example: ingest_directory({ path: "~/code/some-library" })`,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      path: { type: 'string', description: 'Directory path' },
+      watch: { type: 'boolean', description: 'Watch for changes' }
+    },
+    required: ['path']
+  }
+};
+```
+
+### Testing Path 6.x
+
+```
+Test: "Ingest ~/Downloads/random-code and tell me what it contains"
+
+Expected flow:
+1. Agent calls ingest_directory({ path: "~/Downloads/random-code" })
+2. .ragforge/ folder created with auto-config.yaml
+3. Files detected: 15 .py, 3 .md, 2 .json
+4. All files ingested → 42 Scope nodes created
+5. Agent can now query: "What functions are defined?"
+6. Results returned from the ingested code
+```
+
+---
+
+## Phase 7: Testing Infrastructure
 
 ### 6.1 Integration Test Suite
 

@@ -130,7 +130,7 @@ export type {
 } from './summarization/summary-storage.js';
 
 // RagAgent - Main agent implementation
-export { RagAgent, createRagAgent, type RagAgentOptions, type AskResult, type AgentSessionLog, type AgentLogEntry } from './agents/rag-agent.js';
+export { RagAgent, createRagAgent, AgentLogger, type RagAgentOptions, type AskResult, type AgentSessionLog, type AgentLogEntry } from './agents/rag-agent.js';
 
 // Legacy Agent Runtime (kept for reference, not exported)
 // export { AgentRuntime } from './agents/agent-runtime.js';
@@ -200,6 +200,9 @@ export * from './adapters/index.js';
 
 // OCR (Optical Character Recognition)
 export * from './ocr/index.js';
+
+// Multi-Project Support
+export * from './projects/index.js';
 
 // Pattern Matching (for GLOB/REGEX operators in queries)
 export {

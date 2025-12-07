@@ -114,6 +114,18 @@ export type {
   ProjectToolResult,
 } from './tools/project-tools.js';
 
+// Project Management Tools (multi-project support)
+export {
+  generateProjectManagementTools,
+  generateListProjectsTool,
+  generateListProjectsHandler,
+  generateSwitchProjectTool,
+  generateSwitchProjectHandler,
+  generateUnloadProjectTool,
+  generateUnloadProjectHandler,
+} from './tools/project-management-tools.js';
+export type { ProjectManagementContext } from './tools/project-management-tools.js';
+
 // Web Tools (search web, fetch web pages)
 export {
   webToolDefinitions,

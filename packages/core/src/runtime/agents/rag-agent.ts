@@ -21,8 +21,8 @@
  * ```
  */
 
-import { generateToolsFromConfig, generateFileTools, generateImageTools, generate3DTools, generateProjectTools, IngestionLock, withIngestionLock, webToolDefinitions, createWebToolHandlers } from '../../index.js';
-import type { ToolGenerationOptions, GeneratedToolDefinition, ToolHandlerGenerator, RagForgeConfig, FileToolsContext, ImageToolsContext, ThreeDToolsContext, ProjectToolsContext, WebToolsContext } from '../../index.js';
+import { generateToolsFromConfig, generateFileTools, generateImageTools, generate3DTools, generateProjectTools, generateProjectManagementTools, IngestionLock, withIngestionLock, webToolDefinitions, createWebToolHandlers } from '../../index.js';
+import type { ToolGenerationOptions, GeneratedToolDefinition, ToolHandlerGenerator, RagForgeConfig, FileToolsContext, ImageToolsContext, ThreeDToolsContext, ProjectToolsContext, WebToolsContext, ProjectManagementContext } from '../../index.js';
 import { generatePlanActionsTool, type ActionPlan, type PlanExecutionResult } from '../../tools/planning-tools.js';
 import { formatLocalDate, getFilenameTimestamp } from '../utils/timestamp.js';
 import { StructuredLLMExecutor, BaseToolExecutor, type ToolCallRequest, type ToolExecutionResult } from '../llm/structured-llm-executor.js';
@@ -229,10 +229,13 @@ export class AgentLogger {
    */
   logIngestion(
     action: 'started' | 'completed' | 'error',
-    data: { fileCount?: number; stats?: { created: number; updated: number; deleted: number; unchanged: number }; error?: string }
+    data: { fileCount?: number; deleteCount?: number; stats?: { created: number; updated: number; deleted: number; unchanged: number }; error?: string }
   ): void {
     if (action === 'started') {
-      console.log(`[ingestion] Processing ${data.fileCount} file(s)...`);
+      const parts = [];
+      if (data.fileCount) parts.push(`${data.fileCount} to ingest`);
+      if (data.deleteCount) parts.push(`${data.deleteCount} to delete`);
+      console.log(`[ingestion] Processing: ${parts.join(', ') || 'batch'}...`);
     } else if (action === 'completed' && data.stats) {
       const { created, updated, deleted, unchanged } = data.stats;
       console.log(`[ingestion] Completed: +${created} created, ~${updated} updated, -${deleted} deleted, =${unchanged} unchanged`);
@@ -471,6 +474,19 @@ export interface RagAgentOptions {
    * Example: "A friendly coding assistant named RagForge"
    */
   persona?: string;
+
+  /**
+   * Include project management tools (list_projects, switch_project, unload_project)
+   * Enables the agent to work with multiple projects simultaneously
+   * Default: false
+   */
+  includeProjectManagementTools?: boolean;
+
+  /**
+   * Context for project management tools
+   * Required if includeProjectManagementTools is true
+   */
+  projectManagementContext?: import('../../tools/project-management-tools.js').ProjectManagementContext;
 }
 
 export interface AskResult {
@@ -1147,9 +1163,17 @@ export async function createRagAgent(options: RagAgentOptions): Promise<RagAgent
       ? options.projectRoot() || process.cwd()
       : options.projectRoot || process.cwd();
 
+    // Create onFileCreated wrapper that calls onFileModified with 'created'
+    const onFileCreated = options.onFileModified
+      ? async (filePath: string, _fileType: 'image' | '3d' | 'document') => {
+          await options.onFileModified!(filePath, 'created');
+        }
+      : undefined;
+
     // Image tools context (uses GEMINI_API_KEY and REPLICATE_API_TOKEN from env)
     const imageCtx: ImageToolsContext = {
       projectRoot: resolvedProjectRoot,
+      onFileCreated,
     };
 
     const imageTools = generateImageTools(imageCtx);
@@ -1159,6 +1183,7 @@ export async function createRagAgent(options: RagAgentOptions): Promise<RagAgent
     // 3D tools context (uses REPLICATE_API_TOKEN from env)
     const threeDCtx: ThreeDToolsContext = {
       projectRoot: resolvedProjectRoot,
+      onFileCreated,
     };
 
     const threeDTools = generate3DTools(threeDCtx);
@@ -1189,6 +1214,17 @@ export async function createRagAgent(options: RagAgentOptions): Promise<RagAgent
 
     if (options.verbose) {
       console.log(`   🚀 Project tools enabled (${projectTools.tools.length} tools)`);
+    }
+  }
+
+  // 3d-bis. Add project management tools if enabled (multi-project support)
+  if (options.includeProjectManagementTools && options.projectManagementContext) {
+    const projectMgmtTools = generateProjectManagementTools(options.projectManagementContext);
+    tools.push(...projectMgmtTools.tools);
+    Object.assign(boundHandlers, projectMgmtTools.handlers);
+
+    if (options.verbose) {
+      console.log(`   📂 Project management tools enabled (${projectMgmtTools.tools.length} tools: list_projects, switch_project, unload_project)`);
     }
   }
 
