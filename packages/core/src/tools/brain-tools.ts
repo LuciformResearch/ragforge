@@ -2166,6 +2166,116 @@ export function generateCleanupBrainHandler(ctx: BrainToolsContext) {
 }
 
 // ============================================
+// Run Cypher Tool
+// ============================================
+
+/**
+ * Generate run_cypher tool definition
+ */
+export function generateRunCypherTool(): GeneratedToolDefinition {
+  return {
+    name: 'run_cypher',
+    description: `Execute a Cypher query directly on the Neo4j database.
+
+⚠️ USE WITH CAUTION - This tool can modify or delete data.
+
+Best for:
+- Debugging and inspecting the knowledge graph
+- Ad-hoc queries to understand data structure
+- Checking node counts, properties, relationships
+
+Examples:
+  run_cypher({ query: "MATCH (n) RETURN labels(n)[0] as label, count(n) as cnt ORDER BY cnt DESC LIMIT 10" })
+  run_cypher({ query: "MATCH (n) WHERE n.schemaDirty = true RETURN count(n)" })
+  run_cypher({ query: "MATCH (n:Scope) RETURN n.name, n.file LIMIT 5" })
+
+Parameters:
+- query: The Cypher query to execute
+- params: Optional parameters for the query (for parameterized queries)`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Cypher query to execute',
+        },
+        params: {
+          type: 'object',
+          description: 'Optional parameters for parameterized queries',
+        },
+      },
+      required: ['query'],
+    },
+  };
+}
+
+/**
+ * Generate handler for run_cypher
+ */
+export function generateRunCypherHandler(ctx: BrainToolsContext) {
+  return async (params: { query: string; params?: Record<string, unknown> }): Promise<{
+    success: boolean;
+    records?: Array<Record<string, unknown>>;
+    summary?: { counters: Record<string, number> };
+    error?: string;
+  }> => {
+    const neo4jClient = ctx.brain.getNeo4jClient();
+
+    if (!neo4jClient) {
+      return {
+        success: false,
+        error: 'Neo4j not connected. Initialize the brain first.',
+      };
+    }
+
+    try {
+      const result = await neo4jClient.run(params.query, params.params || {});
+
+      // Convert records to plain objects
+      const records = result.records.map(record => {
+        const obj: Record<string, unknown> = {};
+        for (const key of record.keys) {
+          if (typeof key !== 'string') continue; // Skip symbol keys
+          const value = record.get(key);
+          // Handle Neo4j Integer type
+          if (value && typeof value === 'object' && 'toNumber' in value) {
+            obj[key] = (value as { toNumber: () => number }).toNumber();
+          } else if (value && typeof value === 'object' && 'properties' in value) {
+            // Neo4j Node - extract properties
+            obj[key] = (value as { properties: unknown }).properties;
+          } else {
+            obj[key] = value;
+          }
+        }
+        return obj;
+      });
+
+      // Extract counters from summary
+      const counters: Record<string, number> = {};
+      const stats = result.summary?.counters?.updates();
+      if (stats) {
+        for (const [key, val] of Object.entries(stats)) {
+          if (typeof val === 'number' && val > 0) {
+            counters[key] = val;
+          }
+        }
+      }
+
+      return {
+        success: true,
+        records,
+        summary: Object.keys(counters).length > 0 ? { counters } : undefined,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        error: err.message || String(err),
+      };
+    }
+  };
+}
+
+// ============================================
 // Setup Tools Export
 // ============================================
 
@@ -2177,6 +2287,7 @@ export function generateSetupTools(): GeneratedToolDefinition[] {
     generateSetApiKeyTool(),
     generateGetBrainStatusTool(),
     generateCleanupBrainTool(),
+    generateRunCypherTool(),
   ];
 }
 
@@ -2188,5 +2299,6 @@ export function generateSetupToolHandlers(ctx: BrainToolsContext): Record<string
     set_api_key: generateSetApiKeyHandler(ctx),
     get_brain_status: generateGetBrainStatusHandler(ctx),
     cleanup_brain: generateCleanupBrainHandler(ctx),
+    run_cypher: generateRunCypherHandler(ctx),
   };
 }

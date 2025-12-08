@@ -69,7 +69,7 @@ export class IncrementalIngestionManager {
   async getExistingHashes(
     nodeIds: string[],
     projectId?: string
-  ): Promise<Map<string, { uuid: string; hash: string; source?: string; textContent?: string; name?: string; file?: string; labels?: string[] }>> {
+  ): Promise<Map<string, { uuid: string; hash: string; source?: string; textContent?: string; name?: string; file?: string; labels?: string[]; schemaDirty?: boolean }>> {
     if (nodeIds.length === 0) {
       return new Map();
     }
@@ -80,17 +80,17 @@ export class IncrementalIngestionManager {
       ? `
         MATCH (n)
         WHERE n.uuid IN $nodeIds AND n.projectId = $projectId
-        RETURN n.uuid AS uuid, n.hash AS hash, n.source AS source, n.textContent AS textContent, n.name AS name, n.file AS file, labels(n) AS labels
+        RETURN n.uuid AS uuid, n.hash AS hash, n.source AS source, n.textContent AS textContent, n.name AS name, n.file AS file, labels(n) AS labels, n.schemaDirty AS schemaDirty
         `
       : `
         MATCH (n)
         WHERE n.uuid IN $nodeIds
-        RETURN n.uuid AS uuid, n.hash AS hash, n.source AS source, n.textContent AS textContent, n.name AS name, n.file AS file, labels(n) AS labels
+        RETURN n.uuid AS uuid, n.hash AS hash, n.source AS source, n.textContent AS textContent, n.name AS name, n.file AS file, labels(n) AS labels, n.schemaDirty AS schemaDirty
         `;
 
     const result = await this.client.run(query, { nodeIds, projectId });
 
-    const hashes = new Map<string, { uuid: string; hash: string; source?: string; textContent?: string; name?: string; file?: string; labels?: string[] }>();
+    const hashes = new Map<string, { uuid: string; hash: string; source?: string; textContent?: string; name?: string; file?: string; labels?: string[]; schemaDirty?: boolean }>();
     for (const record of result.records) {
       hashes.set(record.get('uuid'), {
         uuid: record.get('uuid'),
@@ -99,7 +99,8 @@ export class IncrementalIngestionManager {
         textContent: record.get('textContent'),
         name: record.get('name'),
         file: record.get('file'),
-        labels: record.get('labels')
+        labels: record.get('labels'),
+        schemaDirty: record.get('schemaDirty')
       });
     }
     return hashes;
@@ -226,6 +227,26 @@ export class IncrementalIngestionManager {
       )
     );
 
+    // 4. Check for files with schemaDirty nodes - these need re-ingestion even if file unchanged
+    const schemaDirtyFiles = await this.getFilesWithDirtySchema(projectId);
+    if (schemaDirtyFiles.size > 0) {
+      let forcedCount = 0;
+      for (const dirtyFile of schemaDirtyFiles) {
+        if (unchangedFiles.has(dirtyFile)) {
+          unchangedFiles.delete(dirtyFile);
+          // Find the absolute path and add to changedFiles
+          const absPath = pathModule.join(rootPath, dirtyFile);
+          if (!changedFiles.includes(absPath)) {
+            changedFiles.push(absPath);
+            forcedCount++;
+          }
+        }
+      }
+      if (verbose) {
+        console.log(`🔄 Found ${schemaDirtyFiles.size} files with outdated schema, forced ${forcedCount} to re-ingest`);
+      }
+    }
+
     if (verbose) {
       console.log(`✅ Hash comparison: ${changedFiles.length} changed, ${unchangedFiles.size} unchanged`);
       if (unchangedFiles.size > 0 && changedFiles.length === 0) {
@@ -234,6 +255,28 @@ export class IncrementalIngestionManager {
     }
 
     return { allFiles, changedFiles, unchangedFiles, newHashes };
+  }
+
+  /**
+   * Get files that have nodes with schemaDirty = true
+   * These files need to be re-ingested even if their content hash hasn't changed
+   */
+  private async getFilesWithDirtySchema(projectId: string): Promise<Set<string>> {
+    const result = await this.client.run(
+      `MATCH (n)
+       WHERE n.projectId = $projectId AND n.schemaDirty = true AND n.file IS NOT NULL
+       RETURN DISTINCT n.file AS file`,
+      { projectId }
+    );
+
+    const files = new Set<string>();
+    for (const record of result.records) {
+      const file = record.get('file');
+      if (file) {
+        files.add(file);
+      }
+    }
+    return files;
   }
 
   /**
@@ -371,6 +414,8 @@ export class IncrementalIngestionManager {
       // Add schemaVersion to content nodes (for detecting schema changes)
       addSchemaVersion(node.labels, props);
 
+      // Note: schemaDirty is cleared via REMOVE in the query below, not via props
+
       // Mark Scope nodes as dirty if their embeddings need regeneration
       if (markDirty && node.labels.includes('Scope')) {
         props.embeddingsDirty = true;
@@ -403,6 +448,7 @@ export class IncrementalIngestionManager {
         UNWIND $nodes AS nodeData
         MERGE (n:${labels} {${uniqueField}: ${uniqueValue}})
         SET n += nodeData.props
+        REMOVE n.schemaDirty
         `,
         { nodes: nodeData }
       );
@@ -534,7 +580,8 @@ export class IncrementalIngestionManager {
 
       if (!existing) {
         created.push(node);
-      } else if (existing.hash !== currentHash) {
+      } else if (existing.hash !== currentHash || existing.schemaDirty === true) {
+        // Treat schemaDirty nodes as modified even if hash unchanged
         modified.push(node);
       } else {
         unchanged.push(uuid);
