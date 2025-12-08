@@ -136,7 +136,7 @@ export function isStructuralNode(node: ParsedNode): boolean {
     'DocumentFile',    // Documents (PDF, DOCX, etc.)
     'MarkdownSection', // Markdown sections
     'CodeBlock',       // Code blocks in markdown
-    'MarkupDocument',  // Markup documents
+    'MarkdownDocument',  // Markdown documents
     'SpreadsheetDocument', // Excel, CSV
     'PDFDocument',     // PDF documents
     'WordDocument',    // Word documents

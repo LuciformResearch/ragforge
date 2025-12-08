@@ -91,8 +91,10 @@ export class IngestionLock {
   /**
    * Acquire the lock for a file
    * Returns a release function to call when done
+   * @param filePath - Identifier for the lock (usually file path or operation name)
+   * @param timeoutMs - Optional timeout override. 0 = no timeout (for initial ingestions). Default uses constructor timeout.
    */
-  async acquire(filePath: string): Promise<() => void> {
+  async acquire(filePath: string, timeoutMs?: number): Promise<() => void> {
     // If already locked, add to pending and wait
     if (this.locked) {
       this.pendingFiles.push(filePath);
@@ -116,12 +118,15 @@ export class IngestionLock {
     // Log acquisition
     this.logger?.logLock('acquired', filePath);
 
-    // Safety timeout
-    this.timeoutHandle = setTimeout(() => {
-      console.warn(`[IngestionLock] Timeout reached for ${filePath}, force releasing`);
-      this.logger?.logLock('timeout', filePath, this.options.timeout);
-      this.release();
-    }, this.options.timeout);
+    // Safety timeout (0 = no timeout for long-running initial ingestions)
+    const timeout = timeoutMs !== undefined ? timeoutMs : this.options.timeout;
+    if (timeout > 0) {
+      this.timeoutHandle = setTimeout(() => {
+        console.warn(`[IngestionLock] Timeout reached for ${filePath}, force releasing`);
+        this.logger?.logLock('timeout', filePath, timeout);
+        this.release();
+      }, timeout);
+    }
 
     // Return release function
     return () => this.release();

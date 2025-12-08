@@ -1,5 +1,5 @@
 /**
- * Brain Manager
+ * Brain Manager - v5 content-only incremental
  *
  * Central manager for the agent's persistent knowledge base.
  * Manages:
@@ -93,7 +93,7 @@ export interface BrainConfig {
 }
 
 export interface RegisteredProject {
-  /** Unique project ID */
+  /** Unique project ID (always generated from path) */
   id: string;
   /** Absolute path to project */
   path: string;
@@ -105,6 +105,8 @@ export interface RegisteredProject {
   nodeCount: number;
   /** Auto-cleanup flag */
   autoCleanup?: boolean;
+  /** Display name (optional, for UI purposes) */
+  displayName?: string;
 }
 
 export interface ProjectsRegistry {
@@ -115,9 +117,7 @@ export interface ProjectsRegistry {
 export interface QuickIngestOptions {
   /** Watch for changes after initial ingest */
   watch?: boolean;
-  /** Generate embeddings */
-  generateEmbeddings?: boolean;
-  /** Custom project name */
+  /** Custom project name (used as display name) */
   projectName?: string;
   /** File patterns to include */
   include?: string[];
@@ -252,6 +252,7 @@ export class BrainManager {
    * Get or create the singleton BrainManager instance
    */
   static async getInstance(config?: Partial<BrainConfig>): Promise<BrainManager> {
+    // Test: comment inside scope body
     if (!BrainManager.instance) {
       const mergedConfig = {
         ...DEFAULT_BRAIN_CONFIG,
@@ -309,8 +310,55 @@ export class BrainManager {
     // 7. Connect to Neo4j
     await this.connectNeo4j();
 
+    // 8. Ensure indexes exist for fast lookups
+    await this.ensureIndexes();
+
     this.initialized = true;
     console.log('[Brain] Initialized successfully');
+  }
+
+  /**
+   * Ensure Neo4j indexes exist for fast node lookups
+   * Critical for relationship creation performance
+   */
+  private async ensureIndexes(): Promise<void> {
+    if (!this.neo4jClient) return;
+
+    console.log('[Brain] Ensuring indexes...');
+
+    // Index on uuid for fast relationship MATCH queries
+    // This dramatically speeds up MATCH (from {uuid: ...}) queries
+    const indexQueries = [
+      'CREATE INDEX node_uuid IF NOT EXISTS FOR (n:Scope) ON (n.uuid)',
+      'CREATE INDEX file_uuid IF NOT EXISTS FOR (n:File) ON (n.uuid)',
+      'CREATE INDEX directory_uuid IF NOT EXISTS FOR (n:Directory) ON (n.uuid)',
+      'CREATE INDEX project_uuid IF NOT EXISTS FOR (n:Project) ON (n.uuid)',
+      'CREATE INDEX package_uuid IF NOT EXISTS FOR (n:PackageJson) ON (n.uuid)',
+      'CREATE INDEX markdown_uuid IF NOT EXISTS FOR (n:MarkdownDocument) ON (n.uuid)',
+      'CREATE INDEX codeblock_uuid IF NOT EXISTS FOR (n:CodeBlock) ON (n.uuid)',
+      'CREATE INDEX section_uuid IF NOT EXISTS FOR (n:MarkdownSection) ON (n.uuid)',
+      'CREATE INDEX datafile_uuid IF NOT EXISTS FOR (n:DataFile) ON (n.uuid)',
+      'CREATE INDEX datasection_uuid IF NOT EXISTS FOR (n:DataSection) ON (n.uuid)',
+      'CREATE INDEX mediafile_uuid IF NOT EXISTS FOR (n:MediaFile) ON (n.uuid)',
+      'CREATE INDEX imagefile_uuid IF NOT EXISTS FOR (n:ImageFile) ON (n.uuid)',
+      'CREATE INDEX webpage_uuid IF NOT EXISTS FOR (n:WebPage) ON (n.uuid)',
+      // Index on projectId for fast project-scoped queries
+      'CREATE INDEX scope_projectid IF NOT EXISTS FOR (n:Scope) ON (n.projectId)',
+      'CREATE INDEX file_projectid IF NOT EXISTS FOR (n:File) ON (n.projectId)',
+    ];
+
+    for (const query of indexQueries) {
+      try {
+        await this.neo4jClient.run(query);
+      } catch (err: any) {
+        // Ignore errors (index might already exist with different name)
+        if (!err.message?.includes('already exists')) {
+          console.warn(`[Brain] Index creation warning: ${err.message}`);
+        }
+      }
+    }
+
+    console.log('[Brain] Indexes ensured');
   }
 
   /**
@@ -806,15 +854,23 @@ volumes:
 
   /**
    * Register a project in the brain
+   * @param projectPath - Absolute or relative path to the project
+   * @param type - Project type
+   * @param displayName - Optional display name for UI purposes
    */
-  async registerProject(projectPath: string, type: ProjectType = 'ragforge-project', customId?: string): Promise<string> {
+  async registerProject(projectPath: string, type: ProjectType = 'ragforge-project', displayName?: string): Promise<string> {
     const absolutePath = path.resolve(projectPath);
-    const projectId = customId || ProjectRegistry.generateId(absolutePath);
+    // Always generate ID from path - this is the source of truth
+    const projectId = ProjectRegistry.generateId(absolutePath);
 
     // Check if already registered
     if (this.registeredProjects.has(projectId)) {
       const existing = this.registeredProjects.get(projectId)!;
       existing.lastAccessed = new Date();
+      // Update displayName if provided
+      if (displayName) {
+        existing.displayName = displayName;
+      }
       await this.saveProjectsRegistry();
       return projectId;
     }
@@ -830,6 +886,7 @@ volumes:
       lastAccessed: new Date(),
       nodeCount,
       autoCleanup: type === 'quick-ingest',
+      displayName,
     };
 
     this.registeredProjects.set(projectId, registered);
@@ -922,10 +979,10 @@ volumes:
       throw new Error('Brain not initialized. Call initialize() first.');
     }
 
-    // Generate project ID
-    const projectId = options.projectName
-      ? options.projectName.toLowerCase().replace(/\s+/g, '-')
-      : ProjectRegistry.generateId(absolutePath);
+    // Always generate project ID from path - this is the source of truth
+    const projectId = ProjectRegistry.generateId(absolutePath);
+    // projectName is used as displayName only
+    const displayName = options.projectName;
 
     // Use provided patterns or sensible defaults
     const includePatterns = options.include || [
@@ -946,11 +1003,11 @@ volumes:
     ];
 
     console.log(`[QuickIngest] Starting ingestion of ${absolutePath}`);
-    console.log(`[QuickIngest] Project: ${projectId}`);
+    console.log(`[QuickIngest] Project ID: ${projectId}${displayName ? ` (${displayName})` : ''}`);
     console.log(`[QuickIngest] Patterns: ${includePatterns.length} include, ${excludePatterns.length} exclude`);
 
-    // Acquire ingestion lock
-    const release = await this.ingestionLock.acquire(`quickIngest:${projectId}`);
+    // Acquire ingestion lock (no timeout for initial ingestions - can take minutes)
+    const release = await this.ingestionLock.acquire(`quickIngest:${projectId}`, 0);
 
     try {
       // Use IncrementalIngestionManager for unified ingestion with change tracking
@@ -973,16 +1030,21 @@ volumes:
       const nodesCreated = stats.created + stats.updated;
       console.log(`[QuickIngest] Ingestion stats: +${stats.created} created, ~${stats.updated} updated, -${stats.deleted} deleted, =${stats.unchanged} unchanged`);
 
-      // Generate embeddings if requested
+      // Always generate embeddings if service is available
       let embeddingsGenerated = 0;
-      if (options.generateEmbeddings && this.embeddingService) {
+      if (this.embeddingService) {
         if (!this.embeddingService.canGenerateEmbeddings()) {
           console.warn('[QuickIngest] ⚠️ GEMINI_API_KEY not found, skipping embeddings');
         } else {
           try {
+            // Detect initial ingestion (all created, nothing updated/unchanged)
+            const isInitialIngestion = stats.created > 0 && stats.updated === 0 && stats.unchanged === 0;
+            if (isInitialIngestion) {
+              console.log(`[QuickIngest] Initial ingestion detected - skipping hash checks for embeddings`);
+            }
             const embeddingResult = await this.embeddingService.generateMultiEmbeddings({
               projectId,
-              incrementalOnly: true,
+              incrementalOnly: !isInitialIngestion, // Skip hash checks for initial ingestion
               verbose: true,
             });
             embeddingsGenerated = embeddingResult.totalEmbedded;
@@ -992,8 +1054,8 @@ volumes:
         }
       }
 
-      // Register in brain with the same projectId used for nodes
-      await this.registerProject(absolutePath, 'quick-ingest', projectId);
+      // Register in brain with displayName if provided
+      await this.registerProject(absolutePath, 'quick-ingest', displayName);
 
       // Update node count
       const project = this.registeredProjects.get(projectId);
@@ -1006,7 +1068,8 @@ volumes:
       let watching = false;
       if (options.watch) {
         try {
-          await this.startWatching(absolutePath, { verbose: false });
+          // Skip initial sync since we just ingested
+          await this.startWatching(absolutePath, { verbose: false, skipInitialSync: true });
           watching = true;
           console.log(`[QuickIngest] File watcher started for ${projectId}`);
         } catch (err: any) {
@@ -1022,7 +1085,7 @@ volumes:
         stats: {
           filesProcessed: stats.created + stats.updated + stats.unchanged,
           nodesCreated,
-          embeddingsGenerated: options.generateEmbeddings ? embeddingsGenerated : undefined,
+          embeddingsGenerated,
         },
         configPath: absolutePath,
         watching,
@@ -1835,6 +1898,7 @@ volumes:
       includePatterns?: string[];
       excludePatterns?: string[];
       verbose?: boolean;
+      skipInitialSync?: boolean; // Skip initial sync if we just ingested
     } = {}
   ): Promise<void> {
     const absolutePath = path.resolve(projectPath);
@@ -1884,6 +1948,7 @@ volumes:
 
     // Create FileWatcher with afterIngestion callback for embeddings
     const watcher = new FileWatcher(ingestionManager, sourceConfig, {
+      projectId, // Required for hash-based incremental detection
       verbose: options.verbose ?? false,
       ingestionLock: this.ingestionLock,
       batchInterval: 1000, // 1 second batching
@@ -1911,36 +1976,41 @@ volumes:
     });
 
     // Initial sync: catch up with any changes since last ingestion
-    console.log(`[Brain] Initial sync for project: ${projectId}...`);
-    try {
-      const syncResult = await ingestionManager.ingestFromPaths(
-        sourceConfig,
-        { projectId, verbose: options.verbose ?? false, incremental: true }
-      );
+    // Skip if we just ingested (e.g., called from quickIngest)
+    if (options.skipInitialSync) {
+      console.log(`[Brain] Skipping initial sync (just ingested)`);
+    } else {
+      console.log(`[Brain] Initial sync for project: ${projectId}...`);
+      try {
+        const syncResult = await ingestionManager.ingestFromPaths(
+          sourceConfig,
+          { projectId, verbose: options.verbose ?? false, incremental: true }
+        );
 
-      if (syncResult.created + syncResult.updated + syncResult.deleted > 0) {
-        console.log(`[Brain] Initial sync: +${syncResult.created} created, ~${syncResult.updated} updated, -${syncResult.deleted} deleted`);
+        if (syncResult.created + syncResult.updated + syncResult.deleted > 0) {
+          console.log(`[Brain] Initial sync: +${syncResult.created} created, ~${syncResult.updated} updated, -${syncResult.deleted} deleted`);
 
-        // Generate embeddings for synced files if needed
-        if (this.embeddingService?.canGenerateEmbeddings()) {
-          console.log(`[Brain] Generating embeddings for synced files...`);
-          try {
-            const embedResult = await this.embeddingService.generateMultiEmbeddings({
-              projectId,
-              incrementalOnly: true,
-              verbose: options.verbose ?? false,
-            });
-            console.log(`[Brain] Embeddings: ${embedResult.totalEmbedded} generated, ${embedResult.skippedCount} cached`);
-          } catch (err: any) {
-            console.warn(`[Brain] Embedding generation failed: ${err.message}`);
+          // Generate embeddings for synced files if needed
+          if (this.embeddingService?.canGenerateEmbeddings()) {
+            console.log(`[Brain] Generating embeddings for synced files...`);
+            try {
+              const embedResult = await this.embeddingService.generateMultiEmbeddings({
+                projectId,
+                incrementalOnly: true,
+                verbose: options.verbose ?? false,
+              });
+              console.log(`[Brain] Embeddings: ${embedResult.totalEmbedded} generated, ${embedResult.skippedCount} cached`);
+            } catch (err: any) {
+              console.warn(`[Brain] Embedding generation failed: ${err.message}`);
+            }
           }
+        } else {
+          console.log(`[Brain] Initial sync: no changes detected`);
         }
-      } else {
-        console.log(`[Brain] Initial sync: no changes detected`);
+      } catch (err: any) {
+        console.warn(`[Brain] Initial sync failed: ${err.message}`);
+        // Continue with watcher anyway
       }
-    } catch (err: any) {
-      console.warn(`[Brain] Initial sync failed: ${err.message}`);
-      // Continue with watcher anyway
     }
 
     // Start watching for future changes

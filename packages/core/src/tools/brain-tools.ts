@@ -200,7 +200,6 @@ export function generateCreateProjectHandler(ctx: BrainToolsContext) {
       if (ingest) {
         const result = await ctx.brain.quickIngest(projectPath, {
           projectName: name,
-          generateEmbeddings: generate_embeddings,
         });
         projectId = result.projectId;
         embeddingsGenerated = result.stats?.embeddingsGenerated || 0;
@@ -313,7 +312,6 @@ export function generateIngestDirectoryHandler(ctx: BrainToolsContext) {
       include: params.include,
       exclude: params.exclude,
       watch: params.watch,
-      generateEmbeddings: params.generate_embeddings,
     };
 
     return ctx.brain.quickIngest(params.path, options);
@@ -1099,7 +1097,6 @@ async function triggerReIngestion(
     try {
       const result = await brain.quickIngest(project.path, {
         projectName: project.id,
-        generateEmbeddings: true,
       });
       return { projectId: project.id, stats: result.stats };
     } catch (e: any) {

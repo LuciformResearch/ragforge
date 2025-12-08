@@ -209,8 +209,8 @@ export const MULTI_EMBED_CONFIGS: MultiEmbedNodeTypeConfig[] = [
     limit: 500,
   },
   {
-    label: 'MarkupDocument',
-    query: `MATCH (m:MarkupDocument {projectId: $projectId})
+    label: 'MarkdownDocument',
+    query: `MATCH (m:MarkdownDocument {projectId: $projectId})
             RETURN m.uuid AS uuid, m.file AS path, m.title AS title,
                    m.embedding_name_hash AS embedding_name_hash,
                    m.embedding_description_hash AS embedding_description_hash
@@ -567,7 +567,7 @@ export class EmbeddingService {
     const { projectId, verbose = false } = options;
     const incrementalOnly = options.incrementalOnly ?? true;
     const maxTextLength = options.maxTextLength ?? 4000;
-    const batchSize = options.batchSize ?? 50;
+    const batchSize = options.batchSize ?? 500; // Larger batches for Neo4j writes
     const nodeTypes = options.nodeTypes ?? DEFAULT_EMBED_CONFIGS;
 
     if (!this.embeddingProvider) {
@@ -739,7 +739,7 @@ export class EmbeddingService {
     const { projectId, verbose = false } = options;
     const incrementalOnly = options.incrementalOnly ?? true;
     const maxTextLength = options.maxTextLength ?? 4000;
-    const batchSize = options.batchSize ?? 50;
+    const batchSize = options.batchSize ?? 500; // Larger batches for Neo4j writes
     const nodeTypes = options.nodeTypes ?? MULTI_EMBED_CONFIGS;
     const embeddingTypes = options.embeddingTypes ?? ['name', 'content', 'description'];
 
@@ -843,7 +843,12 @@ export class EmbeddingService {
         continue;
       }
 
+      if (verbose) {
+        console.log(`[EmbeddingService]   Preparing ${config.label}.${embeddingType} (${result.records.length} nodes)...`);
+      }
+
       // Extract text and compute hash for each node
+      // We always compute newHash (needed for storage), but only compare with existingHash in incremental mode
       const nodes = result.records.map(r => {
         const text = embeddingConfig.textExtractor(r);
         const truncated = text.length > maxTextLength ? text.substring(0, maxTextLength) + '...' : text;
@@ -851,7 +856,8 @@ export class EmbeddingService {
           uuid: r.get('uuid'),
           text: truncated,
           newHash: truncated ? hashContent(truncated) : null,
-          existingHash: r.get(embeddingConfig.hashProperty) || null,
+          // Only fetch existing hash if we need to compare (incremental mode)
+          existingHash: incrementalOnly ? (r.get(embeddingConfig.hashProperty) || null) : null,
         };
       }).filter(n => n.text && n.text.length > 5); // Skip empty/tiny texts
 
@@ -859,10 +865,10 @@ export class EmbeddingService {
         continue;
       }
 
-      // Filter to only nodes that need embedding (no hash or hash changed)
+      // Filter to only nodes that need embedding
       const nodesToEmbed = incrementalOnly
-        ? nodes.filter(n => n.newHash && n.existingHash !== n.newHash)
-        : nodes.filter(n => n.newHash);
+        ? nodes.filter(n => n.newHash && n.existingHash !== n.newHash) // Incremental: only changed
+        : nodes.filter(n => n.newHash); // Initial: embed all with valid hash
 
       const skipped = nodes.length - nodesToEmbed.length;
       skippedCount += skipped;
@@ -881,6 +887,10 @@ export class EmbeddingService {
       // Generate embeddings
       const embeddings = await this.embeddingProvider!.embed(nodesToEmbed.map(n => n.text));
 
+      if (verbose) {
+        console.log(`[EmbeddingService]   Saving ${nodesToEmbed.length} embeddings to Neo4j...`);
+      }
+
       // Update nodes in batches
       for (let i = 0; i < nodesToEmbed.length; i += batchSize) {
         const batch = nodesToEmbed.slice(i, i + batchSize).map((n, idx) => ({
@@ -890,26 +900,27 @@ export class EmbeddingService {
         }));
 
         // Use specific queries for each embedding type (Neo4j doesn't support dynamic property names)
+        // Use label for indexed lookup (much faster than scanning all nodes!)
         const embeddingProp = embeddingConfig.propertyName;
-        const hashProp = embeddingConfig.hashProperty;
+        const label = config.label; // e.g. "Scope"
 
         let cypher: string;
         if (embeddingProp === 'embedding_name') {
           cypher = `UNWIND $batch AS item
-           MATCH (n {uuid: item.uuid})
+           MATCH (n:${label} {uuid: item.uuid})
            SET n.embedding_name = item.embedding, n.embedding_name_hash = item.hash`;
         } else if (embeddingProp === 'embedding_content') {
           cypher = `UNWIND $batch AS item
-           MATCH (n {uuid: item.uuid})
+           MATCH (n:${label} {uuid: item.uuid})
            SET n.embedding_content = item.embedding, n.embedding_content_hash = item.hash`;
         } else if (embeddingProp === 'embedding_description') {
           cypher = `UNWIND $batch AS item
-           MATCH (n {uuid: item.uuid})
+           MATCH (n:${label} {uuid: item.uuid})
            SET n.embedding_description = item.embedding, n.embedding_description_hash = item.hash`;
         } else {
           // Fallback for legacy 'embedding' property
           cypher = `UNWIND $batch AS item
-           MATCH (n {uuid: item.uuid})
+           MATCH (n:${label} {uuid: item.uuid})
            SET n.embedding = item.embedding, n.embedding_hash = item.hash`;
         }
 

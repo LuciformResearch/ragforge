@@ -60,7 +60,7 @@ export class IncrementalIngestionManager {
    * Works with ALL content node types:
    * - Scope, DataFile, MediaFile, DocumentFile
    * - VueSFC, SvelteComponent, Stylesheet
-   * - MarkupDocument, CodeBlock, DataSection
+   * - MarkdownDocument, CodeBlock, DataSection
    *
    * @param nodeIds - UUIDs to look up
    * @param projectId - Optional project ID to filter by
@@ -113,7 +113,7 @@ export class IncrementalIngestionManager {
    */
   async getExistingFileHashes(projectId: string): Promise<Map<string, string>> {
     const query = `
-      MATCH (f:File)-[:BELONGS_TO]->(p:Project {uuid: $projectId})
+      MATCH (f:File)-[:BELONGS_TO]->(p:Project {projectId: $projectId})
       WHERE f.rawContentHash IS NOT NULL
       RETURN f.path AS path, f.rawContentHash AS hash
     `;
@@ -379,6 +379,8 @@ export class IncrementalIngestionManager {
     }
 
     // Create nodes using UNWIND batching (one query per label type)
+    let processedNodes = 0;
+    const totalNodes = nodes.length;
     for (const [labels, nodeData] of nodesByLabel) {
       if (nodeData.length === 0) continue;
 
@@ -400,41 +402,71 @@ export class IncrementalIngestionManager {
         `,
         { nodes: nodeData }
       );
+
+      processedNodes += nodeData.length;
+      console.log(`   📦 Upserted ${nodeData.length} ${labels} nodes (${processedNodes}/${totalNodes})`);
     }
 
     // Create relationships using UNWIND batching (batches of 500)
+    // Optimization: Build uuid->labels map for indexed MATCH queries
     if (relationships.length > 0) {
+      console.log(`   🔗 Creating ${relationships.length} relationships...`);
+
+      // Build uuid -> primary label map for fast indexed lookups
+      const uuidToLabel = new Map<string, string>();
+      for (const node of nodes) {
+        // Use first label as primary (most specific)
+        const primaryLabel = node.labels[0] || 'Node';
+        uuidToLabel.set(node.id, primaryLabel);
+      }
+
       const batchSize = 500;
-      const relsByType = new Map<string, Array<{ from: string; to: string; props: any }>>();
+      // Group by relationship type AND label combination for optimized queries
+      const relsByTypeAndLabels = new Map<string, Array<{ from: string; to: string; props: any }>>();
 
       for (const rel of relationships) {
-        if (!relsByType.has(rel.type)) {
-          relsByType.set(rel.type, []);
+        const fromLabel = uuidToLabel.get(rel.from) || 'Node';
+        const toLabel = uuidToLabel.get(rel.to) || 'Node';
+        // Key includes rel type + labels for specific queries
+        const key = `${rel.type}|${fromLabel}|${toLabel}`;
+
+        if (!relsByTypeAndLabels.has(key)) {
+          relsByTypeAndLabels.set(key, []);
         }
-        relsByType.get(rel.type)!.push({
+        relsByTypeAndLabels.get(key)!.push({
           from: rel.from,
           to: rel.to,
           props: rel.properties || {}
         });
       }
 
-      // Process each relationship type in batches
-      for (const [relType, rels] of relsByType) {
+      // Process each relationship type+label combination in batches
+      let processedRels = 0;
+      for (const [key, rels] of relsByTypeAndLabels) {
+        const [relType, fromLabel, toLabel] = key.split('|');
+
         for (let i = 0; i < rels.length; i += batchSize) {
           const batch = rels.slice(i, i + batchSize);
 
+          // Use labeled MATCH for indexed lookups (100x faster!)
           await this.client.run(
             `
             UNWIND $rels AS relData
-            MATCH (from {uuid: relData.from}), (to {uuid: relData.to})
+            MATCH (from:${fromLabel} {uuid: relData.from})
+            MATCH (to:${toLabel} {uuid: relData.to})
             MERGE (from)-[r:${relType}]->(to)
             SET r += relData.props
             `,
             { rels: batch }
           );
+
+          processedRels += batch.length;
         }
+        console.log(`   🔗 ${rels.length} ${relType} (${fromLabel}→${toLabel}) [${processedRels}/${relationships.length}]`);
       }
     }
+
+    console.log(`   ✅ Upsert complete: ${totalNodes} nodes, ${relationships.length} relationships`);
   }
 
   /**
@@ -450,7 +482,7 @@ export class IncrementalIngestionManager {
    * 7. Track changes and generate diffs (if enabled)
    *
    * Supports: Scope, DataFile, MediaFile, DocumentFile, VueSFC,
-   *           SvelteComponent, Stylesheet, MarkupDocument, CodeBlock
+   *           SvelteComponent, Stylesheet, MarkdownDocument, CodeBlock
    */
   async ingestIncremental(
     graph: ParsedGraph,
@@ -691,27 +723,40 @@ export class IncrementalIngestionManager {
   }
 
   /**
-   * High-level method to ingest content from configured source
+   * Ingest files from source configuration
    *
    * OPTIMIZED: Pre-parsing hash check skips unchanged files entirely
    *
    * @param config - Source configuration (code, documents, etc.)
-   * @param options - Ingestion options including projectId
+   * @param options - Ingestion options
+   *   - incremental: Controls hash checking behavior
+   *     - true/'both': Check file hashes AND scope hashes (default)
+   *     - 'files': Check file hashes only, skip scope comparison
+   *     - 'content': Skip file hash check, but compare scope hashes (for watcher)
+   *     - false: No hash checks, direct upsert
    */
   async ingestFromPaths(
     config: SourceConfig,
-    options: IngestionOptions & { incremental?: boolean } = {}
+    options: IngestionOptions & { incremental?: boolean | 'files' | 'content' | 'both' } = {}
   ): Promise<IncrementalStats> {
     const { projectId, verbose = false, dryRun, trackChanges: optTrackChanges } = options;
-    const incremental = options.incremental ?? true;
     const trackChanges = optTrackChanges ?? config.track_changes ?? false;
+
+    // Parse incremental option
+    const incrementalOpt = options.incremental ?? true;
+    const checkFileHashes = incrementalOpt === true || incrementalOpt === 'both' || incrementalOpt === 'files';
+    const checkContentHashes = incrementalOpt === true || incrementalOpt === 'both' || incrementalOpt === 'content';
 
     if (verbose) {
       const pathCount = config.include?.length || 0;
       const sourceType = config.type === 'code' ? 'code' : 'files';
       console.log(`\n🔄 Ingesting ${sourceType} from ${pathCount} path(s)...`);
       console.log(`   Base path: ${config.root || '.'}`);
-      console.log(`   Mode: ${incremental ? 'incremental (with pre-parsing hash check)' : 'full'}`);
+      const modeStr = checkFileHashes && checkContentHashes ? 'incremental (files + content)'
+        : checkFileHashes ? 'incremental (files only)'
+        : checkContentHashes ? 'incremental (content only)'
+        : 'full';
+      console.log(`   Mode: ${modeStr}`);
       if (projectId) {
         console.log(`   Project: ${projectId}`);
       }
@@ -726,7 +771,7 @@ export class IncrementalIngestionManager {
     let skipFiles: Set<string> | undefined;
     let newHashes: Map<string, string> | undefined;
 
-    if (incremental && projectId) {
+    if (checkFileHashes && projectId) {
       const filterStart = Date.now();
       const filterResult = await this.filterChangedFiles(config, projectId, verbose);
       const filterMs = Date.now() - filterStart;
@@ -788,7 +833,7 @@ export class IncrementalIngestionManager {
     }
 
     // Ingest with projectId
-    if (incremental) {
+    if (checkContentHashes) {
       const stats = await this.ingestIncremental(parseResult.graph, {
         projectId,
         verbose,

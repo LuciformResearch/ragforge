@@ -1288,7 +1288,7 @@ export class CodeSourceAdapter extends SourceAdapter {
     }
 
     // Create WebDocument nodes for HTML/Vue/Svelte files
-    // (Document is reserved for Tika, MarkupDocument for Markdown)
+    // (Document is reserved for Tika, MarkdownDocument for Markdown)
     for (const [filePath, htmlResult] of htmlFiles) {
       const relPath = path.relative(projectRoot, filePath);
       const doc = htmlResult.document;
@@ -1814,14 +1814,14 @@ export class CodeSourceAdapter extends SourceAdapter {
       // This could be added later by extracting script content from svelteResult.blocks
     }
 
-    // Create MarkupDocument nodes for Markdown files
+    // Create MarkdownDocument nodes for Markdown files
     for (const [filePath, mdResult] of markdownFiles) {
       const relPath = path.relative(projectRoot, filePath);
       const doc = mdResult.document;
 
       const mdId = `markdown:${doc.uuid}`;
       nodes.push({
-        labels: ['MarkupDocument'],
+        labels: ['MarkdownDocument'],
         id: mdId,
         properties: {
           uuid: mdId,
@@ -2597,14 +2597,15 @@ export class CodeSourceAdapter extends SourceAdapter {
 
   /**
    * Hash scope content for incremental updates
-   * Uses full content to detect ANY changes in the scope
+   * Uses full content + docstring to detect ANY changes in the scope
    */
   private hashScope(scope: ScopeInfo): string {
     // Hash the full content to detect changes in implementation
     // Not just the signature which would miss body changes
     const content = scope.contentDedented || scope.content || '';
+    const docstring = (scope as any).docstring || '';
     const parentPrefix = scope.parent ? `${scope.parent}.` : '';
-    const hashInput = `${parentPrefix}${scope.name}:${scope.type}:${content}`;
+    const hashInput = `${parentPrefix}${scope.name}:${scope.type}:${docstring}:${content}`;
 
     return createHash('sha256')
       .update(hashInput)

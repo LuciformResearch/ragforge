@@ -9,11 +9,17 @@
  */
 
 import type { CodeSourceConfig } from './code-source-adapter.js';
+import type { SourceConfig } from './types.js';
 import type { IncrementalIngestionManager, IncrementalStats } from './incremental-ingestion.js';
 import type { IngestionLock } from '../../index.js';
 import type { AgentLogger } from '../agents/rag-agent.js';
 
 export interface IngestionQueueConfig {
+  /**
+   * Project ID for incremental ingestion
+   * Required for hash-based change detection
+   */
+  projectId?: string;
   /**
    * Optional AgentLogger for structured logging
    */
@@ -67,7 +73,7 @@ export class IngestionQueue {
   private isIngesting = false;
   private queuedBatch: Set<string> | null = null;
   private queuedDeletes: Set<string> | null = null;
-  private config: Required<Omit<IngestionQueueConfig, 'ingestionLock' | 'logger' | 'afterIngestion'>> & { ingestionLock?: IngestionLock; afterIngestion?: (stats: IncrementalStats) => Promise<void> };
+  private config: Required<Omit<IngestionQueueConfig, 'ingestionLock' | 'logger' | 'afterIngestion' | 'projectId'>> & { projectId?: string; ingestionLock?: IngestionLock; afterIngestion?: (stats: IncrementalStats) => Promise<void> };
   private logger?: AgentLogger;
 
   constructor(
@@ -76,6 +82,7 @@ export class IngestionQueue {
     config: IngestionQueueConfig = {}
   ) {
     this.config = {
+      projectId: config.projectId,
       batchInterval: config.batchInterval ?? 1000,
       verbose: config.verbose ?? false,
       ingestionLock: config.ingestionLock,
@@ -285,9 +292,27 @@ export class IngestionQueue {
       }
 
       // 2. Process ingestions (if any files to add/change)
+      // Create a filtered config with only the changed files (not full glob patterns)
       if (filesToProcess.length > 0) {
-        const ingestionStats = await this.manager.ingestFromPaths(this.sourceConfig, {
-          incremental: true,
+        if (this.config.verbose) {
+          console.log(`\n📝 Re-ingesting ${filesToProcess.length} changed file(s)...`);
+        }
+
+        // Convert absolute paths to relative paths for the include list
+        const path = await import('path');
+        const root = this.sourceConfig.root || '.';
+        const relPaths = filesToProcess.map(f => path.relative(root, f));
+
+        // Create a config with only the changed files
+        const filteredConfig: SourceConfig = {
+          type: 'files',
+          root: this.sourceConfig.root,
+          include: relPaths,
+        };
+
+        const ingestionStats = await this.manager.ingestFromPaths(filteredConfig, {
+          projectId: this.config.projectId,
+          incremental: 'content', // Skip file hash check (watcher knows), but compare scope hashes
           verbose: this.config.verbose
         });
 
@@ -295,7 +320,7 @@ export class IngestionQueue {
         stats.unchanged = ingestionStats.unchanged;
         stats.updated = ingestionStats.updated;
         stats.created = ingestionStats.created;
-        stats.deleted += ingestionStats.deleted; // Add to deletion count
+        stats.deleted += ingestionStats.deleted;
       }
 
       // Log ingestion completed

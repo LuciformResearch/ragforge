@@ -12,6 +12,7 @@ import { IngestionQueue, type IngestionQueueConfig } from './ingestion-queue.js'
 import type { AgentLogger } from '../agents/rag-agent.js';
 
 export interface FileWatcherConfig extends IngestionQueueConfig {
+  // projectId is inherited from IngestionQueueConfig
   /**
    * Optional AgentLogger for structured logging
    */

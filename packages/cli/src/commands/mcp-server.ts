@@ -15,6 +15,7 @@ import process from 'process';
 import { promises as fs, readFileSync } from 'fs';
 import dotenv from 'dotenv';
 import yaml from 'js-yaml';
+import { callToolViaDaemon, ensureDaemonRunning, isDaemonRunning } from './daemon-client.js';
 import {
   createClient,
   ConfigLoader,
@@ -352,7 +353,6 @@ async function prepareToolsForMcp(
                   log('debug', `Re-ingesting code file in project ${project.id}: ${filePath}`);
                   await ctx.brainManager!.quickIngest(project.path, {
                     projectName: project.id,
-                    generateEmbeddings: true,
                   });
                   log('debug', `Re-ingested project ${project.id}`);
                 } catch (e: any) {
@@ -412,26 +412,35 @@ async function prepareToolsForMcp(
     allHandlers[name] = handler as any;
   }
 
-  // Add brain tools (ingest, search, forget) - if BrainManager available
-  if (ctx.brainManager) {
+  // Add brain tools via daemon (with auto-restart)
+  // This ensures the daemon is always running when brain tools are called
+  {
     const brainToolDefs = generateBrainTools();
-    const brainHandlers = generateBrainToolHandlers({ brain: ctx.brainManager });
-    allTools.push(...brainToolDefs);
-    for (const [name, handler] of Object.entries(brainHandlers)) {
-      allHandlers[name] = handler;
-    }
-    log('debug', 'Brain tools enabled');
-
-    // Add setup tools (set_api_key, get_brain_status) - for MCP users
     const setupToolDefs = generateSetupTools();
-    const setupHandlers = generateSetupToolHandlers({ brain: ctx.brainManager });
-    allTools.push(...setupToolDefs);
-    for (const [name, handler] of Object.entries(setupHandlers)) {
-      allHandlers[name] = handler;
+
+    // Create daemon proxy handlers - these auto-restart the daemon if needed
+    const createDaemonProxyHandler = (toolName: string) => async (args: any) => {
+      log('debug', `Calling ${toolName} via daemon (auto-restart enabled)`);
+      const result = await callToolViaDaemon(toolName, args);
+      if (!result.success) {
+        throw new Error(result.error || `Tool ${toolName} failed`);
+      }
+      return result.result;
+    };
+
+    // Add brain tool definitions with daemon proxy handlers
+    allTools.push(...brainToolDefs);
+    for (const toolDef of brainToolDefs) {
+      allHandlers[toolDef.name] = createDaemonProxyHandler(toolDef.name);
     }
-    log('debug', 'Setup tools enabled');
-  } else {
-    log('debug', 'Brain tools disabled (BrainManager not initialized)');
+    log('debug', 'Brain tools enabled (via daemon with auto-restart)');
+
+    // Add setup tool definitions with daemon proxy handlers
+    allTools.push(...setupToolDefs);
+    for (const toolDef of setupToolDefs) {
+      allHandlers[toolDef.name] = createDaemonProxyHandler(toolDef.name);
+    }
+    log('debug', 'Setup tools enabled (via daemon with auto-restart)');
   }
 
   // Add discovery tools (get_schema) - uses cached context from loaded project
