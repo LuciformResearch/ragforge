@@ -109,6 +109,8 @@ export interface RegisteredProject {
   autoCleanup?: boolean;
   /** Display name (optional, for UI purposes) */
   displayName?: string;
+  /** Excluded from brain_search (reference projects) */
+  excluded?: boolean;
 }
 
 export interface ProjectsRegistry {
@@ -1073,6 +1075,46 @@ volumes:
   }
 
   /**
+   * Exclude a project from brain_search results.
+   * Useful for temporarily hiding reference projects or noisy data.
+   * @returns true if project was found and excluded
+   */
+  async excludeProject(projectId: string): Promise<boolean> {
+    const project = this.registeredProjects.get(projectId);
+    if (!project) return false;
+
+    project.excluded = true;
+    await this.saveProjectsRegistry();
+    return true;
+  }
+
+  /**
+   * Include a previously excluded project back in brain_search results.
+   * @returns true if project was found and included
+   */
+  async includeProject(projectId: string): Promise<boolean> {
+    const project = this.registeredProjects.get(projectId);
+    if (!project) return false;
+
+    project.excluded = false;
+    await this.saveProjectsRegistry();
+    return true;
+  }
+
+  /**
+   * Toggle a project's exclusion status.
+   * @returns the new exclusion status, or undefined if project not found
+   */
+  async toggleProjectExclusion(projectId: string): Promise<boolean | undefined> {
+    const project = this.registeredProjects.get(projectId);
+    if (!project) return undefined;
+
+    project.excluded = !project.excluded;
+    await this.saveProjectsRegistry();
+    return project.excluded;
+  }
+
+  /**
    * Count nodes for a project in Neo4j
    */
   private async countProjectNodes(projectId: string): Promise<number> {
@@ -1653,8 +1695,19 @@ volumes:
     };
 
     if (options.projects && options.projects.length > 0) {
+      // Explicit project list - use exactly what was requested (ignores excluded flag)
       projectFilter = 'AND n.projectId IN $projectIds';
       params.projectIds = options.projects;
+    } else {
+      // No explicit list - exclude projects marked as excluded
+      const excludedProjectIds = Array.from(this.registeredProjects.values())
+        .filter(p => p.excluded)
+        .map(p => p.id);
+
+      if (excludedProjectIds.length > 0) {
+        projectFilter = 'AND NOT n.projectId IN $excludedProjectIds';
+        params.excludedProjectIds = excludedProjectIds;
+      }
     }
 
     // Build node type filter (uses 'type' property, not labels)
@@ -1730,10 +1783,17 @@ volumes:
       totalCount = results.length;
     }
 
+    // Build list of actually searched projects
+    const searchedProjects = options.projects
+      ? options.projects
+      : Array.from(this.registeredProjects.values())
+          .filter(p => !p.excluded)
+          .map(p => p.id);
+
     return {
       results,
       totalCount,
-      searchedProjects: options.projects || Array.from(this.registeredProjects.keys()),
+      searchedProjects,
     };
   }
 
