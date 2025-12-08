@@ -342,8 +342,25 @@ async function prepareToolsForMcp(
                 log('debug', `Re-ingestion failed: ${e.message}`);
               }
             } else {
-              // Code files: file watcher will handle re-ingestion if watching is enabled
-              log('debug', `Code file modified: ${filePath} (file watcher will handle)`);
+              // Code files: find the project and trigger incremental re-ingestion
+              const absoluteFilePath = pathModule.resolve(filePath);
+              const projects = ctx.brainManager!.listProjects();
+              const project = projects.find(p => absoluteFilePath.startsWith(p.path + pathModule.sep) || absoluteFilePath.startsWith(p.path));
+
+              if (project) {
+                try {
+                  log('debug', `Re-ingesting code file in project ${project.id}: ${filePath}`);
+                  await ctx.brainManager!.quickIngest(project.path, {
+                    projectName: project.id,
+                    generateEmbeddings: true,
+                  });
+                  log('debug', `Re-ingested project ${project.id}`);
+                } catch (e: any) {
+                  log('debug', `Code re-ingestion failed: ${e.message}`);
+                }
+              } else {
+                log('debug', `Code file modified but no project found: ${filePath}`);
+              }
             }
           }
         }
@@ -436,6 +453,27 @@ async function prepareToolsForMcp(
   if (webGeminiKey) {
     const webToolsCtx: WebToolsContext = {
       geminiApiKey: webGeminiKey,
+      // Wire up web page ingestion to brain
+      ingestWebPage: ctx.brainManager
+        ? async (params) => {
+            log('debug', `Ingesting web page: ${params.url}`);
+            try {
+              const result = await ctx.brainManager!.ingestWebPage({
+                url: params.url,
+                title: params.title,
+                textContent: params.textContent,
+                rawHtml: params.rawHtml,
+                projectName: params.projectName,
+                generateEmbeddings: true,
+              });
+              log('debug', `Web page ingested: ${params.url} → ${result.nodeId}`);
+              return result;
+            } catch (e: any) {
+              log('debug', `Web ingestion failed: ${e.message}`);
+              return { success: false };
+            }
+          }
+        : undefined,
     };
     const webHandlers = createWebToolHandlers(webToolsCtx);
     allTools.push(...webToolDefinitions);

@@ -821,10 +821,10 @@ services:
     container_name: ${containerName}
     environment:
       NEO4J_AUTH: \${NEO4J_USERNAME:-neo4j}/\${NEO4J_PASSWORD}
-      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_PLUGINS: '["apoc", "graph-data-science"]'
       NEO4J_server_memory_heap_initial__size: 512m
       NEO4J_server_memory_heap_max__size: 2G
-      NEO4J_dbms_security_procedures_unrestricted: apoc.*
+      NEO4J_dbms_security_procedures_unrestricted: apoc.*,gds.*
     ports:
       - "${boltPort}:7687"  # Bolt
       - "${httpPort}:7474"  # HTTP Browser

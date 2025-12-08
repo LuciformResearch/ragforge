@@ -585,10 +585,10 @@ services:
     container_name: ${BRAIN_CONTAINER_NAME}
     environment:
       NEO4J_AUTH: neo4j/${password}
-      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_PLUGINS: '["apoc", "graph-data-science"]'
       NEO4J_server_memory_heap_initial__size: 512m
       NEO4J_server_memory_heap_max__size: 2G
-      NEO4J_dbms_security_procedures_unrestricted: apoc.*
+      NEO4J_dbms_security_procedures_unrestricted: apoc.*,gds.*
     ports:
       - "${boltPort}:7687"
       - "${httpPort}:7474"
@@ -1079,6 +1079,41 @@ volumes:
       await this.saveProjectsRegistry();
     }
 
+    // Generate embeddings if requested
+    if (params.generateEmbeddings && this.embeddingService?.canGenerateEmbeddings()) {
+      try {
+        // Generate embeddings for title (name) and textContent (content)
+        const titleEmbedding = await this.embeddingService.getQueryEmbedding(params.title);
+        const contentEmbedding = await this.embeddingService.getQueryEmbedding(
+          params.textContent.slice(0, 8000) // Limit for embedding
+        );
+
+        if (titleEmbedding || contentEmbedding) {
+          const setClause: string[] = [];
+          const embParams: Record<string, any> = { uuid: nodeId };
+
+          if (titleEmbedding) {
+            setClause.push('n.embedding_name = $embedding_name');
+            embParams.embedding_name = titleEmbedding;
+          }
+          if (contentEmbedding) {
+            setClause.push('n.embedding_content = $embedding_content');
+            embParams.embedding_content = contentEmbedding;
+          }
+
+          if (setClause.length > 0) {
+            await this.neo4jClient.run(
+              `MATCH (n:WebPage {uuid: $uuid}) SET ${setClause.join(', ')}`,
+              embParams
+            );
+            console.log(`[Brain] Generated embeddings for web page: ${params.url}`);
+          }
+        }
+      } catch (err: any) {
+        console.warn(`[Brain] Failed to generate embeddings for web page: ${err.message}`);
+      }
+    }
+
     console.log(`[Brain] Ingested web page: ${params.url} → project ${projectName}`);
 
     return { success: true, nodeId };
@@ -1424,10 +1459,10 @@ volumes:
       });
     } else {
       // Text search (fallback)
-      // Search in: name, content, source, rawText (markdown), code (codeblocks), textContent (documents)
+      // Search in: name, title, content, source, rawText (markdown), code (codeblocks), textContent (documents), url (web)
       const cypher = `
         MATCH (n)
-        WHERE (n.name CONTAINS $query OR n.content CONTAINS $query OR n.source CONTAINS $query OR n.rawText CONTAINS $query OR n.code CONTAINS $query OR n.textContent CONTAINS $query) ${projectFilter} ${nodeTypeFilter}
+        WHERE (n.name CONTAINS $query OR n.title CONTAINS $query OR n.content CONTAINS $query OR n.source CONTAINS $query OR n.rawText CONTAINS $query OR n.code CONTAINS $query OR n.textContent CONTAINS $query OR n.url CONTAINS $query) ${projectFilter} ${nodeTypeFilter}
         RETURN n, 1.0 as score
         ORDER BY n.name
         SKIP $offset
@@ -1464,7 +1499,7 @@ volumes:
     // Get total count (approximate for text search)
     const countCypher = `
       MATCH (n)
-      WHERE (n.name CONTAINS $query OR n.content CONTAINS $query OR n.source CONTAINS $query OR n.rawText CONTAINS $query OR n.code CONTAINS $query OR n.textContent CONTAINS $query) ${projectFilter} ${nodeTypeFilter}
+      WHERE (n.name CONTAINS $query OR n.title CONTAINS $query OR n.content CONTAINS $query OR n.source CONTAINS $query OR n.rawText CONTAINS $query OR n.code CONTAINS $query OR n.textContent CONTAINS $query OR n.url CONTAINS $query) ${projectFilter} ${nodeTypeFilter}
       RETURN count(n) as total
     `;
     const countResult = await this.neo4jClient.run(countCypher, params);

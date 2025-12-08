@@ -120,19 +120,19 @@ export function generateBrainSearchTool(): GeneratedToolDefinition {
 This searches everything the agent has ever explored:
 - Code projects (RagForge projects)
 - Quick-ingested directories
-- Web pages crawled (when implemented)
+- Web pages crawled
 - Documents analyzed
 
-The search can be:
-- Text-based: matches content and names
-- Semantic: uses embeddings for meaning-based search (if embeddings generated)
+**RECOMMENDED: Use semantic=true for best results.**
+Semantic search uses embeddings to find meaning, not just exact text matches.
+It works across languages and finds conceptually related content.
 
-Returns results from all known sources, sorted by relevance.
+For exact text/filename searches, prefer grep_files or glob_files instead.
 
 Example usage:
-- brain_search({ query: "authentication logic" })
-- brain_search({ query: "how to parse JSON", types: ["Function", "Class"] })
-- brain_search({ query: "API endpoints", projects: ["my-backend"] })`,
+- brain_search({ query: "authentication logic", semantic: true })
+- brain_search({ query: "how to parse JSON", types: ["Function", "Class"], semantic: true })
+- brain_search({ query: "API endpoints", projects: ["my-backend"], semantic: true })`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -152,7 +152,7 @@ Example usage:
         },
         semantic: {
           type: 'boolean',
-          description: 'Use semantic/embedding-based search (default: false, uses text matching)',
+          description: 'Use semantic/embedding-based search (default: false, uses text matching). **Recommended: true** for best results.',
         },
         embedding_type: {
           type: 'string',
