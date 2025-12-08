@@ -46,9 +46,13 @@
     "dotenv": "^16.3.1",
     "fast-glob": "^3.3.3",
     "google-auth-library": "^9.0.0",
+    "ink": "^6.5.1",
+    "ink-spinner": "^5.0.0",
+    "ink-text-input": "^6.0.0",
     "unicorn-magic": "^0.4.0"
   },
   "devDependencies": {
+    "@types/ink": "^0.5.2",
     "@typescript-eslint/eslint-plugin": "^8.0.0",
     "@typescript-eslint/parser": "^8.0.0",
     "eslint": "^9.0.0",

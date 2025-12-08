@@ -116,6 +116,36 @@ export function inferUniqueField(node: ParsedNode): 'path' | 'name' | 'uuid' {
 }
 
 /**
+ * Content node types that should be tracked for changes.
+ * These are nodes with searchable/embeddable content that need:
+ * - Hash-based change detection
+ * - Schema versioning
+ * - Embedding generation
+ *
+ * Structural nodes (File, Directory, Project) are NOT in this set.
+ */
+export const CONTENT_NODE_LABELS = new Set([
+  'Scope',              // Code scopes (functions, classes, etc.)
+  'MediaFile',          // Base media type
+  'ImageFile',          // Images
+  'ThreeDFile',         // 3D models
+  'DocumentFile',       // Documents (PDF, DOCX, etc.)
+  'MarkdownSection',    // Markdown sections
+  'CodeBlock',          // Code blocks in markdown
+  'MarkdownDocument',   // Markdown documents
+  'SpreadsheetDocument', // Excel, CSV
+  'PDFDocument',        // PDF documents
+  'WordDocument',       // Word documents
+  'WebPage',            // Web pages
+  'VueSFC',             // Vue single file components
+  'SvelteComponent',    // Svelte components
+  'Stylesheet',         // CSS/SCSS stylesheets
+  'DataFile',           // JSON, YAML, etc.
+  'GenericFile',        // Unknown code files
+  'WebDocument',        // HTML documents
+]);
+
+/**
  * Check if a node is structural (File, Directory, Project)
  *
  * Structural nodes are always upserted during incremental ingestion,
@@ -127,23 +157,7 @@ export function inferUniqueField(node: ParsedNode): 'path' | 'name' | 'uuid' {
  * @returns true if the node is structural (File, Directory, Project only)
  */
 export function isStructuralNode(node: ParsedNode): boolean {
-  // Content node types that should be tracked for changes (not structural)
-  const contentLabels = [
-    'Scope',           // Code scopes (functions, classes, etc.)
-    'MediaFile',       // Base media type
-    'ImageFile',       // Images
-    'ThreeDFile',      // 3D models
-    'DocumentFile',    // Documents (PDF, DOCX, etc.)
-    'MarkdownSection', // Markdown sections
-    'CodeBlock',       // Code blocks in markdown
-    'MarkdownDocument',  // Markdown documents
-    'SpreadsheetDocument', // Excel, CSV
-    'PDFDocument',     // PDF documents
-    'WordDocument',    // Word documents
-    'WebPage',         // Web pages
-  ];
-
-  const isContentNode = node.labels.some(l => contentLabels.includes(l));
+  const isContentNode = node.labels.some(l => CONTENT_NODE_LABELS.has(l));
   return !isContentNode;
 }
 

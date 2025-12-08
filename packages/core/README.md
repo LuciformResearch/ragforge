@@ -24,6 +24,8 @@ Core library for RagForge - YAML config parsing, Neo4j schema introspection, and
 **Note:** This is a custom "source-available" license, NOT an OSI-approved open source license.
 ## Features
 
+> **TEST_MARKDOWN_WATCHER_ZEPHYR_2024** - Cette phrase unique teste l'indexation temps réel des fichiers markdown.
+
 - **Schema Introspection**: Analyze Neo4j databases to extract schema information
 - **Config Loading**: Load and validate RagForge YAML configurations
 - **Type Definitions**: Complete TypeScript types for configs and schemas

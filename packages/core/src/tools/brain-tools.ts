@@ -324,6 +324,7 @@ export function generateIngestDirectoryHandler(ctx: BrainToolsContext) {
 
 /**
  * Generate brain_search tool definition
+ * Test edit 2
  */
 export function generateBrainSearchTool(): GeneratedToolDefinition {
   return {
@@ -344,7 +345,7 @@ For exact text/filename searches, prefer grep_files or glob_files instead.
 
 Example usage:
 - brain_search({ query: "authentication logic", semantic: true })
-- brain_search({ query: "how to parse JSON", types: ["Function", "Class"], semantic: true })
+- brain_search({ query: "how to parse JSON", types: ["function", "class"], semantic: true })
 - brain_search({ query: "API endpoints", projects: ["my-backend"], semantic: true })`,
     inputSchema: {
       type: 'object',
@@ -361,7 +362,7 @@ Example usage:
         types: {
           type: 'array',
           items: { type: 'string' },
-          description: 'Limit to specific node types like "Function", "Class", "File" (default: all)',
+          description: 'Limit to specific node types (lowercase): "function", "method", "class", "interface", "variable", "file" (default: all)',
         },
         semantic: {
           type: 'boolean',
@@ -403,7 +404,49 @@ export function generateBrainSearchHandler(ctx: BrainToolsContext) {
     embedding_type?: 'name' | 'content' | 'description' | 'all';
     glob?: string;
     limit?: number;
-  }): Promise<UnifiedSearchResult> => {
+  }): Promise<UnifiedSearchResult & { waited_for_edits?: boolean; watchers_started?: string[] }> => {
+    // Auto-start watchers for projects that don't have one
+    // This ensures file changes are tracked without manual watcher management
+    const watchersStarted: string[] = [];
+    const allProjects = ctx.brain.listProjects();
+
+    for (const project of allProjects) {
+      // Use isWatching(path) to properly check - IDs might differ between registry and watcher
+      if (!ctx.brain.isWatching(project.path)) {
+        try {
+          await ctx.brain.startWatching(project.path, { skipInitialSync: true });
+          watchersStarted.push(project.id);
+          console.log(`[brain_search] Auto-started watcher for ${project.id}`);
+        } catch (err) {
+          // Silently ignore - watcher start is best-effort
+          console.warn(`[brain_search] Failed to auto-start watcher for ${project.id}:`, err);
+        }
+      }
+    }
+
+    // Wait for ingestion lock (watcher might be ingesting)
+    // and for any pending MCP edits to be flushed
+    let waitedForEdits = false;
+    const ingestionLock = ctx.brain.getIngestionLock();
+
+    if (ingestionLock.isLocked()) {
+      console.log('[brain_search] Waiting for ingestion lock...');
+      const unlocked = await ingestionLock.waitForUnlock(30000);
+      waitedForEdits = true;
+      if (!unlocked) {
+        console.warn('[brain_search] Timeout waiting for ingestion lock - proceeding with potentially stale data');
+      }
+    }
+
+    if (ctx.brain.hasPendingEdits()) {
+      console.log('[brain_search] Waiting for pending edits to flush...');
+      const flushed = await ctx.brain.waitForPendingEdits(30000);
+      waitedForEdits = true;
+      if (!flushed) {
+        console.warn('[brain_search] Timeout waiting for pending edits - proceeding with potentially stale data');
+      }
+    }
+
     const options: BrainSearchOptions = {
       projects: params.projects,
       nodeTypes: params.types,
@@ -413,7 +456,13 @@ export function generateBrainSearchHandler(ctx: BrainToolsContext) {
       limit: params.limit,
     };
 
-    return ctx.brain.search(params.query, options);
+    const result = await ctx.brain.search(params.query, options);
+
+    return {
+      ...result,
+      waited_for_edits: waitedForEdits,
+      watchers_started: watchersStarted.length > 0 ? watchersStarted : undefined,
+    };
   };
 }
 
@@ -838,7 +887,9 @@ export function generateListBrainProjectsHandler(ctx: BrainToolsContext) {
     }>;
     count: number;
   }> => {
-    const projects = ctx.brain.listProjects().map(p => ({
+    // Use listProjectsWithCounts for real-time node counts from Neo4j
+    const projectsWithCounts = await ctx.brain.listProjectsWithCounts();
+    const projects = projectsWithCounts.map(p => ({
       id: p.id,
       path: p.path,
       type: p.type,
@@ -1064,17 +1115,19 @@ async function findProjectForFile(brain: BrainManager, absolutePath: string): Pr
 }
 
 /**
- * Helper: Trigger re-ingestion for a file's project
+ * Helper: Queue re-ingestion for a file's project (non-blocking)
+ * Returns immediately after queuing - actual ingestion happens in background
+ * brain_search will wait for pending edits via waitForPendingEdits()
  */
 async function triggerReIngestion(
   brain: BrainManager,
   absolutePath: string,
   changeType: 'created' | 'updated' | 'deleted'
-): Promise<{ projectId?: string; stats?: any } | null> {
+): Promise<{ projectId?: string; stats?: any; queued?: boolean } | null> {
   const pathModule = await import('path');
   const ext = pathModule.extname(absolutePath).toLowerCase();
 
-  // Media files use updateMediaContent
+  // Media files use updateMediaContent (still sync for now)
   const mediaExts = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg', '.pdf', '.docx', '.xlsx', '.glb', '.gltf'];
 
   if (mediaExts.includes(ext) && changeType !== 'deleted') {
@@ -1084,25 +1137,27 @@ async function triggerReIngestion(
         extractionMethod: `file-tool-${changeType}`,
         generateEmbeddings: true,
       });
-      return { projectId: 'media', stats: { mediaUpdated: true } };
+      return { projectId: 'media', stats: { mediaUpdated: true }, queued: false };
     } catch (e: any) {
       console.warn(`[file-tool] Media re-ingestion failed: ${e.message}`);
       return null;
     }
   }
 
-  // Code files use quickIngest on the project
+  // Code files: queue for batched ingestion (non-blocking!)
   const project = await findProjectForFile(brain, absolutePath);
   if (project) {
-    try {
-      const result = await brain.quickIngest(project.path, {
-        projectName: project.id,
-      });
-      return { projectId: project.id, stats: result.stats };
-    } catch (e: any) {
-      console.warn(`[file-tool] Code re-ingestion failed: ${e.message}`);
-      return null;
-    }
+    console.log(`[brain-tools] 🔄 Queuing ${absolutePath} for re-ingestion...`);
+    brain.queueFileChange(absolutePath, changeType);
+    const pendingCount = brain.getPendingEditCount();
+    console.log(`[brain-tools] 📥 Queued! (${pendingCount} pending edits)`);
+
+    return {
+      projectId: project.id,
+      queued: true,
+      pendingCount,
+      note: 'Ingestion queued. brain_search will wait for completion.',
+    } as any;
   }
 
   return null;
@@ -1588,8 +1643,9 @@ export function generateBrainEditFileHandler(ctx: BrainToolsContext) {
     await fs.writeFile(absolutePath, newContent, 'utf-8');
     const newHash = crypto.createHash('sha256').update(newContent).digest('hex').substring(0, 16);
 
-    // Trigger re-ingestion
+    // Queue re-ingestion (non-blocking)
     const ingestionResult = await triggerReIngestion(ctx.brain, absolutePath, 'updated');
+    const wasQueued = ingestionResult?.queued === true;
 
     return {
       path: filePath,
@@ -1598,9 +1654,13 @@ export function generateBrainEditFileHandler(ctx: BrainToolsContext) {
       lines_before: oldContent.split('\n').length,
       lines_after: newContent.split('\n').length,
       hash: newHash,
-      rag_synced: !!ingestionResult,
-      ingestion_stats: ingestionResult?.stats,
+      rag_synced: !wasQueued && !!ingestionResult,
+      rag_queued: wasQueued,
+      ingestion_stats: ingestionResult,
       project_id: ingestionResult?.projectId,
+      note: wasQueued
+        ? '📥 RAG update queued. brain_search will wait for completion.'
+        : '✅ RAG graph updated.',
     };
   };
 }

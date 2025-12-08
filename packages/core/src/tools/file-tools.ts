@@ -228,9 +228,10 @@ export interface FileToolsContext {
   projectRoot: string | (() => string | null);
   /** ChangeTracker instance (optional, for tracking changes) */
   changeTracker?: any;
-  /** Callback after file modification (for re-ingestion) */
-  onFileModified?: (filePath: string, changeType: 'created' | 'updated' | 'deleted') => Promise<void>;
-  /** Ingestion lock for coordinating with RAG tools */
+  /** Callback after file modification (for re-ingestion)
+   * Can return ingestion stats or queue info */
+  onFileModified?: (filePath: string, changeType: 'created' | 'updated' | 'deleted') => Promise<any>;
+  /** Ingestion lock for coordinating with RAG tools (deprecated - lock is now managed by BrainManager) */
   ingestionLock?: IngestionLock;
 }
 
@@ -346,90 +347,90 @@ export function generateWriteFileHandler(ctx: FileToolsContext): (args: any) => 
       ? filePath
       : pathModule.join(projectRoot, filePath);
 
-    // Acquire lock at START to block concurrent RAG queries
-    const release = ctx.ingestionLock
-      ? await ctx.ingestionLock.acquire(absolutePath)
-      : null;
+    // Note: No lock acquisition here - ingestion is queued and processed async
+    // The lock is acquired by BrainManager.flushAgentEditQueue() when processing
+    // brain_search waits for pending edits via waitForPendingEdits()
+
+    // Check if file exists (for change tracking)
+    let oldContent: string | null = null;
+    let oldHash: string | null = null;
+    let changeType: 'created' | 'updated' = 'created';
 
     try {
-      // Check if file exists (for change tracking)
-      let oldContent: string | null = null;
-      let oldHash: string | null = null;
-      let changeType: 'created' | 'updated' = 'created';
+      oldContent = await fs.readFile(absolutePath, 'utf-8');
+      oldHash = crypto.createHash('sha256').update(oldContent).digest('hex').substring(0, 16);
+      changeType = 'updated';
+    } catch (err: any) {
+      if (err.code !== 'ENOENT') throw err;
+      // File doesn't exist, will be created
+    }
 
+    // Create parent directories if needed
+    const parentDir = pathModule.dirname(absolutePath);
+    await fs.mkdir(parentDir, { recursive: true });
+
+    // Write file
+    await fs.writeFile(absolutePath, content, 'utf-8');
+    const newHash = crypto.createHash('sha256').update(content).digest('hex').substring(0, 16);
+
+    // Track change if ChangeTracker is available
+    if (ctx.changeTracker) {
+      const relativePath = pathModule.relative(projectRoot, absolutePath);
       try {
-        oldContent = await fs.readFile(absolutePath, 'utf-8');
-        oldHash = crypto.createHash('sha256').update(oldContent).digest('hex').substring(0, 16);
-        changeType = 'updated';
+        await ctx.changeTracker.trackEntityChange(
+          'File',
+          `file:${relativePath}`,
+          relativePath,
+          oldContent,
+          content,
+          oldHash,
+          newHash,
+          changeType,
+          { source: 'file_tool', tool: 'write_file' }
+        );
       } catch (err: any) {
-        if (err.code !== 'ENOENT') throw err;
-        // File doesn't exist, will be created
+        // ChangeTracker might fail if entity doesn't exist in graph yet
+        // That's okay - the file is still written
+        console.warn(`ChangeTracker warning: ${err.message}`);
       }
+    }
 
-      // Create parent directories if needed
-      const parentDir = pathModule.dirname(absolutePath);
-      await fs.mkdir(parentDir, { recursive: true });
+    // Queue for re-ingestion (non-blocking)
+    let ingestionStats: any = null;
+    if (ctx.onFileModified) {
+      ingestionStats = await ctx.onFileModified(absolutePath, changeType);
+    }
 
-      // Write file
-      await fs.writeFile(absolutePath, content, 'utf-8');
-      const newHash = crypto.createHash('sha256').update(content).digest('hex').substring(0, 16);
+    // Generate diff for output
+    const diff = createTwoFilesPatch(
+      filePath,
+      filePath,
+      oldContent || '',
+      content,
+      '',
+      '',
+      { context: 3 }
+    );
 
-      // Track change if ChangeTracker is available
-      if (ctx.changeTracker) {
-        const relativePath = pathModule.relative(projectRoot, absolutePath);
-        try {
-          await ctx.changeTracker.trackEntityChange(
-            'File',
-            `file:${relativePath}`,
-            relativePath,
-            oldContent,
-            content,
-            oldHash,
-            newHash,
-            changeType,
-            { source: 'file_tool', tool: 'write_file' }
-          );
-        } catch (err: any) {
-          // ChangeTracker might fail if entity doesn't exist in graph yet
-          // That's okay - the file is still written
-          console.warn(`ChangeTracker warning: ${err.message}`);
-        }
-      }
+    // Determine if ingestion was queued or completed immediately
+    const wasQueued = ingestionStats?.queued === true;
 
-      // Notify for re-ingestion (lock already acquired)
-      let ingestionStats: any = null;
-      if (ctx.onFileModified) {
-        ingestionStats = await ctx.onFileModified(absolutePath, changeType);
-      }
-
-      // Generate diff for output
-      const diff = createTwoFilesPatch(
-        filePath,
-        filePath,
-        oldContent || '',
-        content,
-        '',
-        '',
-        { context: 3 }
-      );
-
-      return {
-        path: filePath,
-        absolute_path: absolutePath,
-        change_type: changeType,
-        lines_written: content.split('\n').length,
-        hash: newHash,
-        diff: trimDiff(diff),
-        rag_synced: !!ctx.onFileModified,
-        ingestion_stats: ingestionStats,
-        note: ctx.onFileModified
+    return {
+      path: filePath,
+      absolute_path: absolutePath,
+      change_type: changeType,
+      lines_written: content.split('\n').length,
+      hash: newHash,
+      diff: trimDiff(diff),
+      rag_synced: !wasQueued && !!ctx.onFileModified,
+      rag_queued: wasQueued,
+      ingestion_stats: ingestionStats,
+      note: wasQueued
+        ? '📥 RAG update queued. brain_search will wait for completion.'
+        : ctx.onFileModified
           ? '✅ RAG graph updated. You can now query the new content.'
           : '⚠️ RAG graph NOT updated (no re-ingestion configured).',
-      };
-    } finally {
-      // Release lock at the end
-      if (release) release();
-    }
+    };
   };
 }
 
@@ -514,137 +515,137 @@ export function generateEditFileHandler(ctx: FileToolsContext): (args: any) => P
       ? filePath
       : pathModule.join(projectRoot, filePath);
 
-    // Acquire lock at START to block concurrent RAG queries
-    const release = ctx.ingestionLock
-      ? await ctx.ingestionLock.acquire(absolutePath)
-      : null;
+    // Note: No lock acquisition here - ingestion is queued and processed async
+    // The lock is acquired by BrainManager.flushAgentEditQueue() when processing
+    // brain_search waits for pending edits via waitForPendingEdits()
 
+    // Read existing content
+    let oldContent: string;
     try {
-      // Read existing content
-      let oldContent: string;
+      oldContent = await fs.readFile(absolutePath, 'utf-8');
+    } catch (err: any) {
+      if (err.code === 'ENOENT') {
+        return { error: `File not found: ${absolutePath}` };
+      }
+      throw err;
+    }
+
+    const oldHash = crypto.createHash('sha256').update(oldContent).digest('hex').substring(0, 16);
+
+    let newContent: string;
+
+    // Method 3: Append mode
+    if (append) {
+      const cleanNewString = stripLineNumberPrefixes(new_string);
+      // Add newline before if content doesn't end with one
+      const separator = oldContent.endsWith('\n') ? '' : '\n';
+      newContent = oldContent + separator + cleanNewString;
+    }
+    // Method 2: Line numbers mode
+    else if (start_line !== undefined && end_line !== undefined) {
+      const lines = oldContent.split('\n');
+      const startIdx = start_line - 1; // Convert to 0-based
+      const endIdx = end_line - 1;
+
+      if (startIdx < 0 || startIdx > endIdx) {
+        return { error: `Invalid line range: ${start_line}-${end_line}. start_line must be <= end_line.` };
+      }
+
+      // Allow appending by using start_line = lines.length + 1
+      if (startIdx > lines.length) {
+        return { error: `Invalid start_line: ${start_line}. File has ${lines.length} lines. Use append: true to add content at the end.` };
+      }
+
+      // Strip line prefixes from new_string too (in case user copied from read_file)
+      const cleanNewString = stripLineNumberPrefixes(new_string);
+
+      // Replace the lines (or append if startIdx == lines.length)
+      const before = lines.slice(0, startIdx);
+      const after = endIdx < lines.length ? lines.slice(endIdx + 1) : [];
+      const newLines = cleanNewString.split('\n');
+
+      newContent = [...before, ...newLines, ...after].join('\n');
+    }
+    // Method 1: Search/replace mode
+    else if (old_string !== undefined) {
+      // Strip line number prefixes from old_string (user may have copied from read_file)
+      const cleanOldString = stripLineNumberPrefixes(old_string);
+      // Also strip from new_string for consistency
+      const cleanNewString = stripLineNumberPrefixes(new_string);
+
+      if (cleanOldString === cleanNewString) {
+        return { error: 'old_string and new_string must be different (after stripping line prefixes)' };
+      }
+
+      // Perform replacement with fuzzy matching
       try {
-        oldContent = await fs.readFile(absolutePath, 'utf-8');
+        newContent = replaceWithFuzzyMatch(oldContent, cleanOldString, cleanNewString, replace_all);
       } catch (err: any) {
-        if (err.code === 'ENOENT') {
-          return { error: `File not found: ${absolutePath}` };
-        }
-        throw err;
+        return { error: err.message };
       }
+    } else {
+      return { error: 'Provide one of: old_string (search/replace), start_line+end_line (line mode), or append: true' };
+    }
 
-      const oldHash = crypto.createHash('sha256').update(oldContent).digest('hex').substring(0, 16);
+    // Write updated content
+    await fs.writeFile(absolutePath, newContent, 'utf-8');
+    const newHash = crypto.createHash('sha256').update(newContent).digest('hex').substring(0, 16);
 
-      let newContent: string;
-
-      // Method 3: Append mode
-      if (append) {
-        const cleanNewString = stripLineNumberPrefixes(new_string);
-        // Add newline before if content doesn't end with one
-        const separator = oldContent.endsWith('\n') ? '' : '\n';
-        newContent = oldContent + separator + cleanNewString;
+    // Track change
+    if (ctx.changeTracker) {
+      const relativePath = pathModule.relative(projectRoot, absolutePath);
+      try {
+        await ctx.changeTracker.trackEntityChange(
+          'File',
+          `file:${relativePath}`,
+          relativePath,
+          oldContent,
+          newContent,
+          oldHash,
+          newHash,
+          'updated',
+          { source: 'file_tool', tool: 'edit_file' }
+        );
+      } catch (err: any) {
+        console.warn(`ChangeTracker warning: ${err.message}`);
       }
-      // Method 2: Line numbers mode
-      else if (start_line !== undefined && end_line !== undefined) {
-        const lines = oldContent.split('\n');
-        const startIdx = start_line - 1; // Convert to 0-based
-        const endIdx = end_line - 1;
+    }
 
-        if (startIdx < 0 || startIdx > endIdx) {
-          return { error: `Invalid line range: ${start_line}-${end_line}. start_line must be <= end_line.` };
-        }
+    // Queue for re-ingestion (non-blocking)
+    let ingestionStats: any = null;
+    if (ctx.onFileModified) {
+      ingestionStats = await ctx.onFileModified(absolutePath, 'updated');
+    }
 
-        // Allow appending by using start_line = lines.length + 1
-        if (startIdx > lines.length) {
-          return { error: `Invalid start_line: ${start_line}. File has ${lines.length} lines. Use append: true to add content at the end.` };
-        }
+    // Generate diff
+    const diff = createTwoFilesPatch(
+      filePath,
+      filePath,
+      oldContent,
+      newContent,
+      '',
+      '',
+      { context: 3 }
+    );
 
-        // Strip line prefixes from new_string too (in case user copied from read_file)
-        const cleanNewString = stripLineNumberPrefixes(new_string);
+    // Determine if ingestion was queued or completed immediately
+    const wasQueued = ingestionStats?.queued === true;
 
-        // Replace the lines (or append if startIdx == lines.length)
-        const before = lines.slice(0, startIdx);
-        const after = endIdx < lines.length ? lines.slice(endIdx + 1) : [];
-        const newLines = cleanNewString.split('\n');
-
-        newContent = [...before, ...newLines, ...after].join('\n');
-      }
-      // Method 1: Search/replace mode
-      else if (old_string !== undefined) {
-        // Strip line number prefixes from old_string (user may have copied from read_file)
-        const cleanOldString = stripLineNumberPrefixes(old_string);
-        // Also strip from new_string for consistency
-        const cleanNewString = stripLineNumberPrefixes(new_string);
-
-        if (cleanOldString === cleanNewString) {
-          return { error: 'old_string and new_string must be different (after stripping line prefixes)' };
-        }
-
-        // Perform replacement with fuzzy matching
-        try {
-          newContent = replaceWithFuzzyMatch(oldContent, cleanOldString, cleanNewString, replace_all);
-        } catch (err: any) {
-          return { error: err.message };
-        }
-      } else {
-        return { error: 'Provide one of: old_string (search/replace), start_line+end_line (line mode), or append: true' };
-      }
-
-      // Write updated content
-      await fs.writeFile(absolutePath, newContent, 'utf-8');
-      const newHash = crypto.createHash('sha256').update(newContent).digest('hex').substring(0, 16);
-
-      // Track change
-      if (ctx.changeTracker) {
-        const relativePath = pathModule.relative(projectRoot, absolutePath);
-        try {
-          await ctx.changeTracker.trackEntityChange(
-            'File',
-            `file:${relativePath}`,
-            relativePath,
-            oldContent,
-            newContent,
-            oldHash,
-            newHash,
-            'updated',
-            { source: 'file_tool', tool: 'edit_file' }
-          );
-        } catch (err: any) {
-          console.warn(`ChangeTracker warning: ${err.message}`);
-        }
-      }
-
-      // Notify for re-ingestion (lock already acquired)
-      let ingestionStats: any = null;
-      if (ctx.onFileModified) {
-        ingestionStats = await ctx.onFileModified(absolutePath, 'updated');
-      }
-
-      // Generate diff
-      const diff = createTwoFilesPatch(
-        filePath,
-        filePath,
-        oldContent,
-        newContent,
-        '',
-        '',
-        { context: 3 }
-      );
-
-      return {
-        path: filePath,
-        absolute_path: absolutePath,
-        change_type: 'updated',
-        hash: newHash,
-        diff: trimDiff(diff),
-        rag_synced: !!ctx.onFileModified,
-        ingestion_stats: ingestionStats,
-        note: ctx.onFileModified
+    return {
+      path: filePath,
+      absolute_path: absolutePath,
+      change_type: 'updated',
+      hash: newHash,
+      diff: trimDiff(diff),
+      rag_synced: !wasQueued && !!ctx.onFileModified,
+      rag_queued: wasQueued,
+      ingestion_stats: ingestionStats,
+      note: wasQueued
+        ? '📥 RAG update queued. brain_search will wait for completion.'
+        : ctx.onFileModified
           ? '✅ RAG graph updated. You can now query the new content.'
           : '⚠️ RAG graph NOT updated (no re-ingestion configured).',
-      };
-    } finally {
-      // Release lock at the end
-      if (release) release();
-    }
+    };
   };
 }
 
@@ -1019,6 +1020,8 @@ function trimDiff(diff: string): string {
 
 /**
  * Generate install_package tool
+ * Updated with path parameter for explicit directory targeting
+ * Test edit 1
  */
 export function generateInstallPackageTool(): GeneratedToolDefinition {
   return {
@@ -1030,16 +1033,21 @@ The package.json will be updated and the package downloaded to node_modules.
 
 Parameters:
 - package_name: Package name with optional version (e.g., "three", "lodash@4.17.21")
+- path: Directory containing package.json (recommended to specify explicitly)
 - dev: If true, install as devDependency (default: false)
 
-Example: install_package({ package_name: "three" })
-Example: install_package({ package_name: "typescript", dev: true })`,
+Example: install_package({ package_name: "three", path: "/path/to/project" })
+Example: install_package({ package_name: "typescript", dev: true, path: "." })`,
     inputSchema: {
       type: 'object',
       properties: {
         package_name: {
           type: 'string',
           description: 'Package name with optional version (e.g., "three", "lodash@4.17.21")',
+        },
+        path: {
+          type: 'string',
+          description: 'Directory containing package.json. Recommended to specify explicitly to avoid installing in wrong location. Falls back to project root if not specified.',
         },
         dev: {
           type: 'boolean',
@@ -1055,19 +1063,27 @@ Example: install_package({ package_name: "typescript", dev: true })`,
  * Generate handler for install_package
  */
 export function generateInstallPackageHandler(ctx: FileToolsContext): (args: any) => Promise<any> {
-  return async (args: { package_name: string; dev?: boolean }) => {
-    const { package_name, dev = false } = args;
+  return async (args: { package_name: string; path?: string; dev?: boolean }) => {
+    const { package_name, path: targetPath, dev = false } = args;
     const { execSync } = await import('child_process');
     const fs = await import('fs/promises');
     const pathModule = await import('path');
 
-    // Get dynamic project root
-    const projectRoot = getProjectRoot(ctx);
-    if (!projectRoot) {
-      return {
-        error: 'No project loaded. Use create_project, setup_project, or load_project first.',
-        suggestion: 'load_project',
-      };
+    // Resolve target directory: explicit path > project root > cwd
+    let projectRoot: string;
+    if (targetPath) {
+      projectRoot = pathModule.isAbsolute(targetPath)
+        ? targetPath
+        : pathModule.resolve(process.cwd(), targetPath);
+    } else {
+      const ctxRoot = getProjectRoot(ctx);
+      if (!ctxRoot) {
+        return {
+          error: 'No path specified and no project loaded. Either specify path parameter or use load_project first.',
+          suggestion: 'Specify the path parameter explicitly, e.g., path: "/path/to/project"',
+        };
+      }
+      projectRoot = ctxRoot;
     }
 
     // Validate package name (basic security check)
@@ -1129,6 +1145,7 @@ export function generateInstallPackageHandler(ctx: FileToolsContext): (args: any
         installed: true,
         package: baseName,
         version: installedVersion,
+        path: projectRoot,
         dev,
         duration_ms: Date.now() - startTime,
       };

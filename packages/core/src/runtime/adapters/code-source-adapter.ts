@@ -1887,6 +1887,8 @@ export class CodeSourceAdapter extends SourceAdapter {
         for (let i = 0; i < doc.codeBlocks.length; i++) {
           const block = doc.codeBlocks[i];
           const blockId = `codeblock:${doc.uuid}:${i}`;
+          // Compute hash from code for incremental ingestion
+          const blockHash = createHash('sha256').update(block.code || '').digest('hex').slice(0, 16);
 
           nodes.push({
             labels: ['CodeBlock'],
@@ -1897,6 +1899,8 @@ export class CodeSourceAdapter extends SourceAdapter {
               file: relPath,
               language: block.language || 'text',
               code: block.code,
+              rawText: block.code, // For unified search
+              hash: blockHash, // Required for incremental ingestion
               startLine: block.startLine,
               endLine: block.endLine,
               index: i
@@ -1915,6 +1919,8 @@ export class CodeSourceAdapter extends SourceAdapter {
       if (doc.sections && doc.sections.length > 0) {
         for (const section of doc.sections) {
           const sectionId = `section:${section.uuid}`;
+          // Compute hash from content for incremental ingestion
+          const sectionHash = createHash('sha256').update(section.content || '').digest('hex').slice(0, 16);
 
           nodes.push({
             labels: ['MarkdownSection'],
@@ -1929,6 +1935,9 @@ export class CodeSourceAdapter extends SourceAdapter {
               // Store both full content and own content for different search needs
               content: section.content,
               ownContent: section.ownContent,
+              // rawText for unified search compatibility
+              rawText: section.content,
+              hash: sectionHash, // Required for incremental ingestion
               startLine: section.startLine,
               endLine: section.endLine,
               ...(section.parentTitle && { parentTitle: section.parentTitle }),

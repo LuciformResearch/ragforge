@@ -202,6 +202,7 @@ async function prepareToolsForMcp(
 ): Promise<{
   tools: GeneratedToolDefinition[];
   handlers: Record<string, (args: any) => Promise<any>>;
+  onBeforeToolCall: (toolName: string, args: any) => Promise<void>;
 }> {
   const projectPath = options.project || process.cwd();
   const allTools: GeneratedToolDefinition[] = [];
@@ -320,49 +321,50 @@ async function prepareToolsForMcp(
   // Fallback to cwd for standalone mode (no project loaded)
   const fileTools = generateFileTools({
     projectRoot: () => ctx.currentProjectPath || process.cwd(),
-    // Trigger re-ingestion when files are modified
+    // Queue file changes for batched re-ingestion (non-blocking)
+    // The actual ingestion happens after a debounce delay (500ms)
+    // brain_search will wait for pending edits before querying
     onFileModified: ctx.brainManager
       ? async (filePath: string, changeType: 'created' | 'updated' | 'deleted') => {
-          log('debug', `File ${changeType}: ${filePath}`);
-          // For media/document files, use updateMediaContent
-          // For code files, the file watcher handles re-ingestion automatically
-          if (changeType !== 'deleted' && ctx.brainManager) {
-            const pathModule = await import('path');
-            const ext = pathModule.extname(filePath).toLowerCase();
-            const mediaExts = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg', '.pdf', '.docx', '.xlsx', '.glb', '.gltf'];
+          log('debug', `File ${changeType}: ${filePath} (queuing for re-ingestion)`);
 
-            if (mediaExts.includes(ext)) {
-              try {
-                await ctx.brainManager.updateMediaContent({
-                  filePath,
-                  extractionMethod: `file-tool-${changeType}`,
-                  generateEmbeddings: true,
-                });
-                log('debug', `Re-ingested media: ${filePath}`);
-              } catch (e: any) {
-                log('debug', `Re-ingestion failed: ${e.message}`);
-              }
-            } else {
-              // Code files: find the project and trigger incremental re-ingestion
-              const absoluteFilePath = pathModule.resolve(filePath);
-              const projects = ctx.brainManager!.listProjects();
-              const project = projects.find(p => absoluteFilePath.startsWith(p.path + pathModule.sep) || absoluteFilePath.startsWith(p.path));
+          if (!ctx.brainManager) {
+            return { queued: false, reason: 'brainManager not available' };
+          }
 
-              if (project) {
-                try {
-                  log('debug', `Re-ingesting code file in project ${project.id}: ${filePath}`);
-                  await ctx.brainManager!.quickIngest(project.path, {
-                    projectName: project.id,
-                  });
-                  log('debug', `Re-ingested project ${project.id}`);
-                } catch (e: any) {
-                  log('debug', `Code re-ingestion failed: ${e.message}`);
-                }
-              } else {
-                log('debug', `Code file modified but no project found: ${filePath}`);
-              }
+          const pathModule = await import('path');
+          const absoluteFilePath = pathModule.resolve(filePath);
+          const ext = pathModule.extname(filePath).toLowerCase();
+          const mediaExts = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg', '.pdf', '.docx', '.xlsx', '.glb', '.gltf'];
+
+          // Media files: still need immediate processing (no queue yet for media)
+          if (mediaExts.includes(ext) && changeType !== 'deleted') {
+            try {
+              await ctx.brainManager.updateMediaContent({
+                filePath: absoluteFilePath,
+                extractionMethod: `file-tool-${changeType}`,
+                generateEmbeddings: true,
+              });
+              log('debug', `Re-ingested media: ${filePath}`);
+              return { queued: false, mediaUpdated: true };
+            } catch (e: any) {
+              log('debug', `Media re-ingestion failed: ${e.message}`);
+              return { queued: false, error: e.message };
             }
           }
+
+          // Code files: queue for batched ingestion (non-blocking!)
+          console.log(`[MCP] 🔄 Queuing ${filePath} for re-ingestion...`);
+          ctx.brainManager.queueFileChange(absoluteFilePath, changeType);
+          const pendingCount = ctx.brainManager.getPendingEditCount();
+          console.log(`[MCP] 📥 Queued! (${pendingCount} pending edits)`);
+          log('debug', `Queued ${filePath} for re-ingestion (${pendingCount} pending)`);
+
+          return {
+            queued: true,
+            pendingCount,
+            note: 'Ingestion queued. brain_search will wait for completion.',
+          };
         }
       : undefined,
   });
@@ -562,7 +564,60 @@ async function prepareToolsForMcp(
 
   log('info', `Prepared ${allTools.length} tools total`);
 
-  return { tools: allTools, handlers: allHandlers };
+  // Create onBeforeToolCall callback for auto-init and auto-watch
+  const onBeforeToolCall = async (toolName: string, args: any) => {
+    // 1. Auto-init brainManager if not initialized
+    if (!ctx.brainManager) {
+      try {
+        log('debug', 'Auto-initializing brainManager...');
+        ctx.brainManager = await BrainManager.getInstance();
+        await ctx.brainManager.initialize();
+        log('info', 'BrainManager auto-initialized');
+      } catch (e: any) {
+        log('debug', `BrainManager auto-init failed: ${e.message}`);
+      }
+    }
+
+    // 2. Auto-start watcher for file paths in known projects
+    if (ctx.brainManager && args) {
+      const pathModule = await import('path');
+      // Extract file path from common arg names
+      const filePath = args.path || args.file_path || args.image_path || args.model_path;
+      if (filePath && typeof filePath === 'string') {
+        const absolutePath = pathModule.isAbsolute(filePath)
+          ? filePath
+          : pathModule.resolve(process.cwd(), filePath);
+
+        // Find project for this path
+        const projects = ctx.brainManager.listProjects();
+        const project = projects.find(p =>
+          absolutePath.startsWith(p.path + pathModule.sep) || absolutePath.startsWith(p.path)
+        );
+
+        if (project) {
+          // Check if watcher is running using getWatcher
+          const existingWatcher = ctx.brainManager.getWatcher(project.path);
+          const isWatching = existingWatcher?.isWatching?.();
+
+          if (!isWatching) {
+            try {
+              log('debug', `Auto-starting watcher for project ${project.id}`);
+              // Use quickIngest with watch: true to start watcher
+              await ctx.brainManager.quickIngest(project.path, {
+                projectName: project.id,
+                watch: true,
+              });
+              log('info', `Watcher auto-started for ${project.id}`);
+            } catch (e: any) {
+              log('debug', `Watcher auto-start failed: ${e.message}`);
+            }
+          }
+        }
+      }
+    }
+  };
+
+  return { tools: allTools, handlers: allHandlers, onBeforeToolCall };
 }
 
 // ============================================
@@ -683,7 +738,7 @@ export async function runMcpServer(options: McpServerOptions): Promise<void> {
 
   try {
     // Prepare tools
-    const { tools, handlers } = await prepareToolsForMcp(options, log);
+    const { tools, handlers, onBeforeToolCall } = await prepareToolsForMcp(options, log);
 
     // Start MCP server
     const config: McpServerConfig = {
@@ -694,6 +749,7 @@ export async function runMcpServer(options: McpServerOptions): Promise<void> {
       sections: options.sections,
       excludeTools: options.exclude,
       onLog: log,
+      onBeforeToolCall,
     };
 
     await startMcpServer(config);

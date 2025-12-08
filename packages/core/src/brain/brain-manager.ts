@@ -28,6 +28,8 @@ import { UniversalSourceAdapter } from '../runtime/adapters/universal-source-ada
 import type { ParseResult } from '../runtime/adapters/types.js';
 import { formatLocalDate } from '../runtime/utils/timestamp.js';
 import { EmbeddingService } from './embedding-service.js';
+import { CONTENT_NODE_LABELS } from '../utils/node-schema.js';
+import { computeSchemaHash } from '../utils/schema-version.js';
 import { FileWatcher, type FileWatcherConfig } from '../runtime/adapters/file-watcher.js';
 import { IncrementalIngestionManager } from '../runtime/adapters/incremental-ingestion.js';
 import { IngestionLock, getGlobalIngestionLock } from '../tools/ingestion-lock.js';
@@ -313,6 +315,9 @@ export class BrainManager {
     // 8. Ensure indexes exist for fast lookups
     await this.ensureIndexes();
 
+    // 9. Check for schema updates and mark outdated nodes
+    await this.checkSchemaUpdates();
+
     this.initialized = true;
     console.log('[Brain] Initialized successfully');
   }
@@ -359,6 +364,75 @@ export class BrainManager {
     }
 
     console.log('[Brain] Indexes ensured');
+  }
+
+  /**
+   * Check for schema updates and mark outdated nodes as dirty
+   *
+   * For each content node type:
+   * 1. Compute current schemaVersion from a sample node's properties
+   * 2. Find nodes where schemaVersion differs (or is missing)
+   * 3. Mark those nodes as embeddingsDirty for re-processing
+   */
+  private async checkSchemaUpdates(): Promise<void> {
+    if (!this.neo4jClient) return;
+
+    console.log('[Brain] Checking for schema updates...');
+    let totalOutdated = 0;
+
+    for (const label of CONTENT_NODE_LABELS) {
+      try {
+        // Get a sample node to compute current schema
+        const sampleResult = await this.neo4jClient.run(
+          `MATCH (n:${label}) RETURN n LIMIT 1`
+        );
+
+        if (sampleResult.records.length === 0) {
+          continue; // No nodes of this type
+        }
+
+        const sampleNode = sampleResult.records[0].get('n');
+        const props = sampleNode.properties;
+
+        // Compute what schemaVersion should be for current property set
+        const currentSchemaVersion = computeSchemaHash(label, props);
+
+        // Find nodes with different or missing schemaVersion
+        const outdatedResult = await this.neo4jClient.run(
+          `MATCH (n:${label})
+           WHERE n.schemaVersion IS NULL OR n.schemaVersion <> $currentVersion
+           RETURN count(n) as count`,
+          { currentVersion: currentSchemaVersion }
+        );
+
+        const outdatedCount = outdatedResult.records[0]?.get('count')?.toNumber() || 0;
+
+        if (outdatedCount > 0) {
+          console.log(`[Brain] Found ${outdatedCount} outdated ${label} nodes (schema changed)`);
+
+          // Mark them as dirty for re-ingestion
+          await this.neo4jClient.run(
+            `MATCH (n:${label})
+             WHERE n.schemaVersion IS NULL OR n.schemaVersion <> $currentVersion
+             SET n.embeddingsDirty = true, n.schemaDirty = true`,
+            { currentVersion: currentSchemaVersion }
+          );
+
+          totalOutdated += outdatedCount;
+        }
+      } catch (err: any) {
+        // Node type might not exist yet, that's fine
+        if (!err.message?.includes('not found')) {
+          console.warn(`[Brain] Schema check warning for ${label}: ${err.message}`);
+        }
+      }
+    }
+
+    if (totalOutdated > 0) {
+      console.log(`[Brain] Marked ${totalOutdated} total nodes as dirty (schema outdated)`);
+    } else {
+      console.log('[Brain] All schemas up to date');
+    }
   }
 
   /**
@@ -875,6 +949,44 @@ volumes:
       return projectId;
     }
 
+    // Check if this path is a subdirectory of an existing project
+    // If so, use the parent project instead of creating a new sub-project
+    for (const [existingId, existingProject] of this.registeredProjects) {
+      if (absolutePath.startsWith(existingProject.path + path.sep)) {
+        console.log(`[Brain] Path ${absolutePath} is inside existing project ${existingId}, reusing parent project`);
+        existingProject.lastAccessed = new Date();
+        await this.saveProjectsRegistry();
+        return existingId;
+      }
+    }
+
+    // Check if this path is a PARENT of existing projects
+    // If so, delete the child projects and their nodes (new parent will re-ingest)
+    const childProjects: string[] = [];
+    for (const [existingId, existingProject] of this.registeredProjects) {
+      if (existingProject.path.startsWith(absolutePath + path.sep)) {
+        childProjects.push(existingId);
+      }
+    }
+    if (childProjects.length > 0) {
+      console.log(`[Brain] New project ${projectId} is parent of ${childProjects.length} existing project(s), cleaning up children...`);
+      for (const childId of childProjects) {
+        // Delete nodes from Neo4j
+        const neo4j = this.getNeo4jClient();
+        if (neo4j) {
+          const result = await neo4j.run(
+            'MATCH (n {projectId: $projectId}) DETACH DELETE n RETURN count(n) as deleted',
+            { projectId: childId }
+          );
+          const deleted = result.records[0]?.get('deleted')?.toNumber() || 0;
+          console.log(`[Brain] Deleted ${deleted} nodes from child project ${childId}`);
+        }
+        // Remove from registry
+        this.registeredProjects.delete(childId);
+      }
+      await this.saveProjectsRegistry();
+    }
+
     // Count nodes for this project
     const nodeCount = await this.countProjectNodes(projectId);
 
@@ -907,10 +1019,28 @@ volumes:
   }
 
   /**
-   * List all registered projects
+   * List all registered projects (sync, cached nodeCount)
    */
   listProjects(): RegisteredProject[] {
     return Array.from(this.registeredProjects.values());
+  }
+
+  /**
+   * List all registered projects with real-time node counts from Neo4j
+   */
+  async listProjectsWithCounts(): Promise<RegisteredProject[]> {
+    const projects = Array.from(this.registeredProjects.values());
+
+    // Query real counts in parallel
+    const counts = await Promise.all(
+      projects.map(p => this.countProjectNodes(p.id))
+    );
+
+    // Return projects with updated counts
+    return projects.map((p, i) => ({
+      ...p,
+      nodeCount: counts[i],
+    }));
   }
 
   /**
@@ -979,8 +1109,20 @@ volumes:
       throw new Error('Brain not initialized. Call initialize() first.');
     }
 
-    // Always generate project ID from path - this is the source of truth
-    const projectId = ProjectRegistry.generateId(absolutePath);
+    // Check if this path is inside an existing project - if so, use parent
+    let projectId: string | null = null;
+    for (const [existingId, existingProject] of this.registeredProjects) {
+      if (absolutePath.startsWith(existingProject.path + path.sep)) {
+        projectId = existingId;
+        console.log(`[QuickIngest] Path is inside existing project ${existingId}, using parent`);
+        break;
+      }
+    }
+
+    // If no parent found, generate new project ID
+    if (!projectId) {
+      projectId = ProjectRegistry.generateId(absolutePath);
+    }
     // projectName is used as displayName only
     const displayName = options.projectName;
 
@@ -1515,11 +1657,12 @@ volumes:
       params.projectIds = options.projects;
     }
 
-    // Build node type filter
+    // Build node type filter (uses 'type' property, not labels)
     let nodeTypeFilter = '';
     if (options.nodeTypes && options.nodeTypes.length > 0) {
-      const labels = options.nodeTypes.map(t => `n:${t}`).join(' OR ');
-      nodeTypeFilter = `AND (${labels})`;
+      // Normalize to lowercase for consistent matching
+      params.nodeTypes = options.nodeTypes.map(t => t.toLowerCase());
+      nodeTypeFilter = `AND n.type IN $nodeTypes`;
     }
 
     // Execute search
@@ -2127,6 +2270,8 @@ volumes:
   private agentEditQueue: Map<string, { path: string; changeType: 'created' | 'updated' | 'deleted' }> = new Map();
   private agentEditFlushTimer: ReturnType<typeof setTimeout> | null = null;
   private agentEditFlushDelay = 500; // ms - wait for more edits before flushing
+  private isFlushingAgentQueue = false;
+  private flushCompleteCallbacks: Array<() => void> = [];
 
   /**
    * Queue a file change from agent edit/creation
@@ -2174,8 +2319,13 @@ volumes:
     this.agentEditQueue.clear();
 
     if (changes.length === 0) {
+      // Notify waiters even if empty
+      this.notifyFlushComplete();
       return { nodesAffected: 0, embeddingsGenerated: 0 };
     }
+
+    // Mark as flushing
+    this.isFlushingAgentQueue = true;
 
     console.log(`[Brain] Flushing ${changes.length} queued file changes...`);
 
@@ -2245,16 +2395,36 @@ volumes:
       }
     } finally {
       release();
+      this.isFlushingAgentQueue = false;
+      this.notifyFlushComplete();
     }
 
     return { nodesAffected: totalNodesAffected, embeddingsGenerated: totalEmbeddingsGenerated };
   }
 
   /**
-   * Check if there are pending agent edits
+   * Notify all waiting callbacks that flush is complete
+   */
+  private notifyFlushComplete(): void {
+    const callbacks = this.flushCompleteCallbacks;
+    this.flushCompleteCallbacks = [];
+    for (const cb of callbacks) {
+      cb();
+    }
+  }
+
+  /**
+   * Check if there are pending agent edits or a flush in progress
    */
   hasPendingEdits(): boolean {
-    return this.agentEditQueue.size > 0;
+    return this.agentEditQueue.size > 0 || this.isFlushingAgentQueue;
+  }
+
+  /**
+   * Check if flush is currently in progress
+   */
+  isFlushingEdits(): boolean {
+    return this.isFlushingAgentQueue;
   }
 
   /**
@@ -2262,6 +2432,62 @@ volumes:
    */
   getPendingEditCount(): number {
     return this.agentEditQueue.size;
+  }
+
+  /**
+   * Wait for all pending edits to be flushed
+   *
+   * Call this before semantic queries to ensure fresh data.
+   * Returns immediately if no edits are pending.
+   *
+   * @param timeoutMs - Maximum wait time (default: 30000ms)
+   * @returns true if edits were flushed, false if timeout
+   */
+  async waitForPendingEdits(timeoutMs: number = 30000): Promise<boolean> {
+    // Nothing pending, return immediately
+    if (!this.hasPendingEdits()) {
+      return true;
+    }
+
+    console.log(`[Brain] Waiting for pending edits to flush...`);
+
+    return new Promise<boolean>((resolve) => {
+      // Set up timeout
+      const timeout = setTimeout(() => {
+        // Remove our callback
+        const idx = this.flushCompleteCallbacks.indexOf(callback);
+        if (idx >= 0) {
+          this.flushCompleteCallbacks.splice(idx, 1);
+        }
+        console.warn(`[Brain] Timeout waiting for pending edits`);
+        resolve(false);
+      }, timeoutMs);
+
+      // Set up callback
+      const callback = () => {
+        clearTimeout(timeout);
+        // Check if more edits came in while we were waiting
+        if (this.hasPendingEdits()) {
+          // Re-register for next flush
+          this.flushCompleteCallbacks.push(callback);
+        } else {
+          console.log(`[Brain] Pending edits flushed`);
+          resolve(true);
+        }
+      };
+
+      this.flushCompleteCallbacks.push(callback);
+
+      // If there's a scheduled flush, trigger it immediately
+      // This avoids waiting for the debounce timer
+      if (this.agentEditFlushTimer && this.agentEditQueue.size > 0) {
+        clearTimeout(this.agentEditFlushTimer);
+        this.agentEditFlushTimer = null;
+        this.flushAgentEditQueue().catch(err => {
+          console.error('[Brain] Failed to flush agent edit queue:', err);
+        });
+      }
+    });
   }
 
   // ============================================

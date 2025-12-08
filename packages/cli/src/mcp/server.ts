@@ -37,6 +37,8 @@ export interface McpServerConfig {
   excludeTools?: string[];
   /** Callback for logging */
   onLog?: (level: 'info' | 'error' | 'debug', message: string) => void;
+  /** Callback before each tool call (for auto-init, auto-watch, etc.) */
+  onBeforeToolCall?: (toolName: string, args: any) => Promise<void>;
 }
 
 /**
@@ -51,6 +53,7 @@ export async function startMcpServer(config: McpServerConfig): Promise<void> {
     sections,
     excludeTools = [],
     onLog = () => {},
+    onBeforeToolCall,
   } = config;
 
   // Filter tools by section and exclusions
@@ -114,6 +117,11 @@ export async function startMcpServer(config: McpServerConfig): Promise<void> {
     }
 
     try {
+      // Pre-call hook (auto-init, auto-watch, etc.)
+      if (onBeforeToolCall) {
+        await onBeforeToolCall(toolName, args || {});
+      }
+
       // Execute handler
       const result = await handler(args || {});
 

@@ -10,6 +10,7 @@ import type { ParsedGraph, ParsedNode, ParsedRelationship, SourceConfig, SourceA
 import { UniversalSourceAdapter } from './universal-source-adapter.js';
 import { ChangeTracker } from './change-tracker.js';
 import { isStructuralNode } from '../../utils/node-schema.js';
+import { addSchemaVersion } from '../../utils/schema-version.js';
 import { createHash } from 'crypto';
 import { globby } from 'globby';
 
@@ -366,6 +367,9 @@ export class IncrementalIngestionManager {
     for (const node of nodes) {
       const labels = node.labels.join(':');
       const props = { ...node.properties };
+
+      // Add schemaVersion to content nodes (for detecting schema changes)
+      addSchemaVersion(node.labels, props);
 
       // Mark Scope nodes as dirty if their embeddings need regeneration
       if (markDirty && node.labels.includes('Scope')) {
