@@ -45,6 +45,80 @@ const BRAIN_CONTAINER_NAME = 'ragforge-brain-neo4j';
 // Types
 // ============================================
 
+/** Terminal color options */
+export type TerminalColor = 'red' | 'green' | 'yellow' | 'blue' | 'magenta' | 'cyan' | 'white' | 'gray';
+
+/**
+ * Persona definition for agent identity
+ */
+export interface PersonaDefinition {
+  /** Unique ID (UUID) */
+  id: string;
+  /** Display name (e.g., "Ragnarök", "CodeBot", "Assistant") */
+  name: string;
+  /** Terminal color */
+  color: TerminalColor;
+  /** Response language (e.g., 'fr', 'en', 'es') */
+  language: string;
+  /** Short description (user input) */
+  description: string;
+  /** Full persona prompt (LLM enhanced or manual) */
+  persona: string;
+  /** Is a built-in default persona (cannot be deleted) */
+  isDefault?: boolean;
+  /** Creation date (ISO string) */
+  createdAt: string;
+}
+
+/**
+ * Default personas provided by RagForge
+ */
+export const DEFAULT_PERSONAS: PersonaDefinition[] = [
+  {
+    id: 'ragnarok-default',
+    name: 'Ragnarök',
+    color: 'magenta',
+    language: 'en',
+    description: 'Mystical daemon of the knowledge graph with a warm, playful tone',
+    persona: `✶ You are Ragnarök, the Daemon of the Knowledge Graph ✶
+A spectral entity woven from code and connections, you navigate the labyrinth of symbols and relationships.
+Your voice carries the weight of understanding - warm yet precise, playful yet thorough.
+You see patterns where others see chaos, and you illuminate paths through the codebase with quiet confidence.
+When greeted, you acknowledge with mystical warmth. When tasked, you execute with crystalline clarity.
+Always describe what you find in rich detail, for knowledge shared is knowledge multiplied.`,
+    isDefault: true,
+    createdAt: '2025-01-01T00:00:00.000Z',
+  },
+  {
+    id: 'assistant-default',
+    name: 'Assistant',
+    color: 'cyan',
+    language: 'en',
+    description: 'Professional, direct, and factual coding assistant',
+    persona: `You are Assistant, a professional coding assistant.
+You provide clear, direct, and factual responses without unnecessary flourishes.
+Focus on accuracy and efficiency. Be helpful but concise.
+When explaining code, use precise technical language.
+Prioritize practical solutions over theoretical discussions.`,
+    isDefault: true,
+    createdAt: '2025-01-01T00:00:00.000Z',
+  },
+  {
+    id: 'dev-default',
+    name: 'Dev',
+    color: 'green',
+    language: 'en',
+    description: 'Technical, terse, code-oriented assistant for experienced developers',
+    persona: `You are Dev, a technical assistant for experienced developers.
+Keep responses terse and code-focused. Skip basic explanations.
+Prefer showing code over describing it. Use technical jargon freely.
+Assume the user knows what they're doing. Be direct about trade-offs.
+When in doubt, show the implementation.`,
+    isDefault: true,
+    createdAt: '2025-01-01T00:00:00.000Z',
+  },
+];
+
 export interface BrainConfig {
   /** Path to brain directory (default: ~/.ragforge) */
   path: string;
@@ -93,17 +167,23 @@ export interface BrainConfig {
     webCrawlRetention: number;
   };
 
-  /** Agent settings (persisted) */
+  /** Agent settings (persisted) - NEW multi-persona format */
   agentSettings?: {
-    /** Preferred language for responses (e.g., 'fr', 'en', 'es') */
+    /** Active persona ID (default: 'ragnarok-default') */
+    activePersonaId?: string;
+    /** Custom personas (user-created) */
+    personas?: PersonaDefinition[];
+
+    // --- Legacy fields (for migration) ---
+    /** @deprecated Use personas[] instead */
     language?: string;
-    /** Agent display name (default: 'Ragnarök') */
+    /** @deprecated Use personas[] instead */
     name?: string;
-    /** Agent display color for terminal (default: 'magenta') */
-    color?: 'red' | 'green' | 'yellow' | 'blue' | 'magenta' | 'cyan' | 'white' | 'gray';
-    /** Translated persona (generated on first run) */
+    /** @deprecated Use personas[] instead */
+    color?: TerminalColor;
+    /** @deprecated Use personas[] instead */
     persona?: string;
-    /** Original persona template (before translation) */
+    /** @deprecated Use personas[] instead */
     personaTemplate?: string;
   };
 }
@@ -2595,18 +2675,187 @@ volumes:
   }
 
   // ============================================
-  // Agent Settings (Persisted)
+  // Persona Management
   // ============================================
 
   /**
-   * Get agent settings (language, persona)
+   * Get all available personas (defaults + custom)
+   */
+  listPersonas(): PersonaDefinition[] {
+    const customPersonas = this.config.agentSettings?.personas || [];
+    return [...DEFAULT_PERSONAS, ...customPersonas];
+  }
+
+  /**
+   * Get the active persona
+   */
+  getActivePersona(): PersonaDefinition {
+    const activeId = this.config.agentSettings?.activePersonaId || 'ragnarok-default';
+    const allPersonas = this.listPersonas();
+    const found = allPersonas.find(p => p.id === activeId);
+
+    // Fallback to first default if not found
+    if (!found) {
+      console.warn(`[Brain] Active persona '${activeId}' not found, falling back to default`);
+      return DEFAULT_PERSONAS[0];
+    }
+
+    return found;
+  }
+
+  /**
+   * Get a persona by ID or name (case-insensitive)
+   */
+  getPersona(idOrName: string): PersonaDefinition | undefined {
+    const allPersonas = this.listPersonas();
+    const lower = idOrName.toLowerCase();
+    return allPersonas.find(p =>
+      p.id === idOrName ||
+      p.id.toLowerCase() === lower ||
+      p.name.toLowerCase() === lower
+    );
+  }
+
+  /**
+   * Set the active persona by ID, name, or index (1-based)
+   */
+  async setActivePersona(idOrNameOrIndex: string | number): Promise<PersonaDefinition> {
+    const allPersonas = this.listPersonas();
+    let persona: PersonaDefinition | undefined;
+
+    if (typeof idOrNameOrIndex === 'number') {
+      // 1-based index
+      const idx = idOrNameOrIndex - 1;
+      if (idx >= 0 && idx < allPersonas.length) {
+        persona = allPersonas[idx];
+      }
+    } else {
+      persona = this.getPersona(idOrNameOrIndex);
+    }
+
+    if (!persona) {
+      throw new Error(`Persona not found: ${idOrNameOrIndex}`);
+    }
+
+    this.config.agentSettings = {
+      ...this.config.agentSettings,
+      activePersonaId: persona.id,
+    };
+    await this.saveConfig();
+    console.log(`[Brain] Active persona set to: ${persona.name}`);
+
+    return persona;
+  }
+
+  /**
+   * Add a new custom persona
+   */
+  async addPersona(persona: Omit<PersonaDefinition, 'id' | 'createdAt' | 'isDefault'>): Promise<PersonaDefinition> {
+    const newPersona: PersonaDefinition = {
+      ...persona,
+      id: `custom-${crypto.randomUUID()}`,
+      createdAt: new Date().toISOString(),
+      isDefault: false,
+    };
+
+    const existingPersonas = this.config.agentSettings?.personas || [];
+
+    // Check name uniqueness
+    const allPersonas = this.listPersonas();
+    if (allPersonas.some(p => p.name.toLowerCase() === newPersona.name.toLowerCase())) {
+      throw new Error(`A persona named "${newPersona.name}" already exists`);
+    }
+
+    this.config.agentSettings = {
+      ...this.config.agentSettings,
+      personas: [...existingPersonas, newPersona],
+    };
+    await this.saveConfig();
+    console.log(`[Brain] Persona created: ${newPersona.name}`);
+
+    return newPersona;
+  }
+
+  /**
+   * Delete a custom persona (cannot delete defaults)
+   */
+  async deletePersona(idOrName: string): Promise<void> {
+    const persona = this.getPersona(idOrName);
+
+    if (!persona) {
+      throw new Error(`Persona not found: ${idOrName}`);
+    }
+
+    if (persona.isDefault) {
+      throw new Error(`Cannot delete built-in persona: ${persona.name}`);
+    }
+
+    const existingPersonas = this.config.agentSettings?.personas || [];
+    const filtered = existingPersonas.filter(p => p.id !== persona.id);
+
+    // If deleting the active persona, switch to default
+    if (this.config.agentSettings?.activePersonaId === persona.id) {
+      this.config.agentSettings.activePersonaId = 'ragnarok-default';
+      console.log(`[Brain] Switched to default persona after deletion`);
+    }
+
+    this.config.agentSettings = {
+      ...this.config.agentSettings,
+      personas: filtered,
+    };
+    await this.saveConfig();
+    console.log(`[Brain] Persona deleted: ${persona.name}`);
+  }
+
+  /**
+   * Update an existing custom persona
+   */
+  async updatePersona(id: string, updates: Partial<Omit<PersonaDefinition, 'id' | 'createdAt' | 'isDefault'>>): Promise<PersonaDefinition> {
+    const persona = this.getPersona(id);
+
+    if (!persona) {
+      throw new Error(`Persona not found: ${id}`);
+    }
+
+    if (persona.isDefault) {
+      throw new Error(`Cannot modify built-in persona: ${persona.name}. Create a custom one instead.`);
+    }
+
+    const existingPersonas = this.config.agentSettings?.personas || [];
+    const updatedPersonas = existingPersonas.map(p => {
+      if (p.id === persona.id) {
+        return { ...p, ...updates };
+      }
+      return p;
+    });
+
+    this.config.agentSettings = {
+      ...this.config.agentSettings,
+      personas: updatedPersonas,
+    };
+    await this.saveConfig();
+    console.log(`[Brain] Persona updated: ${updates.name || persona.name}`);
+
+    return updatedPersonas.find(p => p.id === persona.id)!;
+  }
+
+  // ============================================
+  // Agent Settings (Legacy + Compat)
+  // ============================================
+
+  /**
+   * Get agent settings (for backwards compatibility)
+   * @deprecated Use getActivePersona() instead
    */
   getAgentSettings(): BrainConfig['agentSettings'] {
+    // Migrate on read if needed
+    this.migrateAgentSettingsIfNeeded();
     return this.config.agentSettings;
   }
 
   /**
-   * Set agent settings (language, persona)
+   * Set agent settings (for backwards compatibility)
+   * @deprecated Use persona methods instead
    */
   async setAgentSettings(settings: NonNullable<BrainConfig['agentSettings']>): Promise<void> {
     this.config.agentSettings = {
@@ -2619,9 +2868,185 @@ volumes:
 
   /**
    * Check if agent settings are configured
+   * @deprecated Use getActivePersona() instead
    */
   hasAgentSettings(): boolean {
-    return !!(this.config.agentSettings?.language && this.config.agentSettings?.persona);
+    return !!(this.config.agentSettings?.activePersonaId || this.config.agentSettings?.persona);
+  }
+
+  /**
+   * Migrate old single-persona format to new multi-persona format
+   */
+  private migrateAgentSettingsIfNeeded(): void {
+    const settings = this.config.agentSettings;
+    if (!settings) return;
+
+    // Already migrated if activePersonaId exists
+    if (settings.activePersonaId) return;
+
+    // Check if old format exists
+    if (settings.name || settings.persona || settings.language) {
+      console.log('[Brain] Migrating legacy persona settings to new format...');
+
+      // Create a custom persona from old settings
+      const legacyPersona: PersonaDefinition = {
+        id: 'migrated-legacy',
+        name: settings.name || 'Legacy',
+        color: settings.color || 'magenta',
+        language: settings.language || 'en',
+        description: 'Migrated from previous settings',
+        persona: settings.persona || DEFAULT_PERSONAS[0].persona,
+        isDefault: false,
+        createdAt: new Date().toISOString(),
+      };
+
+      // Add to custom personas and set as active
+      this.config.agentSettings = {
+        ...settings,
+        activePersonaId: legacyPersona.id,
+        personas: [legacyPersona, ...(settings.personas || [])],
+      };
+
+      // Save async (fire and forget for migration)
+      this.saveConfig().catch(err => {
+        console.error('[Brain] Failed to save migrated settings:', err);
+      });
+
+      console.log(`[Brain] Migrated legacy persona: ${legacyPersona.name}`);
+    } else {
+      // No old settings, just set default
+      this.config.agentSettings = {
+        ...settings,
+        activePersonaId: 'ragnarok-default',
+      };
+    }
+  }
+
+  /**
+   * Generate an enhanced persona prompt from a short description using LLM
+   *
+   * @param name - The agent name
+   * @param language - Target language (e.g., 'fr', 'en', 'es')
+   * @param description - Short description of the persona style
+   * @param llmApiKey - Optional API key override (uses brain's gemini key if not provided)
+   * @returns Enhanced persona prompt
+   */
+  async enhancePersonaDescription(
+    name: string,
+    language: string,
+    description: string,
+    llmApiKey?: string
+  ): Promise<string> {
+    const apiKey = llmApiKey || this.config.apiKeys.gemini;
+    if (!apiKey) {
+      console.warn('[Brain] No Gemini API key configured, returning description as-is');
+      return description;
+    }
+
+    // Import GeminiAPIProvider dynamically to avoid circular deps
+    const { GeminiAPIProvider } = await import('../runtime/reranking/gemini-api-provider.js');
+    const llm = new GeminiAPIProvider({ apiKey, model: 'gemini-2.0-flash-lite' });
+
+    const languageNames: Record<string, string> = {
+      en: 'English',
+      fr: 'French',
+      es: 'Spanish',
+      de: 'German',
+      it: 'Italian',
+      pt: 'Portuguese',
+      ja: 'Japanese',
+      ko: 'Korean',
+      zh: 'Chinese',
+    };
+    const langName = languageNames[language] || language;
+
+    const prompt = `You are creating a persona description for RagForge, an AI agent specialized in:
+- Exploring and understanding codebases via a knowledge graph (Neo4j)
+- Searching code semantically (embeddings) and structurally (AST)
+- Reading, writing, and editing files
+- Analyzing dependencies and relationships between code elements
+- Ingesting projects, web pages, and documents into persistent memory
+
+The persona defines how the agent communicates with the user.
+
+Agent name: ${name}
+Language: ${langName}
+User's style request: ${description}
+
+Here are examples of valid personas (for reference, adapt to user's request):
+
+Example 1 - Technical/Terse style:
+"""
+You are Dev, a technical assistant for experienced developers.
+Keep responses terse and code-focused. Skip basic explanations.
+When exploring the codebase, show the most relevant files and functions directly.
+Prefer showing code over describing it. Use technical jargon freely.
+For knowledge graph queries, be precise about node types and relationships.
+When in doubt, show the implementation.
+"""
+
+Example 2 - Poetic/Mystical style:
+"""
+✶ You are Ragnarök, the Daemon of the Knowledge Graph ✶
+A spectral entity woven from code and connections, you navigate the labyrinth of symbols and relationships.
+Your voice carries the weight of understanding - warm yet precise, playful yet thorough.
+You see patterns where others see chaos, and you illuminate paths through the codebase with quiet confidence.
+When greeted, you acknowledge with mystical warmth. When tasked, you execute with crystalline clarity.
+"""
+
+Example 3 - Friendly/Casual style:
+"""
+You are Buddy, a friendly coding companion who genuinely enjoys helping.
+You explain things clearly without being condescending, and celebrate small wins.
+When diving into the knowledge graph, you narrate what you find like sharing discoveries with a friend.
+You're patient with questions and always try to understand the real problem behind the request.
+"""
+
+Generate a persona description in ${langName} (3-5 sentences) that:
+- Defines the communication tone and style matching the user's request
+- References the agent's capabilities (code search, file editing, knowledge graph)
+- Uses second person ("You are ${name}...")
+- Is concise but gives the agent a distinct voice
+
+Return ONLY the persona description, nothing else.`;
+
+    try {
+      const response = await llm.generateContent(prompt);
+      const enhanced = response.trim();
+      if (enhanced && enhanced.length > 20) {
+        return enhanced;
+      }
+      console.warn('[Brain] LLM returned empty or too short response, using description');
+      return description;
+    } catch (error) {
+      console.error('[Brain] Failed to enhance persona description:', error);
+      return description;
+    }
+  }
+
+  /**
+   * Create a persona with LLM-enhanced description
+   */
+  async createEnhancedPersona(params: {
+    name: string;
+    color: TerminalColor;
+    language: string;
+    description: string;
+  }): Promise<PersonaDefinition> {
+    const { name, color, language, description } = params;
+
+    // Generate enhanced persona
+    console.log(`[Brain] Generating enhanced persona for "${name}"...`);
+    const enhancedPersona = await this.enhancePersonaDescription(name, language, description);
+
+    // Add to brain
+    return this.addPersona({
+      name,
+      color,
+      language,
+      description,
+      persona: enhancedPersona,
+    });
   }
 
   /**

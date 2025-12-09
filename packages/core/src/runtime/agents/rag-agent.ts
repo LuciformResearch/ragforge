@@ -762,19 +762,32 @@ ${personaTemplate}`;
 }
 
 /**
- * Get agent identity from brain settings or defaults
+ * Get agent identity from a PersonaDefinition or legacy brain settings
  */
-export function getAgentIdentity(brainSettings?: {
+export function getAgentIdentity(source?: {
   name?: string;
   color?: string;
   language?: string;
   persona?: string;
 }): AgentIdentitySettings {
   return {
-    name: brainSettings?.name || DEFAULT_AGENT_IDENTITY.name,
-    color: (brainSettings?.color as AgentIdentitySettings['color']) || DEFAULT_AGENT_IDENTITY.color,
-    language: brainSettings?.language,
-    persona: brainSettings?.persona || DEFAULT_AGENT_IDENTITY.persona,
+    name: source?.name || DEFAULT_AGENT_IDENTITY.name,
+    color: (source?.color as AgentIdentitySettings['color']) || DEFAULT_AGENT_IDENTITY.color,
+    language: source?.language,
+    persona: source?.persona || DEFAULT_AGENT_IDENTITY.persona,
+  };
+}
+
+/**
+ * Get agent identity from BrainManager using the new persona system
+ */
+export function getAgentIdentityFromBrain(brain: { getActivePersona: () => { name: string; color: string; language: string; persona: string } }): AgentIdentitySettings {
+  const persona = brain.getActivePersona();
+  return {
+    name: persona.name,
+    color: persona.color as AgentIdentitySettings['color'],
+    language: persona.language,
+    persona: persona.persona,
   };
 }
 
@@ -826,10 +839,9 @@ export class RagAgent {
     this.onToolResult = options.onToolResult;
     this.brainToolsContext = options.brainToolsContext;
 
-    // Initialize agent identity from brain settings or defaults
+    // Initialize agent identity from brain's active persona or defaults
     if (this.brainToolsContext) {
-      const brainSettings = this.brainToolsContext.brain.getAgentSettings();
-      this.identity = getAgentIdentity(brainSettings);
+      this.identity = getAgentIdentityFromBrain(this.brainToolsContext.brain);
     } else {
       this.identity = getAgentIdentity();
     }
@@ -1204,8 +1216,14 @@ Example: After getting search results, use this to analyze each result with a cu
 2. For finding code: grep_files (exact) or brain_search (semantic)
 3. For understanding projects: list_brain_projects → brain_search
 
-**IMPORTANT**:
-- **ALWAYS respond in the same language as the user's message**. If the user writes in French, respond in French. If in English, respond in English.
+**IMPORTANT - LANGUAGE**:
+You MUST respond in the same language as the user's question. Detect the user's language and answer in that language.
+- User writes in French → You respond in French
+- User writes in English → You respond in English
+- User writes in Spanish → You respond in Spanish
+This is critical for user experience. Do NOT respond in a different language than the user's message.
+
+**IMPORTANT - TOOLS**:
 - Prefer brain_search for conceptual queries ("how does X work?") and grep_files for exact text matches.`;
 
     // Add brain projects info if available

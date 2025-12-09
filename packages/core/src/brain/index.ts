@@ -6,7 +6,10 @@
 
 export {
   BrainManager,
+  DEFAULT_PERSONAS,
   type BrainConfig,
+  type PersonaDefinition,
+  type TerminalColor,
   type RegisteredProject,
   type ProjectsRegistry,
   type QuickIngestOptions,

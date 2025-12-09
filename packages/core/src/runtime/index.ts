@@ -131,7 +131,21 @@ export type {
 } from './summarization/summary-storage.js';
 
 // RagAgent - Main agent implementation
-export { RagAgent, createRagAgent, AgentLogger, type RagAgentOptions, type AskResult, type AgentSessionLog, type AgentLogEntry } from './agents/rag-agent.js';
+export {
+  RagAgent,
+  createRagAgent,
+  AgentLogger,
+  getAgentIdentity,
+  getAgentIdentityFromBrain,
+  DEFAULT_AGENT_IDENTITY,
+  DEFAULT_PERSONA_TEMPLATE,
+  translatePersona,
+  type RagAgentOptions,
+  type AskResult,
+  type AgentSessionLog,
+  type AgentLogEntry,
+  type AgentIdentitySettings,
+} from './agents/rag-agent.js';
 
 // Legacy Agent Runtime (kept for reference, not exported)
 // export { AgentRuntime } from './agents/agent-runtime.js';
