@@ -87,7 +87,8 @@ export type {
   ItemEvaluation,
   ToolCallRequest,
   ToolExecutionResult,
-  ToolExecutor
+  ToolExecutor,
+  SingleLLMCallConfig
   // Note: QueryFeedback is already exported from llm-reranker
 } from './llm/structured-llm-executor.js';
 

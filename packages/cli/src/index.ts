@@ -54,6 +54,11 @@ import {
   printTestToolHelp
 } from './commands/test-tool.js';
 import {
+  parseTuiOptions,
+  runTui,
+  printTuiHelp
+} from './commands/tui.js';
+import {
   startDaemon,
   stopDaemon,
   getDaemonStatus,
@@ -77,6 +82,7 @@ Usage:
   ragforge quickstart [options]      Quick setup for code RAG with defaults
   ragforge create <name> [options]   Create a new TypeScript project
   ragforge agent [options]           Launch RagForge agent (RAG + File + Project tools)
+  ragforge tui [options]             Launch terminal UI (interactive agent)
   ragforge mcp-server [options]      Start as MCP server (for Claude Code)
   ragforge test-tool <name> [opts]   Test a tool directly (for debugging)
   ragforge daemon <cmd>              Brain daemon management (start|stop|status)
@@ -162,8 +168,9 @@ async function main(): Promise<void> {
   const args = process.argv.slice(2);
 
   if (args.length === 0) {
-    printRootHelp();
-    process.exitCode = 1;
+    // Default: launch TUI
+    const options = parseTuiOptions([]);
+    await runTui(options);
     return;
   }
 
@@ -191,6 +198,9 @@ async function main(): Promise<void> {
             break;
           case 'agent':
             printAgentHelp();
+            break;
+          case 'tui':
+            printTuiHelp();
             break;
           case 'mcp-server':
             printMcpServerHelp();
@@ -233,6 +243,12 @@ async function main(): Promise<void> {
       case 'agent': {
         const options = parseAgentOptions(rest);
         await runAgent(options);
+        return;
+      }
+
+      case 'tui': {
+        const options = parseTuiOptions(rest);
+        await runTui(options);
         return;
       }
 

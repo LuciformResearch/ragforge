@@ -284,6 +284,60 @@ export interface LLMBatchResult<TInput, TOutput, TGlobal = any> {
   globalMetadata?: TGlobal;
 }
 
+// ===== SINGLE CALL TYPES =====
+
+/**
+ * Configuration for single structured LLM call (no batching)
+ * Same abstractions as LLMStructuredCallConfig but for a single call
+ */
+export interface SingleLLMCallConfig<TOutput = any> {
+  // === INPUTS ===
+  /** Input fields to include in prompt (with optional prompts/transforms) */
+  inputFields?: (string | InputFieldConfig)[];
+  /** Input data object */
+  input: Record<string, any>;
+  /** Additional context data */
+  contextData?: Record<string, any>;
+
+  // === PROMPTS ===
+  /** System prompt */
+  systemPrompt?: string;
+  /** User task/question */
+  userTask?: string;
+  /** Additional instructions */
+  instructions?: string;
+
+  // === OUTPUT ===
+  /** Output schema (same format as batch version) */
+  outputSchema: OutputSchema<TOutput>;
+  /** Output format (default: xml) */
+  outputFormat?: 'json' | 'xml' | 'yaml';
+
+  // === LLM ===
+  /** LLM provider instance */
+  llmProvider: LLMProvider;
+
+  // === TOOL CALLING ===
+  /** Available tools */
+  tools?: ToolDefinition[];
+  /** Custom tool executor */
+  toolExecutor?: ToolExecutor;
+  /** Max iterations for tool loop (default: 10) */
+  maxIterations?: number;
+
+  /** Callback called with each LLM response */
+  onLLMResponse?: (response: {
+    iteration: number;
+    reasoning?: string;
+    toolCalls?: ToolCallRequest[];
+    output?: TOutput;
+  }) => void;
+
+  // === DEBUGGING ===
+  logPrompts?: boolean | string;
+  logResponses?: boolean | string;
+}
+
 /**
  * Unified executor for all LLM structured operations
  */
@@ -356,6 +410,509 @@ export class StructuredLLMExecutor {
 
     // Backward compatible: return items directly if no globalSchema
     return mergedItems as (TInput & TOutput)[];
+  }
+
+  /**
+   * Execute single structured LLM call (no batching)
+   *
+   * Same abstractions as executeLLMBatch but for a single call:
+   * - inputFields with prompts/transforms
+   * - outputSchema with field descriptions
+   * - Tool calling support with iterations
+   *
+   * No [Item 0], [Item 1] formatting - just direct input → output
+   */
+  async executeSingle<TOutput>(
+    config: SingleLLMCallConfig<TOutput>
+  ): Promise<TOutput> {
+    const maxIterations = config.maxIterations ?? 10;
+    const toolsUsed: string[] = [];
+    let toolContext: ToolExecutionResult[] = [];
+
+    for (let iteration = 1; iteration <= maxIterations; iteration++) {
+      // Build prompt
+      const prompt = this.buildSinglePrompt(config, toolContext);
+
+      // Log prompt if requested
+      if (config.logPrompts) {
+        await this.logContent(`PROMPT [iter ${iteration}]`, prompt, config.logPrompts);
+      }
+
+      // Call LLM
+      const response = await config.llmProvider.generateContent(prompt);
+
+      // Log response if requested
+      if (config.logResponses) {
+        await this.logContent(`RESPONSE [iter ${iteration}]`, response, config.logResponses);
+      }
+
+      // Parse response
+      const format = config.outputFormat || 'xml';
+      const parsedOrPromise = this.parseSingleResponse<TOutput>(response, config.outputSchema, format);
+      const parsed = parsedOrPromise instanceof Promise ? await parsedOrPromise : parsedOrPromise;
+
+      // Extract tool_calls if present
+      const toolCalls = (parsed as any).tool_calls as ToolCallRequest[] | undefined;
+      const validToolCalls = this.filterValidToolCalls(toolCalls);
+
+      // Call callback
+      if (config.onLLMResponse) {
+        config.onLLMResponse({
+          iteration,
+          reasoning: (parsed as any).answer || (parsed as any).reasoning,
+          toolCalls: validToolCalls,
+          output: parsed,
+        });
+      }
+
+      // If we have tool calls, execute them and continue
+      if (validToolCalls.length > 0 && config.toolExecutor) {
+        const toolResults = await this.executeToolCalls(validToolCalls, config.toolExecutor);
+        toolContext.push(...toolResults);
+        toolResults.forEach(r => {
+          if (!toolsUsed.includes(r.tool_name)) {
+            toolsUsed.push(r.tool_name);
+          }
+        });
+        continue;
+      }
+
+      // No tool calls - check if we have valid output
+      const outputFields = Object.keys(config.outputSchema).filter(k => k !== 'tool_calls');
+      const hasValidOutput = outputFields.some(k => {
+        const value = (parsed as any)[k];
+        return value !== undefined && value !== '' && value !== null;
+      });
+
+      if (hasValidOutput) {
+        // Remove tool_calls from output
+        const { tool_calls: _, ...output } = parsed as any;
+        return output as TOutput;
+      }
+
+      // No tool calls and no valid output - error
+      if (iteration === maxIterations) {
+        throw new Error(`Max iterations (${maxIterations}) reached without valid output`);
+      }
+    }
+
+    throw new Error(`Max iterations (${maxIterations}) reached without valid output`);
+  }
+
+  /**
+   * Build prompt for single call (no batching)
+   */
+  private buildSinglePrompt<TOutput>(
+    config: SingleLLMCallConfig<TOutput>,
+    toolContext: ToolExecutionResult[]
+  ): string {
+    const parts: string[] = [];
+
+    // System prompt
+    if (config.systemPrompt) {
+      parts.push(config.systemPrompt);
+      parts.push('');
+    }
+
+    // Tool descriptions (if tools provided)
+    if (config.tools && config.tools.length > 0) {
+      parts.push(this.buildSystemPromptWithTools(config.tools));
+      parts.push('');
+    }
+
+    // User task
+    if (config.userTask) {
+      parts.push('## Task');
+      parts.push(config.userTask);
+      parts.push('');
+    }
+
+    // Context data
+    if (config.contextData) {
+      parts.push('## Context');
+      parts.push(JSON.stringify(config.contextData, null, 2));
+      parts.push('');
+    }
+
+    // Input fields
+    if (config.inputFields && config.inputFields.length > 0) {
+      parts.push('## Input');
+      for (const fieldConfig of config.inputFields) {
+        const fieldName = typeof fieldConfig === 'string' ? fieldConfig : fieldConfig.name;
+        let value = config.input[fieldName];
+
+        // Apply transformations
+        if (typeof fieldConfig !== 'string') {
+          if (fieldConfig.transform) {
+            value = fieldConfig.transform(value);
+          }
+          if (fieldConfig.maxLength && typeof value === 'string') {
+            value = this.truncate(value, fieldConfig.maxLength);
+          }
+          if (fieldConfig.prompt) {
+            parts.push(`${fieldName} (${fieldConfig.prompt}):`);
+          } else {
+            parts.push(`${fieldName}:`);
+          }
+        } else {
+          parts.push(`${fieldName}:`);
+        }
+
+        parts.push(this.formatValue(value));
+        parts.push('');
+      }
+    }
+
+    // Tool results context (if any)
+    if (toolContext.length > 0) {
+      parts.push('## Tool Results');
+      for (const result of toolContext) {
+        const status = result.success ? '✓ SUCCESS' : '✗ FAILED';
+        const resultStr = typeof result.result === 'object'
+          ? JSON.stringify(result.result, null, 2)
+          : String(result.result ?? result.error);
+        parts.push(`### ${result.tool_name} [${status}]`);
+        parts.push(resultStr);
+        parts.push('');
+      }
+    }
+
+    // Output instructions
+    parts.push('## Required Output Format');
+    parts.push(this.generateSingleOutputInstructions(config.outputSchema, config.outputFormat || 'xml', !!config.tools));
+    parts.push('');
+
+    // Additional instructions
+    if (config.instructions) {
+      parts.push('## Additional Instructions');
+      parts.push(config.instructions);
+      parts.push('');
+    }
+
+    return parts.join('\n');
+  }
+
+  /**
+   * Generate output instructions for single call (no items wrapper)
+   */
+  private generateSingleOutputInstructions(
+    schema: OutputSchema<any>,
+    format: 'xml' | 'json' | 'yaml',
+    hasTools: boolean
+  ): string {
+    const instructions: string[] = [];
+
+    if (format === 'xml') {
+      instructions.push('You MUST respond with structured XML in the following format:');
+      instructions.push('');
+      instructions.push('<response>');
+
+      for (const [fieldName, fieldSchema] of Object.entries(schema)) {
+        const required = fieldSchema.required ? ' (REQUIRED)' : '';
+        instructions.push(`  <${fieldName}>${fieldSchema.description}${required}</${fieldName}>`);
+        if (fieldSchema.prompt) {
+          instructions.push(`  <!-- ${fieldSchema.prompt} -->`);
+        }
+      }
+
+      // Add tool_calls if tools are available
+      if (hasTools) {
+        instructions.push('  <tool_calls>');
+        instructions.push('    <!-- If you need to call tools, include them here -->');
+        instructions.push('    <tool_call>');
+        instructions.push('      <tool_name>name_of_tool</tool_name>');
+        instructions.push('      <arguments>{"param": "value"}</arguments>');
+        instructions.push('    </tool_call>');
+        instructions.push('  </tool_calls>');
+      }
+
+      instructions.push('</response>');
+    } else if (format === 'yaml') {
+      instructions.push('You MUST respond with structured YAML in the following format:');
+      instructions.push('');
+      instructions.push('```yaml');
+
+      for (const [fieldName, fieldSchema] of Object.entries(schema)) {
+        const required = fieldSchema.required ? ' (REQUIRED)' : '';
+        instructions.push(`${fieldName}: ${this.describeYAMLType(fieldSchema)}${required}`);
+        if (fieldSchema.prompt) {
+          instructions.push(`# ${fieldSchema.prompt}`);
+        }
+      }
+
+      if (hasTools) {
+        instructions.push('tool_calls:');
+        instructions.push('  - tool_name: "name_of_tool"');
+        instructions.push('    arguments:');
+        instructions.push('      param: "value"');
+      }
+
+      instructions.push('```');
+    } else {
+      instructions.push('You MUST respond with structured JSON in the following format:');
+      instructions.push('');
+      instructions.push('```json');
+      instructions.push('{');
+
+      const entries = Object.entries(schema);
+      entries.forEach(([fieldName, fieldSchema], index) => {
+        const required = fieldSchema.required ? ' (REQUIRED)' : '';
+        const comma = index < entries.length - 1 || hasTools ? ',' : '';
+        instructions.push(`  "${fieldName}": ${this.describeJSONType(fieldSchema)}${required}${comma}`);
+      });
+
+      if (hasTools) {
+        instructions.push('  "tool_calls": [{"tool_name": "...", "arguments": {...}}]');
+      }
+
+      instructions.push('}');
+      instructions.push('```');
+    }
+
+    return instructions.join('\n');
+  }
+
+  /**
+   * Parse single response (no items wrapper)
+   */
+  private parseSingleResponse<TOutput>(
+    text: string,
+    schema: OutputSchema<TOutput>,
+    format: 'xml' | 'json' | 'yaml'
+  ): TOutput | Promise<TOutput> {
+    if (format === 'json') {
+      return this.parseSingleJSONResponse(text, schema);
+    } else if (format === 'yaml') {
+      return this.parseSingleYAMLResponse(text, schema);
+    } else {
+      return this.parseSingleXMLResponse(text, schema);
+    }
+  }
+
+  /**
+   * Parse single XML response (looks for <response> wrapper)
+   */
+  private parseSingleXMLResponse<TOutput>(
+    xmlText: string,
+    schema: OutputSchema<TOutput>
+  ): TOutput {
+    const output: any = {};
+
+    try {
+      const parser = new LuciformXMLParser(xmlText, { mode: 'luciform-permissive' });
+      const parseResult = parser.parse();
+
+      if (!parseResult.document?.root) {
+        console.error('[parseSingleXMLResponse] No XML root element found in response:');
+        console.error(xmlText.substring(0, 500));
+        throw new Error('Malformed LLM response: No XML root element found. Expected <response>...</response>');
+      }
+
+      const root = parseResult.document.root;
+
+      // Extended schema with tool_calls
+      const extendedSchema: OutputSchema<any> = {
+        ...schema,
+        tool_calls: {
+          type: 'array',
+          description: 'Tool calls',
+          required: false,
+          items: {
+            type: 'object',
+            description: 'Tool call',
+            properties: {
+              tool_name: { type: 'string', description: 'Tool name', required: true },
+              arguments: { type: 'object', description: 'Arguments', required: true },
+            },
+          },
+        },
+      };
+
+      // Extract fields from root element
+      for (const [fieldName, fieldSchema] of Object.entries(extendedSchema) as [string, OutputFieldSchema][]) {
+        // Try child element
+        if (root.children) {
+          const childEl = root.children.find((c: any) => c.type === 'element' && c.name === fieldName);
+          if (childEl) {
+            // Handle arrays of objects recursively
+            if (fieldSchema.type === 'array' && fieldSchema.items) {
+              output[fieldName] = this.parseArrayFromElement(childEl, fieldSchema.items);
+            }
+            // Handle nested objects recursively
+            else if (fieldSchema.type === 'object' && fieldSchema.properties) {
+              output[fieldName] = this.parseObjectFromElement(childEl, fieldSchema.properties);
+            }
+            // Simple types: extract text
+            else {
+              const value = this.getTextContentFromElement(childEl);
+              if (value) {
+                output[fieldName] = this.convertValue(value, fieldSchema);
+              }
+            }
+          }
+        }
+
+        // Apply defaults
+        if (output[fieldName] === undefined && fieldSchema.default !== undefined) {
+          output[fieldName] = fieldSchema.default;
+        }
+      }
+
+      // Check if we got any meaningful output
+      const outputFields = Object.keys(schema);
+      const hasAnyOutput = outputFields.some(k => output[k] !== undefined && output[k] !== '');
+      const hasToolCalls = output.tool_calls && Array.isArray(output.tool_calls) && output.tool_calls.length > 0;
+
+      if (!hasAnyOutput && !hasToolCalls) {
+        console.error('[parseSingleXMLResponse] No fields extracted from XML. Root element:', root.name);
+        console.error('[parseSingleXMLResponse] Expected fields:', outputFields.join(', '));
+        console.error('[parseSingleXMLResponse] Raw response (first 800 chars):', xmlText.substring(0, 800));
+      }
+    } catch (error: any) {
+      console.error('[parseSingleXMLResponse] Failed to parse XML response:', error.message);
+      console.error('[parseSingleXMLResponse] Raw response (first 500 chars):', xmlText.substring(0, 500));
+      throw error; // Re-throw to let caller handle it
+    }
+
+    return output as TOutput;
+  }
+
+  /**
+   * Parse single JSON response
+   */
+  private parseSingleJSONResponse<TOutput>(
+    jsonText: string,
+    schema: OutputSchema<TOutput>
+  ): TOutput {
+    const output: any = {};
+
+    try {
+      // Try to extract JSON from markdown code blocks
+      let cleanedText = jsonText.trim();
+      const jsonMatch = cleanedText.match(/```json\s*([\s\S]*?)\s*```/);
+      if (jsonMatch) {
+        cleanedText = jsonMatch[1];
+      }
+
+      const parsed = JSON.parse(cleanedText);
+
+      // Extended schema with tool_calls
+      const extendedSchema: OutputSchema<any> = {
+        ...schema,
+        tool_calls: {
+          type: 'array',
+          description: 'Tool calls',
+          required: false,
+        },
+      };
+
+      for (const [fieldName, fieldSchema] of Object.entries(extendedSchema) as [string, OutputFieldSchema][]) {
+        const value = parsed[fieldName];
+
+        if (value !== undefined) {
+          output[fieldName] = this.convertValue(value, fieldSchema);
+        } else if (fieldSchema.default !== undefined) {
+          output[fieldName] = fieldSchema.default;
+        }
+      }
+
+      // Check if we got any meaningful output
+      const outputFields = Object.keys(schema);
+      const hasAnyOutput = outputFields.some(k => output[k] !== undefined && output[k] !== '');
+      const hasToolCalls = output.tool_calls && Array.isArray(output.tool_calls) && output.tool_calls.length > 0;
+
+      if (!hasAnyOutput && !hasToolCalls) {
+        console.error('[parseSingleJSONResponse] No fields extracted from JSON.');
+        console.error('[parseSingleJSONResponse] Expected fields:', outputFields.join(', '));
+        console.error('[parseSingleJSONResponse] Parsed object keys:', Object.keys(parsed).join(', '));
+        console.error('[parseSingleJSONResponse] Raw response (first 800 chars):', jsonText.substring(0, 800));
+      }
+    } catch (error: any) {
+      console.error('[parseSingleJSONResponse] Failed to parse JSON response:', error.message);
+      console.error('[parseSingleJSONResponse] Raw response (first 500 chars):', jsonText.substring(0, 500));
+      throw error; // Re-throw to let caller handle it
+    }
+
+    return output as TOutput;
+  }
+
+  /**
+   * Parse single YAML response
+   */
+  private async parseSingleYAMLResponse<TOutput>(
+    yamlText: string,
+    schema: OutputSchema<TOutput>
+  ): Promise<TOutput> {
+    const output: any = {};
+
+    try {
+      const yaml = await import('js-yaml');
+
+      // Try to extract YAML from markdown code blocks
+      let cleanedText = yamlText.trim();
+      const yamlMatch = cleanedText.match(/```(?:yaml|yml)\s*([\s\S]*?)\s*```/);
+      if (yamlMatch) {
+        cleanedText = yamlMatch[1];
+      }
+
+      const parsed = yaml.load(cleanedText) as any;
+
+      // Extended schema with tool_calls
+      const extendedSchema: OutputSchema<any> = {
+        ...schema,
+        tool_calls: {
+          type: 'array',
+          description: 'Tool calls',
+          required: false,
+        },
+      };
+
+      for (const [fieldName, fieldSchema] of Object.entries(extendedSchema) as [string, OutputFieldSchema][]) {
+        const value = parsed[fieldName];
+
+        if (value !== undefined) {
+          output[fieldName] = this.convertValue(value, fieldSchema);
+        } else if (fieldSchema.default !== undefined) {
+          output[fieldName] = fieldSchema.default;
+        }
+      }
+
+      // Check if we got any meaningful output
+      const outputFields = Object.keys(schema);
+      const hasAnyOutput = outputFields.some(k => output[k] !== undefined && output[k] !== '');
+      const hasToolCalls = output.tool_calls && Array.isArray(output.tool_calls) && output.tool_calls.length > 0;
+
+      if (!hasAnyOutput && !hasToolCalls) {
+        console.error('[parseSingleYAMLResponse] No fields extracted from YAML.');
+        console.error('[parseSingleYAMLResponse] Expected fields:', outputFields.join(', '));
+        console.error('[parseSingleYAMLResponse] Parsed object keys:', Object.keys(parsed || {}).join(', '));
+        console.error('[parseSingleYAMLResponse] Raw response (first 800 chars):', yamlText.substring(0, 800));
+      }
+    } catch (error: any) {
+      console.error('[parseSingleYAMLResponse] Failed to parse YAML response:', error.message);
+      console.error('[parseSingleYAMLResponse] Raw response (first 500 chars):', yamlText.substring(0, 500));
+      throw error;
+    }
+
+    return output as TOutput;
+  }
+
+  /**
+   * Filter and validate tool calls
+   */
+  private filterValidToolCalls(toolCalls: any[] | undefined): ToolCallRequest[] {
+    if (!toolCalls || !Array.isArray(toolCalls)) {
+      return [];
+    }
+
+    return toolCalls.filter((tc): tc is ToolCallRequest => {
+      // Skip empty strings (can happen with malformed XML parsing)
+      if (typeof tc === 'string') {
+        return false;
+      }
+      // Valid tool call must have tool_name and arguments
+      return typeof tc === 'object' && tc !== null && tc.tool_name && tc.arguments;
+    });
   }
 
   /**

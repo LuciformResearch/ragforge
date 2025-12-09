@@ -92,6 +92,20 @@ export interface BrainConfig {
     /** Days before removing web crawl data */
     webCrawlRetention: number;
   };
+
+  /** Agent settings (persisted) */
+  agentSettings?: {
+    /** Preferred language for responses (e.g., 'fr', 'en', 'es') */
+    language?: string;
+    /** Agent display name (default: 'Ragnarök') */
+    name?: string;
+    /** Agent display color for terminal (default: 'magenta') */
+    color?: 'red' | 'green' | 'yellow' | 'blue' | 'magenta' | 'cyan' | 'white' | 'gray';
+    /** Translated persona (generated on first run) */
+    persona?: string;
+    /** Original persona template (before translation) */
+    personaTemplate?: string;
+  };
 }
 
 export interface RegisteredProject {
@@ -470,6 +484,7 @@ export class BrainManager {
         neo4j: { ...this.config.neo4j, ...loadedConfig?.neo4j },
         embeddings: { ...this.config.embeddings, ...loadedConfig?.embeddings },
         cleanup: { ...this.config.cleanup, ...loadedConfig?.cleanup },
+        agentSettings: loadedConfig?.agentSettings,
       };
       console.log('[Brain] Config loaded from', configPath);
     } catch {
@@ -494,6 +509,7 @@ export class BrainManager {
       },
       embeddings: this.config.embeddings,
       cleanup: this.config.cleanup,
+      agentSettings: this.config.agentSettings,
     };
 
     const content = yaml.dump(configToSave, { indent: 2 });
@@ -2576,7 +2592,42 @@ volumes:
       await watcher.stop();
     }
     this.activeWatchers.clear();
+  }
 
+  // ============================================
+  // Agent Settings (Persisted)
+  // ============================================
+
+  /**
+   * Get agent settings (language, persona)
+   */
+  getAgentSettings(): BrainConfig['agentSettings'] {
+    return this.config.agentSettings;
+  }
+
+  /**
+   * Set agent settings (language, persona)
+   */
+  async setAgentSettings(settings: NonNullable<BrainConfig['agentSettings']>): Promise<void> {
+    this.config.agentSettings = {
+      ...this.config.agentSettings,
+      ...settings,
+    };
+    await this.saveConfig();
+    console.log('[Brain] Agent settings saved');
+  }
+
+  /**
+   * Check if agent settings are configured
+   */
+  hasAgentSettings(): boolean {
+    return !!(this.config.agentSettings?.language && this.config.agentSettings?.persona);
+  }
+
+  /**
+   * Dispose brain manager - cleanup resources
+   */
+  async dispose(): Promise<void> {
     // Save registry
     await this.saveProjectsRegistry();
 

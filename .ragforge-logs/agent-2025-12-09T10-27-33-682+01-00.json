@@ -1,0 +1,159 @@
+{
+  "sessionId": "session_1765272459930",
+  "question": "salut, peux tu lister mes projets actifs stp?",
+  "startTime": "2025-12-09T10:27:39.930+01:00",
+  "mode": "structured",
+  "tools": [
+    "get_schema",
+    "describe_entity",
+    "query_entities",
+    "get_entity_by_id",
+    "get_entities_by_ids",
+    "glob_search",
+    "read_file",
+    "write_file",
+    "create_file",
+    "edit_file",
+    "install_package",
+    "create_project",
+    "setup_project",
+    "ingest_code",
+    "generate_embeddings",
+    "load_project",
+    "list_directory",
+    "glob_files",
+    "file_exists",
+    "get_file_info",
+    "delete_path",
+    "move_file",
+    "copy_file",
+    "create_directory",
+    "change_directory",
+    "grep_files",
+    "search_files",
+    "run_command",
+    "run_npm_script",
+    "git_status",
+    "git_diff",
+    "list_safe_commands",
+    "get_working_directory",
+    "get_environment_info",
+    "get_project_info",
+    "plan_actions",
+    "batch_analyze"
+  ],
+  "entries": [
+    {
+      "timestamp": "2025-12-09T10:27:39.931+01:00",
+      "type": "start",
+      "data": {
+        "question": "salut, peux tu lister mes projets actifs stp?",
+        "mode": "structured",
+        "tools": [
+          "get_schema",
+          "describe_entity",
+          "query_entities",
+          "get_entity_by_id",
+          "get_entities_by_ids",
+          "glob_search",
+          "read_file",
+          "write_file",
+          "create_file",
+          "edit_file",
+          "install_package",
+          "create_project",
+          "setup_project",
+          "ingest_code",
+          "generate_embeddings",
+          "load_project",
+          "list_directory",
+          "glob_files",
+          "file_exists",
+          "get_file_info",
+          "delete_path",
+          "move_file",
+          "copy_file",
+          "create_directory",
+          "change_directory",
+          "grep_files",
+          "search_files",
+          "run_command",
+          "run_npm_script",
+          "git_status",
+          "git_diff",
+          "list_safe_commands",
+          "get_working_directory",
+          "get_environment_info",
+          "get_project_info",
+          "plan_actions",
+          "batch_analyze"
+        ]
+      }
+    },
+    {
+      "timestamp": "2025-12-09T10:27:42.769+01:00",
+      "type": "iteration",
+      "iteration": 1,
+      "data": {
+        "llmResponse": {
+          "reasoning": "Salutations, voyageur. Je vais lister vos projets actifs. Veuillez patienter un instant.",
+          "toolCalls": [
+            "get_working_directory"
+          ],
+          "hasOutput": true
+        }
+      }
+    },
+    {
+      "timestamp": "2025-12-09T10:27:42.769+01:00",
+      "type": "tool_call",
+      "data": {
+        "toolName": "get_working_directory",
+        "arguments": {
+          "value": ""
+        }
+      }
+    },
+    {
+      "timestamp": "2025-12-09T10:27:42.778+01:00",
+      "type": "tool_result",
+      "data": {
+        "toolName": "get_working_directory",
+        "result": {
+          "cwd": "/home/luciedefraiteur/LR_CodeRag/ragforge",
+          "project_root": null,
+          "project_name": null,
+          "project_loaded": false,
+          "home_directory": "/home/luciedefraiteur"
+        },
+        "durationMs": 1
+      }
+    },
+    {
+      "timestamp": "2025-12-09T10:27:45.512+01:00",
+      "type": "iteration",
+      "iteration": 2,
+      "data": {
+        "llmResponse": {
+          "reasoning": "Bonjour! It appears that no project is currently loaded. To list your active projects, I need to load one first. Would you like me to load a project for you? If so, please provide the full path to the project root directory.",
+          "toolCalls": [],
+          "hasOutput": true
+        }
+      }
+    },
+    {
+      "timestamp": "2025-12-09T10:27:45.514+01:00",
+      "type": "final_answer",
+      "data": {
+        "answer": "Bonjour! It appears that no project is currently loaded. To list your active projects, I need to load one first. Would you like me to load a project for you? If so, please provide the full path to the project root directory.",
+        "confidence": "high"
+      }
+    }
+  ],
+  "toolsUsed": [
+    "get_working_directory"
+  ],
+  "totalIterations": 2,
+  "finalAnswer": "Bonjour! It appears that no project is currently loaded. To list your active projects, I need to load one first. Would you like me to load a project for you? If so, please provide the full path to the project root directory.",
+  "endTime": "2025-12-09T10:27:45.513+01:00"
+}

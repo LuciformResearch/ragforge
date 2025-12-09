@@ -25,7 +25,6 @@ import {
   generateShellTools,
   generateContextTools,
   ProjectRegistry,
-  generateProjectManagementTools,
   // Discovery tools (get_schema)
   generateDiscoveryTools,
   // Brain tools (ingest, search)
@@ -404,14 +403,6 @@ async function prepareToolsForMcp(
   allTools.push(...contextTools.tools);
   for (const [name, handler] of Object.entries(contextTools.handlers)) {
     allHandlers[name] = handler;
-  }
-
-  // Add project management tools
-  const pmContext = { registry: ctx.registry };
-  const pmTools = generateProjectManagementTools(pmContext);
-  allTools.push(...pmTools.tools);
-  for (const [name, handler] of Object.entries(pmTools.handlers)) {
-    allHandlers[name] = handler as any;
   }
 
   // Add brain tools via daemon (with auto-restart)

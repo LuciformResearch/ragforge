@@ -338,13 +338,8 @@ export function generateListDirectoryHandler(ctx: FsToolsContext) {
     show_hidden?: boolean;
     no_default_excludes?: boolean;
   }) => {
-    const projectRoot = getProjectRoot(ctx);
-    if (!projectRoot) {
-      return {
-        error: 'No project loaded. Use create_project, setup_project, or load_project first.',
-        suggestion: 'load_project',
-      };
-    }
+    // Use projectRoot if available, otherwise fall back to cwd
+    const projectRoot = getProjectRoot(ctx) || process.cwd();
 
     try {
       const dirPath = params.path || '.';
@@ -367,13 +362,8 @@ export function generateGlobFilesHandler(ctx: FsToolsContext) {
     ignore?: string[];
     no_default_excludes?: boolean;
   }) => {
-    const projectRoot = getProjectRoot(ctx);
-    if (!projectRoot) {
-      return {
-        error: 'No project loaded. Use create_project, setup_project, or load_project first.',
-        suggestion: 'load_project',
-      };
-    }
+    // Use projectRoot if available, otherwise fall back to cwd
+    const projectRoot = getProjectRoot(ctx) || process.cwd();
 
     try {
       const cwd = params.cwd
@@ -394,13 +384,8 @@ export function generateGlobFilesHandler(ctx: FsToolsContext) {
 
 export function generateFileExistsHandler(ctx: FsToolsContext) {
   return async (params: { path: string }) => {
-    const projectRoot = getProjectRoot(ctx);
-    if (!projectRoot) {
-      return {
-        error: 'No project loaded. Use create_project, setup_project, or load_project first.',
-        suggestion: 'load_project',
-      };
-    }
+    // Use projectRoot if available, otherwise fall back to cwd
+    const projectRoot = getProjectRoot(ctx) || process.cwd();
 
     try {
       const exists = await fsHelpers.pathExists(params.path, { basePath: projectRoot });
@@ -422,13 +407,8 @@ export function generateFileExistsHandler(ctx: FsToolsContext) {
 
 export function generateGetFileInfoHandler(ctx: FsToolsContext) {
   return async (params: { path: string }) => {
-    const projectRoot = getProjectRoot(ctx);
-    if (!projectRoot) {
-      return {
-        error: 'No project loaded. Use create_project, setup_project, or load_project first.',
-        suggestion: 'load_project',
-      };
-    }
+    // Use projectRoot if available, otherwise fall back to cwd
+    const projectRoot = getProjectRoot(ctx) || process.cwd();
 
     try {
       return await fsHelpers.getFileInfo(params.path, { basePath: projectRoot });
@@ -440,13 +420,8 @@ export function generateGetFileInfoHandler(ctx: FsToolsContext) {
 
 export function generateDeletePathHandler(ctx: FsToolsContext) {
   return async (params: { path: string; recursive?: boolean }) => {
-    const projectRoot = getProjectRoot(ctx);
-    if (!projectRoot) {
-      return {
-        error: 'No project loaded. Use create_project, setup_project, or load_project first.',
-        suggestion: 'load_project',
-      };
-    }
+    // Use projectRoot if available, otherwise fall back to cwd
+    const projectRoot = getProjectRoot(ctx) || process.cwd();
 
     try {
       const result = await fsHelpers.deletePath(params.path, {
@@ -473,13 +448,8 @@ export function generateDeletePathHandler(ctx: FsToolsContext) {
 
 export function generateMoveFileHandler(ctx: FsToolsContext) {
   return async (params: { source: string; destination: string }) => {
-    const projectRoot = getProjectRoot(ctx);
-    if (!projectRoot) {
-      return {
-        error: 'No project loaded. Use create_project, setup_project, or load_project first.',
-        suggestion: 'load_project',
-      };
-    }
+    // Use projectRoot if available, otherwise fall back to cwd
+    const projectRoot = getProjectRoot(ctx) || process.cwd();
 
     try {
       const result = await fsHelpers.moveFile(params.source, params.destination, {
@@ -500,13 +470,8 @@ export function generateMoveFileHandler(ctx: FsToolsContext) {
 
 export function generateCopyFileHandler(ctx: FsToolsContext) {
   return async (params: { source: string; destination: string; overwrite?: boolean }) => {
-    const projectRoot = getProjectRoot(ctx);
-    if (!projectRoot) {
-      return {
-        error: 'No project loaded. Use create_project, setup_project, or load_project first.',
-        suggestion: 'load_project',
-      };
-    }
+    // Use projectRoot if available, otherwise fall back to cwd
+    const projectRoot = getProjectRoot(ctx) || process.cwd();
 
     try {
       return await fsHelpers.copyFile(params.source, params.destination, {
@@ -521,13 +486,8 @@ export function generateCopyFileHandler(ctx: FsToolsContext) {
 
 export function generateCreateDirectoryHandler(ctx: FsToolsContext) {
   return async (params: { path: string }) => {
-    const projectRoot = getProjectRoot(ctx);
-    if (!projectRoot) {
-      return {
-        error: 'No project loaded. Use create_project, setup_project, or load_project first.',
-        suggestion: 'load_project',
-      };
-    }
+    // Use projectRoot if available, otherwise fall back to cwd
+    const projectRoot = getProjectRoot(ctx) || process.cwd();
 
     try {
       return await fsHelpers.createDirectory(params.path, { basePath: projectRoot });
@@ -696,10 +656,7 @@ export function generateGrepFilesHandler(ctx: FsToolsContext) {
     const fs = await import('fs/promises');
     const { glob } = await import('glob');
 
-    const projectRoot = getProjectRoot(ctx);
-    if (!projectRoot) {
-      return { error: 'No project loaded.' };
-    }
+    const projectRoot = getProjectRoot(ctx) || process.cwd();
 
     const { pattern, regex, ignore_case = false, max_results = 100 } = params;
 
@@ -772,10 +729,7 @@ export function generateSearchFilesHandler(ctx: FsToolsContext) {
     const fs = await import('fs/promises');
     const { glob } = await import('glob');
 
-    const projectRoot = getProjectRoot(ctx);
-    if (!projectRoot) {
-      return { error: 'No project loaded.' };
-    }
+    const projectRoot = getProjectRoot(ctx) || process.cwd();
 
     const { pattern, query, threshold = 0.7, max_results = 50 } = params;
     const queryLower = query.toLowerCase();

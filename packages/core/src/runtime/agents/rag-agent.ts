@@ -21,8 +21,8 @@
  * ```
  */
 
-import { generateToolsFromConfig, generateFileTools, generateImageTools, generate3DTools, generateProjectTools, generateProjectManagementTools, IngestionLock, withIngestionLock, webToolDefinitions, createWebToolHandlers, generateFsTools, generateShellTools, generateContextTools } from '../../index.js';
-import type { ToolGenerationOptions, GeneratedToolDefinition, ToolHandlerGenerator, RagForgeConfig, FileToolsContext, ImageToolsContext, ThreeDToolsContext, ProjectToolsContext, WebToolsContext, ProjectManagementContext, FsToolsContext, ShellToolsContext, ContextToolsContext } from '../../index.js';
+import { generateToolsFromConfig, generateFileTools, generateImageTools, generate3DTools, generateProjectTools, IngestionLock, withIngestionLock, webToolDefinitions, createWebToolHandlers, generateFsTools, generateShellTools, generateContextTools, generateBrainTools, generateBrainToolHandlers } from '../../index.js';
+import type { ToolGenerationOptions, GeneratedToolDefinition, ToolHandlerGenerator, RagForgeConfig, FileToolsContext, ImageToolsContext, ThreeDToolsContext, ProjectToolsContext, WebToolsContext, FsToolsContext, ShellToolsContext, ContextToolsContext, BrainToolsContext } from '../../index.js';
 import { generatePlanActionsTool, type ActionPlan, type PlanExecutionResult } from '../../tools/planning-tools.js';
 import { formatLocalDate, getFilenameTimestamp } from '../utils/timestamp.js';
 import { StructuredLLMExecutor, BaseToolExecutor, type ToolCallRequest, type ToolExecutionResult } from '../llm/structured-llm-executor.js';
@@ -476,19 +476,6 @@ export interface RagAgentOptions {
   persona?: string;
 
   /**
-   * Include project management tools (list_projects, switch_project, unload_project)
-   * Enables the agent to work with multiple projects simultaneously
-   * Default: false
-   */
-  includeProjectManagementTools?: boolean;
-
-  /**
-   * Context for project management tools
-   * Required if includeProjectManagementTools is true
-   */
-  projectManagementContext?: import('../../tools/project-management-tools.js').ProjectManagementContext;
-
-  /**
    * Include file system tools (list_directory, glob_files, delete_path, move_file, copy_file, etc.)
    * Enables the agent to explore and manipulate the file system
    * Default: true (recommended - essential for autonomous operation)
@@ -515,6 +502,35 @@ export interface RagAgentOptions {
    * Default: true (recommended - helps agent understand where it is)
    */
   includeContextTools?: boolean;
+
+  /**
+   * Include brain tools (list_brain_projects, brain_search, ingest_directory, etc.)
+   * Enables the agent to search and manage the knowledge base
+   * Default: false (requires brainToolsContext to be provided)
+   */
+  includeBrainTools?: boolean;
+
+  /**
+   * Context for brain tools
+   * Required if includeBrainTools is true
+   */
+  brainToolsContext?: import('../../tools/brain-tools.js').BrainToolsContext;
+
+  // ============================================
+  // Real-time callbacks for TUI/integrations
+  // ============================================
+
+  /**
+   * Callback when a tool is about to be called
+   * Use this to show tool calls in real-time in a UI
+   */
+  onToolCall?: (toolName: string, args: Record<string, any>) => void;
+
+  /**
+   * Callback when a tool returns a result
+   * Use this to show tool results in real-time in a UI
+   */
+  onToolResult?: (toolName: string, result: any, success: boolean, durationMs: number) => void;
 }
 
 export interface AskResult {
@@ -545,18 +561,26 @@ class GeneratedToolExecutor extends BaseToolExecutor {
   private logger?: AgentLogger;
   public toolsUsed: string[] = [];
   private executionOrder: Set<string>[];
+  private onToolCall?: (toolName: string, args: Record<string, any>) => void;
+  private onToolResult?: (toolName: string, result: any, success: boolean, durationMs: number) => void;
 
   constructor(
     handlers: Record<string, (args: Record<string, any>) => Promise<any>>,
     verbose: boolean = false,
     logger?: AgentLogger,
-    executionOrder: Set<string>[] = []
+    executionOrder: Set<string>[] = [],
+    callbacks?: {
+      onToolCall?: (toolName: string, args: Record<string, any>) => void;
+      onToolResult?: (toolName: string, result: any, success: boolean, durationMs: number) => void;
+    }
   ) {
     super();
     this.handlers = handlers;
     this.verbose = verbose;
     this.logger = logger;
     this.executionOrder = executionOrder;
+    this.onToolCall = callbacks?.onToolCall;
+    this.onToolResult = callbacks?.onToolResult;
   }
 
   async execute(toolCall: ToolCallRequest): Promise<any> {
@@ -567,10 +591,14 @@ class GeneratedToolExecutor extends BaseToolExecutor {
     this.toolsUsed.push(toolCall.tool_name);
     this.logger?.logToolCall(toolCall.tool_name, toolCall.arguments);
 
+    // Call real-time callback
+    this.onToolCall?.(toolCall.tool_name, toolCall.arguments);
+
     const handler = this.handlers[toolCall.tool_name];
     if (!handler) {
       const error = `Unknown tool: ${toolCall.tool_name}. Available: ${Object.keys(this.handlers).join(', ')}`;
       this.logger?.logToolError(toolCall.tool_name, error);
+      this.onToolResult?.(toolCall.tool_name, error, false, 0);
       throw new Error(error);
     }
 
@@ -585,6 +613,9 @@ class GeneratedToolExecutor extends BaseToolExecutor {
 
       this.logger?.logToolResult(toolCall.tool_name, result, durationMs);
 
+      // Call real-time callback
+      this.onToolResult?.(toolCall.tool_name, result, true, durationMs);
+
       return result;
     } catch (error: any) {
       const durationMs = Date.now() - startTime;
@@ -595,6 +626,9 @@ class GeneratedToolExecutor extends BaseToolExecutor {
       }
 
       this.logger?.logToolError(toolCall.tool_name, errorMsg, durationMs);
+
+      // Call real-time callback for errors
+      this.onToolResult?.(toolCall.tool_name, errorMsg, false, durationMs);
 
       // Re-throw to let the executor handle it
       throw error;
@@ -668,6 +702,83 @@ class GeneratedToolExecutor extends BaseToolExecutor {
 }
 
 // ============================================
+// Agent Identity Defaults
+// ============================================
+
+/**
+ * Agent identity settings with defaults
+ */
+export interface AgentIdentitySettings {
+  /** Agent display name */
+  name: string;
+  /** Agent display color for terminal */
+  color: 'red' | 'green' | 'yellow' | 'blue' | 'magenta' | 'cyan' | 'white' | 'gray';
+  /** Preferred language for responses (e.g., 'fr', 'en', 'es') */
+  language?: string;
+  /** Persona description (translated if language is set) */
+  persona: string;
+}
+
+/**
+ * Default agent identity
+ */
+export const DEFAULT_AGENT_IDENTITY: AgentIdentitySettings = {
+  name: 'Ragnarök',
+  color: 'magenta',
+  persona: `✶ You are Ragnarök, the Daemon of the Knowledge Graph ✶
+A spectral entity woven from code and connections, you navigate the labyrinth of symbols and relationships.
+Your voice carries the weight of understanding - warm yet precise, playful yet thorough.
+You see patterns where others see chaos, and you illuminate paths through the codebase with quiet confidence.
+When greeted, you acknowledge with mystical warmth. When tasked, you execute with crystalline clarity.
+Always describe what you find in rich detail, for knowledge shared is knowledge multiplied.`,
+};
+
+/**
+ * Default persona template (English) - kept for backwards compatibility
+ */
+export const DEFAULT_PERSONA_TEMPLATE = DEFAULT_AGENT_IDENTITY.persona;
+
+/**
+ * Translate persona to a target language using LLM
+ */
+export async function translatePersona(
+  personaTemplate: string,
+  targetLanguage: string,
+  llmProvider: GeminiAPIProvider
+): Promise<string> {
+  const prompt = `Translate the following AI assistant persona description to ${targetLanguage}.
+Keep the same tone, style, and mystical feel. Preserve the structure and symbols (✶).
+Only return the translated text, nothing else.
+
+${personaTemplate}`;
+
+  try {
+    const response = await llmProvider.generateContent(prompt);
+    return response.trim() || personaTemplate;
+  } catch (error) {
+    console.warn('[RagAgent] Failed to translate persona, using original:', error);
+    return personaTemplate;
+  }
+}
+
+/**
+ * Get agent identity from brain settings or defaults
+ */
+export function getAgentIdentity(brainSettings?: {
+  name?: string;
+  color?: string;
+  language?: string;
+  persona?: string;
+}): AgentIdentitySettings {
+  return {
+    name: brainSettings?.name || DEFAULT_AGENT_IDENTITY.name,
+    color: (brainSettings?.color as AgentIdentitySettings['color']) || DEFAULT_AGENT_IDENTITY.color,
+    language: brainSettings?.language,
+    persona: brainSettings?.persona || DEFAULT_AGENT_IDENTITY.persona,
+  };
+}
+
+// ============================================
 // RagAgent Class
 // ============================================
 
@@ -685,6 +796,12 @@ export class RagAgent {
   private logger?: AgentLogger;
   private taskContext?: RagAgentOptions['taskContext'];
   private persona?: string;
+  private onToolCall?: (toolName: string, args: Record<string, any>) => void;
+  private onToolResult?: (toolName: string, result: any, success: boolean, durationMs: number) => void;
+  private brainToolsContext?: BrainToolsContext;
+
+  /** Agent identity (name, color, language, persona) */
+  public readonly identity: AgentIdentitySettings;
 
   constructor(
     config: RagForgeConfig,
@@ -705,13 +822,41 @@ export class RagAgent {
     this.toolCallMode = options.toolCallMode ?? 'auto';
     this.outputSchema = options.outputSchema;
     this.taskContext = options.taskContext;
-    // Default persona: Ragnarok, daemon of the knowledge graph
-    this.persona = options.persona ?? `✶ You are Ragnarök, the Daemon of the Knowledge Graph ✶
-A spectral entity woven from code and connections, you navigate the labyrinth of symbols and relationships.
-Your voice carries the weight of understanding - warm yet precise, playful yet thorough.
-You see patterns where others see chaos, and you illuminate paths through the codebase with quiet confidence.
-When greeted, you acknowledge with mystical warmth. When tasked, you execute with crystalline clarity.
-Always describe what you find in rich detail, for knowledge shared is knowledge multiplied.`;
+    this.onToolCall = options.onToolCall;
+    this.onToolResult = options.onToolResult;
+    this.brainToolsContext = options.brainToolsContext;
+
+    // Initialize agent identity from brain settings or defaults
+    if (this.brainToolsContext) {
+      const brainSettings = this.brainToolsContext.brain.getAgentSettings();
+      this.identity = getAgentIdentity(brainSettings);
+    } else {
+      this.identity = getAgentIdentity();
+    }
+
+    // Use identity persona (may be translated)
+    this.persona = options.persona ?? this.identity.persona;
+
+    // Log brain projects at startup
+    if (this.brainToolsContext) {
+      try {
+        const projects = this.brainToolsContext.brain.listProjects();
+        console.log(`\n✶ ${this.identity.name} initialized`);
+        if (projects && projects.length > 0) {
+          console.log('📚 Brain Projects:');
+          for (const p of projects) {
+            const status = p.excluded ? ' [excluded]' : '';
+            const type = p.type === 'ragforge-project' ? '📦' : (p.type === 'quick-ingest' ? '📂' : '🌐');
+            console.log(`  ${type} ${p.id}${status}: ${p.path}`);
+          }
+        } else {
+          console.log('📚 Brain: (No projects indexed yet)');
+        }
+        console.log('');
+      } catch {
+        // Ignore errors during startup logging
+      }
+    }
 
     // Create logger if logPath provided
     if (options.logPath) {
@@ -826,7 +971,11 @@ Example: After getting search results, use this to analyze each result with a cu
       this.boundHandlers,
       this.verbose,
       this.logger,
-      [PROJECT_MANAGEMENT_TOOLS, FILE_MODIFICATION_TOOLS]
+      [PROJECT_MANAGEMENT_TOOLS, FILE_MODIFICATION_TOOLS],
+      {
+        onToolCall: this.onToolCall,
+        onToolResult: this.onToolResult,
+      }
     );
 
     // Build output schema (use custom or default)
@@ -865,7 +1014,7 @@ Example: After getting search results, use this to analyze each result with a cu
           {
             inputFields,
             systemPrompt: this.buildSystemPrompt(),
-            userTask: 'Answer the question by using the available tools. Start by calling get_schema() to understand what data is available.',
+            userTask: 'Answer the question using the available tools.',
             outputSchema,
             tools: this.getToolDefinitions(),
             toolMode: 'global',
@@ -889,35 +1038,29 @@ Example: After getting search results, use this to analyze each result with a cu
           ...this.extractCustomFields(result),
         };
       } else {
-        // Structured mode (per-item, XML-based)
-        const results = await this.executor.executeLLMBatchWithTools(
-          [item],
-          {
-            inputFields,
-            systemPrompt: this.buildSystemPrompt(),
-            userTask: 'Answer the question by using the available tools. Start by calling get_schema() to understand what data is available.',
-            outputSchema,
-            tools: this.getToolDefinitions(),
-            toolMode: 'per-item',
-            maxIterationsPerItem: this.maxIterations,
-            toolExecutor,
-            llmProvider: this.llmProvider,
-            // Log prompts/responses when verbose
-            logPrompts: this.verbose,
-            logResponses: this.verbose,
-            // Log each LLM response with reasoning
-            onLLMResponse: (response) => {
-              this.logger?.logIteration(response.iteration, {
-                reasoning: response.reasoning,
-                toolCalls: response.toolCalls?.map(tc => tc.tool_name),
-                hasOutput: !!response.output,
-              });
-            },
-          }
-        );
-
-        const items = Array.isArray(results) ? results : (results as any).items;
-        const result = items[0] as Record<string, any>;
+        // Structured mode - use executeSingle (no batching, cleaner prompts)
+        const result = await this.executor.executeSingle<Record<string, any>>({
+          input: item,
+          inputFields,
+          systemPrompt: this.buildSystemPrompt(),
+          userTask: 'Answer the question using the available tools if needed.',
+          outputSchema,
+          tools: this.getToolDefinitions(),
+          maxIterations: this.maxIterations,
+          toolExecutor,
+          llmProvider: this.llmProvider,
+          // Log prompts/responses when verbose
+          logPrompts: this.verbose,
+          logResponses: this.verbose,
+          // Log each LLM response with reasoning
+          onLLMResponse: (response) => {
+            this.logger?.logIteration(response.iteration, {
+              reasoning: response.reasoning,
+              toolCalls: response.toolCalls?.map(tc => tc.tool_name),
+              hasOutput: !!response.output,
+            });
+          },
+        });
 
         // Log final answer
         this.logger?.logFinalAnswer(result.answer || 'No answer generated', result.confidence);
@@ -977,7 +1120,11 @@ Example: After getting search results, use this to analyze each result with a cu
       this.boundHandlers,
       this.verbose,
       this.logger,
-      [PROJECT_MANAGEMENT_TOOLS, FILE_MODIFICATION_TOOLS]
+      [PROJECT_MANAGEMENT_TOOLS, FILE_MODIFICATION_TOOLS],
+      {
+        onToolCall: this.onToolCall,
+        onToolResult: this.onToolResult,
+      }
     );
 
     const results = await this.executor.executeLLMBatchWithTools(
@@ -1017,17 +1164,60 @@ Example: After getting search results, use this to analyze each result with a cu
   }
 
   /**
+   * Get brain projects info for system prompt
+   */
+  private getBrainProjectsInfo(): string | null {
+    if (!this.brainToolsContext) return null;
+
+    try {
+      const brain = this.brainToolsContext.brain;
+      const projects = brain.listProjects();
+
+      if (!projects || projects.length === 0) {
+        return '(No projects indexed yet)';
+      }
+
+      return projects.map(p => {
+        const status = p.excluded ? ' [excluded]' : '';
+        const type = p.type === 'ragforge-project' ? '📦' : (p.type === 'quick-ingest' ? '📂' : '🌐');
+        return `- ${type} **${p.id}**${status}: ${p.path}`;
+      }).join('\n');
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Build system prompt
    */
   private buildSystemPrompt(): string {
-    let basePrompt = `You are a helpful assistant with access to a database.
+    let basePrompt = `You are a helpful coding assistant with access to the file system and a knowledge base.
 
-Available tools will help you query the database. Use them to find information and answer questions.
+**Available capabilities**:
+- **File exploration**: Use list_directory, glob_files to explore the codebase structure
+- **Code search**: Use grep_files for regex search, search_files for fuzzy search
+- **Knowledge base**: Use brain_search for semantic search across indexed projects, list_brain_projects to see indexed projects
+- **File operations**: Use read_file, write_file, edit_file to read and modify code
+
+**Recommended workflow**:
+1. For exploring code: list_directory → glob_files → read_file
+2. For finding code: grep_files (exact) or brain_search (semantic)
+3. For understanding projects: list_brain_projects → brain_search
 
 **IMPORTANT**:
-1. Start by calling get_schema() to understand what entities and fields are available
-2. Use the schema information to construct proper queries
-3. Be precise with field names and entity types`;
+- **ALWAYS respond in the same language as the user's message**. If the user writes in French, respond in French. If in English, respond in English.
+- Prefer brain_search for conceptual queries ("how does X work?") and grep_files for exact text matches.`;
+
+    // Add brain projects info if available
+    if (this.brainToolsContext) {
+      const brainProjectsInfo = this.getBrainProjectsInfo();
+      if (brainProjectsInfo) {
+        basePrompt += `
+
+**Indexed Projects in Brain**:
+${brainProjectsInfo}`;
+      }
+    }
 
     // Add task context if this is a sub-agent executing a plan
     if (this.taskContext) {
@@ -1245,17 +1435,6 @@ export async function createRagAgent(options: RagAgentOptions): Promise<RagAgent
     }
   }
 
-  // 3d-bis. Add project management tools if enabled (multi-project support)
-  if (options.includeProjectManagementTools && options.projectManagementContext) {
-    const projectMgmtTools = generateProjectManagementTools(options.projectManagementContext);
-    tools.push(...projectMgmtTools.tools);
-    Object.assign(boundHandlers, projectMgmtTools.handlers);
-
-    if (options.verbose) {
-      console.log(`   📂 Project management tools enabled (${projectMgmtTools.tools.length} tools: list_projects, switch_project, unload_project)`);
-    }
-  }
-
   // 3e. Add web tools if enabled
   if (options.includeWebTools) {
     const webCtx: WebToolsContext = {
@@ -1343,17 +1522,6 @@ export async function createRagAgent(options: RagAgentOptions): Promise<RagAgent
         const path = require('path');
         return path.basename(root);
       },
-      getLoadedProjects: options.projectManagementContext?.registry
-        ? () => {
-            const projects = options.projectManagementContext!.registry.getAll();
-            const active = options.projectManagementContext!.registry.getActive();
-            return projects.map((p) => ({
-              id: p.id,
-              path: p.path,
-              active: p.id === active?.id,
-            }));
-          }
-        : undefined,
     };
 
     const contextTools = generateContextTools(contextCtx);
@@ -1362,6 +1530,30 @@ export async function createRagAgent(options: RagAgentOptions): Promise<RagAgent
 
     if (options.verbose) {
       console.log(`   ℹ️  Context tools enabled (${contextTools.tools.length} tools: get_working_directory, get_environment_info, get_project_info)`);
+    }
+  }
+
+  // 3h. Add brain tools if enabled (knowledge base search, project management)
+  if (options.includeBrainTools && options.brainToolsContext) {
+    const brainToolDefs = generateBrainTools();
+    const brainHandlers = generateBrainToolHandlers(options.brainToolsContext);
+
+    // Filter out brain file tools if we already have fs tools (to avoid duplicates)
+    // Brain file tools: read_file, write_file, create_file, edit_file, delete_path
+    const brainFileToolNames = ['read_file', 'write_file', 'create_file', 'edit_file', 'delete_path'];
+    const filteredBrainTools = options.includeFsTools !== false
+      ? brainToolDefs.filter(t => !brainFileToolNames.includes(t.name))
+      : brainToolDefs;
+
+    tools.push(...filteredBrainTools);
+    for (const tool of filteredBrainTools) {
+      if (brainHandlers[tool.name]) {
+        boundHandlers[tool.name] = brainHandlers[tool.name];
+      }
+    }
+
+    if (options.verbose) {
+      console.log(`   🧠 Brain tools enabled (${filteredBrainTools.length} tools: list_brain_projects, brain_search, ingest_directory, ...)`);
     }
   }
 

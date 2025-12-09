@@ -30,7 +30,7 @@ import {
   runEmbeddingPipelines,
   GeminiEmbeddingProvider,
   ProjectRegistry,
-  generateProjectManagementTools,
+  BrainManager,
   type ProjectToolResult,
   type CreateProjectParams,
   type SetupProjectParams,
@@ -76,6 +76,12 @@ export interface AgentOptions {
 
   /** Agent persona for conversational responses */
   persona?: string;
+
+  /** Callback when a tool is about to be called (real-time updates for TUI) */
+  onToolCall?: (toolName: string, args: Record<string, any>) => void;
+
+  /** Callback when a tool returns a result (real-time updates for TUI) */
+  onToolResult?: (toolName: string, result: any, success: boolean, durationMs: number) => void;
 }
 
 /**
@@ -122,6 +128,9 @@ export interface AgentProjectContext {
 
   /** Project registry for multi-project support */
   registry: ProjectRegistry;
+
+  /** Brain manager for knowledge base operations */
+  brainManager?: BrainManager;
 }
 
 // ============================================
@@ -790,6 +799,24 @@ export async function createRagForgeAgent(options: AgentOptions) {
     },
   });
 
+  // Initialize BrainManager for knowledge base operations
+  let brainManager: BrainManager | undefined;
+  try {
+    if (verbose) {
+      console.log('   🧠 Initializing BrainManager...');
+    }
+    brainManager = await BrainManager.getInstance();
+    await brainManager.initialize();
+    if (verbose) {
+      console.log('   🧠 BrainManager initialized');
+    }
+  } catch (error: any) {
+    if (verbose) {
+      console.log(`   ⚠️  BrainManager init failed: ${error.message}`);
+      console.log('   ⚠️  Brain tools will be disabled');
+    }
+  }
+
   // Create mutable context - this is shared by all tools
   const ctx: AgentProjectContext = {
     currentProjectPath: null,
@@ -801,6 +828,7 @@ export async function createRagForgeAgent(options: AgentOptions) {
     geminiKey,
     replicateToken,
     registry,
+    brainManager,
   };
 
   // Cache for the current project config (updated when project changes)
@@ -939,14 +967,16 @@ export async function createRagForgeAgent(options: AgentOptions) {
       onLoadProject: createLoadProjectHandler(ctx),
     },
 
-    // Project management tools (multi-project support)
-    includeProjectManagementTools: true,
-    projectManagementContext: {
-      registry: ctx.registry,
-    },
+    // Brain tools for knowledge base operations (if BrainManager is available)
+    includeBrainTools: !!ctx.brainManager,
+    brainToolsContext: ctx.brainManager ? { brain: ctx.brainManager } : undefined,
 
     // Agent persona for conversational responses
     persona: options.persona,
+
+    // Real-time callbacks for TUI
+    onToolCall: options.onToolCall,
+    onToolResult: options.onToolResult,
   });
 
   return {

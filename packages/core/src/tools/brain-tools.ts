@@ -13,6 +13,7 @@
 import { BrainManager, type QuickIngestOptions, type BrainSearchOptions, type QuickIngestResult, type UnifiedSearchResult } from '../brain/index.js';
 import type { GeneratedToolDefinition } from './types/index.js';
 import { getGlobalFetchCache, type CachedFetchResult } from './web-tools.js';
+import { NODE_SCHEMAS, CONTENT_NODE_LABELS, type NodeTypeSchema } from '../utils/node-schema.js';
 
 /**
  * Context for brain tools
@@ -1873,6 +1874,9 @@ export function generateBrainTools(): GeneratedToolDefinition[] {
     generateBrainCreateFileTool(),
     generateBrainEditFileTool(),
     generateBrainDeletePathTool(),
+    // Advanced: schema and direct Cypher queries
+    generateGetSchemaTool(),
+    generateRunCypherTool(),
   ];
 }
 
@@ -1901,6 +1905,9 @@ export function generateBrainToolHandlers(ctx: BrainToolsContext): Record<string
     create_file: generateBrainCreateFileHandler(ctx),
     edit_file: generateBrainEditFileHandler(ctx),
     delete_path: generateBrainDeletePathHandler(ctx),
+    // Advanced: schema and direct Cypher queries
+    get_schema: generateGetSchemaHandler(),
+    run_cypher: generateRunCypherHandler(ctx),
   };
 }
 
@@ -2292,6 +2299,124 @@ export function generateCleanupBrainHandler(ctx: BrainToolsContext) {
 }
 
 // ============================================
+// Get Schema Tool
+// ============================================
+
+/**
+ * Generate get_schema tool definition
+ * Returns the schema of indexed node types from NODE_SCHEMAS
+ */
+export function generateGetSchemaTool(): GeneratedToolDefinition {
+  const nodeTypes = Object.keys(NODE_SCHEMAS).sort();
+
+  return {
+    name: 'get_schema',
+    description: `Get the schema of indexed node types in the knowledge base.
+
+Returns all node types and their required properties. Use this before writing Cypher queries with run_cypher.
+
+**Available node types**: ${nodeTypes.join(', ')}
+
+**Common relationships**:
+- (Scope)-[:DEFINED_IN]->(File)
+- (File)-[:IN_DIRECTORY]->(Directory)
+- (MarkdownSection)-[:IN_DOCUMENT]->(MarkdownDocument)
+- (CodeBlock)-[:IN_SECTION]->(MarkdownSection)`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        node_type: {
+          type: 'string',
+          description: 'Optional: get schema for a specific node type only',
+          enum: nodeTypes,
+        },
+      },
+    },
+  };
+}
+
+/**
+ * Schema info returned by get_schema
+ */
+interface SchemaInfo {
+  required: string[];
+  optional?: string[];
+  description?: string;
+}
+
+/**
+ * Generate handler for get_schema
+ */
+export function generateGetSchemaHandler() {
+  return async (params: { node_type?: string }): Promise<{
+    node_types: Record<string, SchemaInfo>;
+    relationships: string[];
+    tips: string[];
+  }> => {
+    const { node_type } = params;
+
+    // Build node types response
+    const node_types: Record<string, SchemaInfo> = {};
+
+    if (node_type) {
+      // Single node type
+      const schema = NODE_SCHEMAS[node_type];
+      if (!schema) {
+        return {
+          node_types: {},
+          relationships: [],
+          tips: [`Unknown node type: ${node_type}. Available: ${Object.keys(NODE_SCHEMAS).join(', ')}`],
+        };
+      }
+      node_types[node_type] = {
+        required: schema.required,
+        optional: schema.optional,
+        description: schema.description,
+      };
+    } else {
+      // All node types
+      for (const [name, schema] of Object.entries(NODE_SCHEMAS)) {
+        node_types[name] = {
+          required: schema.required,
+          optional: schema.optional,
+          description: schema.description,
+        };
+      }
+    }
+
+    // Common relationships
+    const relationships = [
+      '(Scope)-[:DEFINED_IN]->(File) - Code scopes belong to files',
+      '(Scope)-[:HAS_PARENT]->(Scope) - Nested scopes',
+      '(Scope)-[:INHERITS_FROM]->(Scope) - Class inheritance',
+      '(Scope)-[:IMPLEMENTS]->(Scope) - Interface implementation',
+      '(Scope)-[:USES_LIBRARY]->(ExternalLibrary) - Library usage',
+      '(File)-[:IN_DIRECTORY]->(Directory) - Files are in directories',
+      '(File)-[:BELONGS_TO]->(Project) - Files belong to projects',
+      '(MarkdownDocument)-[:DEFINED_IN]->(File) - Markdown docs have source files',
+      '(MarkdownSection)-[:HAS_SECTION]->(MarkdownDocument) - Sections in documents',
+      '(MarkdownSection)-[:CHILD_OF]->(MarkdownSection) - Section hierarchy',
+      '(CodeBlock)-[:CONTAINS_CODE]->(MarkdownDocument) - Code blocks in documents',
+      '(WebPage)-[:LINKS_TO]->(WebPage) - Web page links',
+      '(WebPage)-[:HAS_PAGE]->(Website) - Pages belong to websites',
+    ];
+
+    // Tips for Cypher queries
+    const tips = [
+      'Use MATCH (n:NodeType) to query specific node types',
+      'Filter by project: WHERE n.projectId = "project-id"',
+      'Search by name: WHERE n.name CONTAINS "search"',
+      'Search by file: WHERE n.file CONTAINS "path/to/file"',
+      'Get functions: MATCH (n:Scope) WHERE n.type = "function"',
+      'Get classes with methods: MATCH (c:Scope)-[:HAS_PARENT]-(m:Scope) WHERE c.type = "class"',
+      'Limit results: LIMIT 10',
+    ];
+
+    return { node_types, relationships, tips };
+  };
+}
+
+// ============================================
 // Run Cypher Tool
 // ============================================
 
@@ -2304,6 +2429,11 @@ export function generateRunCypherTool(): GeneratedToolDefinition {
     description: `Execute a Cypher query directly on the Neo4j database.
 
 ⚠️ USE WITH CAUTION - This tool can modify or delete data.
+
+**IMPORTANT**: Before writing Cypher queries, call get_schema() first to understand:
+- Available node types (Scope, File, MarkdownSection, etc.)
+- Node properties for each type
+- Relationships between nodes
 
 Best for:
 - Debugging and inspecting the knowledge graph
@@ -2344,6 +2474,7 @@ export function generateRunCypherHandler(ctx: BrainToolsContext) {
     records?: Array<Record<string, unknown>>;
     summary?: { counters: Record<string, number> };
     error?: string;
+    waited_for_edits?: boolean;
   }> => {
     const neo4jClient = ctx.brain.getNeo4jClient();
 
@@ -2352,6 +2483,28 @@ export function generateRunCypherHandler(ctx: BrainToolsContext) {
         success: false,
         error: 'Neo4j not connected. Initialize the brain first.',
       };
+    }
+
+    // Wait for ingestion lock and pending edits (same as brain_search)
+    let waitedForEdits = false;
+    const ingestionLock = ctx.brain.getIngestionLock();
+
+    if (ingestionLock.isLocked()) {
+      console.log('[run_cypher] Waiting for ingestion lock...');
+      const unlocked = await ingestionLock.waitForUnlock(30000);
+      waitedForEdits = true;
+      if (!unlocked) {
+        console.warn('[run_cypher] Timeout waiting for ingestion lock - proceeding with potentially stale data');
+      }
+    }
+
+    if (ctx.brain.hasPendingEdits()) {
+      console.log('[run_cypher] Waiting for pending edits to flush...');
+      const flushed = await ctx.brain.waitForPendingEdits(30000);
+      waitedForEdits = true;
+      if (!flushed) {
+        console.warn('[run_cypher] Timeout waiting for pending edits - proceeding with potentially stale data');
+      }
     }
 
     try {
@@ -2391,11 +2544,13 @@ export function generateRunCypherHandler(ctx: BrainToolsContext) {
         success: true,
         records,
         summary: Object.keys(counters).length > 0 ? { counters } : undefined,
+        waited_for_edits: waitedForEdits || undefined,
       };
     } catch (err: any) {
       return {
         success: false,
         error: err.message || String(err),
+        waited_for_edits: waitedForEdits || undefined,
       };
     }
   };
