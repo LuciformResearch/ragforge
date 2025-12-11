@@ -581,9 +581,11 @@ Parameters:
 - regex: Regular expression to search for in file contents
 - ignore_case: Case insensitive search (default: false)
 - max_results: Maximum number of matches to return (default: 100)
+- extract_hierarchy: Extract dependency hierarchy for results (default: false). Requires brain to be available.
 
 Example: grep_files({ pattern: "**/*.ts", regex: "function.*Handler" })
-Example: grep_files({ pattern: "src/**/*.js", regex: "TODO|FIXME", ignore_case: true })`,
+Example: grep_files({ pattern: "src/**/*.js", regex: "TODO|FIXME", ignore_case: true })
+Example: grep_files({ pattern: "**/*.ts", regex: "export function", extract_hierarchy: true })`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -602,6 +604,10 @@ Example: grep_files({ pattern: "src/**/*.js", regex: "TODO|FIXME", ignore_case: 
         max_results: {
           type: 'number',
           description: 'Maximum matches to return (default: 100)',
+        },
+        extract_hierarchy: {
+          type: 'boolean',
+          description: 'Extract dependency hierarchy for results (default: false). Requires brain to be available.',
         },
       },
       required: ['pattern', 'regex'],
@@ -623,9 +629,11 @@ Parameters:
 - query: Text to search for (fuzzy matched)
 - threshold: Similarity threshold 0-1 (default: 0.7, higher = stricter)
 - max_results: Maximum number of matches to return (default: 50)
+- extract_hierarchy: Extract dependency hierarchy for results (default: false). Requires brain to be available.
 
 Example: search_files({ pattern: "**/*.ts", query: "authentification" })
-Example: search_files({ pattern: "src/**/*", query: "levenshtien", threshold: 0.6 })`,
+Example: search_files({ pattern: "src/**/*", query: "levenshtien", threshold: 0.6 })
+Example: search_files({ pattern: "**/*.ts", query: "normalizeTimestamp", extract_hierarchy: true })`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -645,6 +653,10 @@ Example: search_files({ pattern: "src/**/*", query: "levenshtien", threshold: 0.
           type: 'number',
           description: 'Maximum matches to return (default: 50)',
         },
+        extract_hierarchy: {
+          type: 'boolean',
+          description: 'Extract dependency hierarchy for results (default: false). Requires brain to be available.',
+        },
       },
       required: ['pattern', 'query'],
     },
@@ -652,13 +664,13 @@ Example: search_files({ pattern: "src/**/*", query: "levenshtien", threshold: 0.
 }
 
 export function generateGrepFilesHandler(ctx: FsToolsContext) {
-  return async (params: { pattern: string; regex: string; ignore_case?: boolean; max_results?: number }) => {
+  return async (params: { pattern: string; regex: string; ignore_case?: boolean; max_results?: number; extract_hierarchy?: boolean }) => {
     const fs = await import('fs/promises');
     const { glob } = await import('glob');
 
     const projectRoot = getProjectRoot(ctx) || process.cwd();
 
-    const { pattern, regex, ignore_case = false, max_results = 100 } = params;
+    const { pattern, regex, ignore_case = false, max_results = 100, extract_hierarchy = false } = params;
 
     try {
       // Validate regex
@@ -715,23 +727,50 @@ export function generateGrepFilesHandler(ctx: FsToolsContext) {
 
     await Promise.all(files.map(file => limit(() => searchFile(file))));
 
-    return {
+    const result: any = {
       matches,
       files_searched: files.length,
       total_matches: matches.length,
       truncated: totalMatches >= max_results,
     };
+
+    // Note: extract_hierarchy is handled by the MCP server wrapper via daemon proxy
+    // The daemon handler will automatically start watchers and sync projects (like brain_search)
+    // For direct usage (non-MCP), try direct brain access
+    if (extract_hierarchy && matches.length > 0) {
+      try {
+        const { BrainManager } = await import('../brain/index.js');
+        const { generateExtractDependencyHierarchyHandler } = await import('./brain-tools.js');
+        const brain = await BrainManager.getInstance();
+        
+        // Extract hierarchy (ensureProjectSynced is called inside the handler, like brain_search)
+        const extractHandler = generateExtractDependencyHierarchyHandler({ brain });
+        const hierarchyResult = await extractHandler({
+          results: matches,
+          depth: 1,
+          direction: 'both',
+          max_scopes: Math.min(matches.length, 10),
+        });
+        
+        result.hierarchy = hierarchyResult;
+      } catch (err: any) {
+        // If brain is not available, extraction will be handled by MCP wrapper
+        result.hierarchy_error = err.message || 'Brain not available (will be handled by MCP wrapper if available)';
+      }
+    }
+
+    return result;
   };
 }
 
 export function generateSearchFilesHandler(ctx: FsToolsContext) {
-  return async (params: { pattern: string; query: string; threshold?: number; max_results?: number }) => {
+  return async (params: { pattern: string; query: string; threshold?: number; max_results?: number; extract_hierarchy?: boolean }) => {
     const fs = await import('fs/promises');
     const { glob } = await import('glob');
 
     const projectRoot = getProjectRoot(ctx) || process.cwd();
 
-    const { pattern, query, threshold = 0.7, max_results = 50 } = params;
+    const { pattern, query, threshold = 0.7, max_results = 50, extract_hierarchy = false } = params;
     const queryLower = query.toLowerCase();
     const queryLen = query.length;
 
@@ -792,7 +831,7 @@ export function generateSearchFilesHandler(ctx: FsToolsContext) {
     // Sort by similarity (best first)
     matches.sort((a, b) => b.similarity - a.similarity);
 
-    return {
+    const result: any = {
       query,
       threshold,
       matches,
@@ -800,6 +839,41 @@ export function generateSearchFilesHandler(ctx: FsToolsContext) {
       total_matches: matches.length,
       truncated: matches.length >= max_results,
     };
+
+    // Note: extract_hierarchy is handled by the MCP server wrapper via daemon proxy
+    // The daemon handler will automatically start watchers and sync projects (like brain_search)
+    // For direct usage (non-MCP), try direct brain access
+    if (extract_hierarchy && matches.length > 0) {
+      try {
+        // Convert matches to format expected by extract_dependency_hierarchy
+        const hierarchyMatches = matches.map(m => ({
+          file: m.file,
+          line: m.line,
+          content: m.content,
+          match: m.matched_word,
+        }));
+        
+        const { BrainManager } = await import('../brain/index.js');
+        const { generateExtractDependencyHierarchyHandler } = await import('./brain-tools.js');
+        const brain = await BrainManager.getInstance();
+        
+        // Extract hierarchy (ensureProjectSynced is called inside the handler, like brain_search)
+        const extractHandler = generateExtractDependencyHierarchyHandler({ brain });
+        const hierarchyResult = await extractHandler({
+          results: hierarchyMatches,
+          depth: 1,
+          direction: 'both',
+          max_scopes: Math.min(matches.length, 10),
+        });
+        
+        result.hierarchy = hierarchyResult;
+      } catch (err: any) {
+        // If brain is not available, extraction will be handled by MCP wrapper
+        result.hierarchy_error = err.message || 'Brain not available (will be handled by MCP wrapper if available)';
+      }
+    }
+
+    return result;
   };
 }
 

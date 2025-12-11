@@ -376,7 +376,43 @@ async function prepareToolsForMcp(
   const fsTools = generateFsTools({ projectRoot: () => ctx.currentProjectPath || process.cwd() });
   allTools.push(...fsTools.tools);
   for (const [name, handler] of Object.entries(fsTools.handlers)) {
-    allHandlers[name] = handler;
+    // Wrap handlers for grep_files and search_files to handle extract_hierarchy via daemon
+    if (name === 'grep_files' || name === 'search_files') {
+      allHandlers[name] = async (args: any) => {
+        // Temporarily remove extract_hierarchy from args to let handler return matches only
+        const extractHierarchy = args.extract_hierarchy;
+        const handlerArgs = { ...args };
+        delete handlerArgs.extract_hierarchy;
+        
+        // Call the handler first to get matches (without extract_hierarchy)
+        const result = await handler(handlerArgs);
+        
+        // If extract_hierarchy is requested and we have matches, call extract_dependency_hierarchy via daemon
+        if (extractHierarchy && result.matches && result.matches.length > 0) {
+          try {
+            // Use daemon proxy (same pattern as brain_search)
+            const hierarchyResult = await callToolViaDaemon('extract_dependency_hierarchy', {
+              results: result.matches,
+              depth: 1,
+              direction: 'both',
+              max_scopes: Math.min(result.matches.length, 10),
+            });
+            
+            if (hierarchyResult.success) {
+              result.hierarchy = hierarchyResult.result;
+            } else {
+              result.hierarchy_error = hierarchyResult.error || 'Failed to extract hierarchy via daemon';
+            }
+          } catch (err: any) {
+            result.hierarchy_error = err.message || 'Failed to extract hierarchy';
+          }
+        }
+        
+        return result;
+      };
+    } else {
+      allHandlers[name] = handler;
+    }
   }
 
   // Add shell tools (with default confirmation that always allows)

@@ -20,9 +20,9 @@ export interface ConversationTurn {
     toolArgs?: Record<string, any>;
     toolResult: any;
     success: boolean;
-    timestamp: number;
+    timestamp: string;  // ISO string with local timezone (via formatLocalDate)
   }>;
-  timestamp: number;
+  timestamp: string;  // ISO string with local timezone (via formatLocalDate)
 }
 
 export interface FileMention {
@@ -194,13 +194,33 @@ Be factual and preserve critical details.`,
       // embedding will be generated separately if embeddingProvider is available
     };
 
+    // Extract files mentioned
+    const filesMentioned: FileMention[] = Array.isArray(rawResult.filesMentioned)
+      ? rawResult.filesMentioned
+          .filter((f: any) => f && typeof f === 'object' && typeof f.path === 'string' && f.path.trim().length > 0)
+          .map((f: any) => {
+            const filePath = String(f.path).trim();
+            const isAbsolute = typeof f.isAbsolute === 'boolean' 
+              ? f.isAbsolute 
+              : path.isAbsolute(filePath);
+            return {
+              path: filePath,
+              isAbsolute
+            };
+          })
+      : [];
+
     // Generate embedding if provider is available
     if (this.embeddingProvider) {
       const embeddingText = generateSummaryEmbeddingText(summary);
       summary.embedding = await this.embeddingProvider.embedSingle(embeddingText);
     }
 
-    return summary;
+    // Return SummaryWithFiles format
+    return {
+      ...summary,
+      filesMentioned: filesMentioned
+    };
   }
 
   /**
@@ -340,7 +360,11 @@ Be thorough in synthesizing information while keeping it concise.`,
       summary.embedding = await this.embeddingProvider.embedSingle(embeddingText);
     }
 
-    return summary;
+    // Return SummaryWithFiles format
+    return {
+      ...summary,
+      filesMentioned: filesMentioned
+    };
   }
 
   /**

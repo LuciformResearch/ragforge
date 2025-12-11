@@ -341,9 +341,6 @@ export interface RagAgentOptions {
   /** ConversationStorage instance for enriched context (optional) */
   conversationStorage?: any; // ConversationStorage type
 
-  /** Project root for code semantic search filtering (optional) */
-  projectRoot?: string;
-
   /** Current working directory for code semantic search (optional) */
   cwd?: string;
 
@@ -396,7 +393,7 @@ export interface RagAgentOptions {
   includeFileTools?: boolean;
 
   /**
-   * Project root for file tools (required if includeFileTools is true)
+   * Project root for file tools and code semantic search (required if includeFileTools is true)
    * File paths will be resolved relative to this directory
    * Can be a string or a getter function for dynamic resolution
    */
@@ -831,7 +828,7 @@ export class RagAgent {
   private onToolCall?: (toolName: string, args: Record<string, any>) => void;
   private onToolResult?: (toolName: string, result: any, success: boolean, durationMs: number) => void;
   private conversationStorage?: any; // ConversationStorage instance for enriched context
-  private projectRoot?: string; // Project root for code semantic search
+  private projectRoot?: string | (() => string | null); // Project root for code semantic search
   private cwd?: string; // Current working directory for code semantic search
   private brainManager?: any; // BrainManager instance for accessing locks
   private getLocks?: () => Promise<{
@@ -1056,6 +1053,9 @@ Example: After getting search results, use this to analyze each result with a cu
 
     // Build enriched context if conversationStorage is available
     let enrichedContextString: string | null = null;
+    // Note: conversationId is not available in ask() method - conversationStorage requires it
+    // For now, skip enriched context if conversationId is not available
+    const conversationId: string | undefined = undefined; // TODO: Add conversationId parameter to ask() method
     if (this.conversationStorage && conversationId) {
       try {
         // Get locks from BrainManager or getLocks function if available
@@ -1685,8 +1685,10 @@ export async function createRagAgent(options: RagAgentOptions): Promise<RagAgent
     const brainToolDefs = generateBrainTools();
     const brainHandlers = options.customBrainHandlers;
 
-    // Filter out brain file tools if we already have fs tools (to avoid duplicates)
-    // Brain file tools: read_file, write_file, create_file, edit_file, delete_path
+    // Note: File tools (read_file, write_file, create_file, edit_file, delete_path) are no longer
+    // brain tools. They are regular file tools that automatically update the brain via the
+    // onFileModified callback when brain is available. This filter is kept for backward
+    // compatibility but should no longer be necessary.
     const brainFileToolNames = ['read_file', 'write_file', 'create_file', 'edit_file', 'delete_path'];
     const filteredBrainTools = options.includeFsTools !== false
       ? brainToolDefs.filter(t => !brainFileToolNames.includes(t.name))

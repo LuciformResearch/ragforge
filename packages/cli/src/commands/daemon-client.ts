@@ -403,6 +403,10 @@ export { DAEMON_PORT, DAEMON_URL };
 
 /**
  * List of brain tools that should be routed through daemon
+ * 
+ * Note: File tools (read_file, write_file, create_file, edit_file, delete_path) are no longer
+ * brain tools. They are regular file tools that automatically update the brain via the
+ * onFileModified callback when brain is available.
  */
 const BRAIN_TOOL_NAMES = [
   'create_project',
@@ -416,13 +420,10 @@ const BRAIN_TOOL_NAMES = [
   'list_watchers',
   'start_watcher',
   'stop_watcher',
-  'read_file',
-  'write_file',
-  'create_file',
-  'edit_file',
-  'delete_path',
+  'mark_file_dirty',
   'get_schema',
   'run_cypher',
+  'extract_dependency_hierarchy',
   'notify_user',
   'update_todos',
 ] as const;

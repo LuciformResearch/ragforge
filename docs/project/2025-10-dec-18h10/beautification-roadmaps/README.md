@@ -68,6 +68,11 @@ Pour une vue d'ensemble complète, voir :
 - [AGENT_TERMINAL_BEAUTIFICATION.md](../AGENT_TERMINAL_BEAUTIFICATION.md) : Document principal avec vue d'ensemble
 - [Agent_terminal_beautification.md](../Agent_terminal_beautification.md) : Exemple HTML original avec animations
 
+Pour la vision du système de validation :
+- [VALIDATION_SYSTEM_VISION.md](../VALIDATION_SYSTEM_VISION.md) : Vision globale avec classification de tous les outils
+- [VALIDATION_DESIGN_BY_TOOL.md](../VALIDATION_DESIGN_BY_TOOL.md) : Design détaillé pour chaque outil
+- [VALIDATION_README.md](../VALIDATION_README.md) : Vue d'ensemble de la documentation de validation
+
 ## Notes Importantes
 
 ### Liens Clickables (PS Lucie)

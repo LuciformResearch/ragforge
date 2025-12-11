@@ -27,6 +27,7 @@
   "scripts": {
     "clean": "rm -rf dist",
     "generate:version": "node scripts/generate-version.js",
+    "prebuild": "npx tsx ../../scripts/stop-daemon.ts || true",
     "build:esm": "npm run generate:version && tsc -p tsconfig.esm.json",
     "build:types": "tsc -p tsconfig.types.json",
     "copy:templates": "cp -r src/commands/templates dist/esm/commands/",

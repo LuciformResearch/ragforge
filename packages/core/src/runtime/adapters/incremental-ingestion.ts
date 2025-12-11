@@ -435,14 +435,27 @@ export class IncrementalIngestionManager {
       if (nodeData.length === 0) continue;
 
       // Determine unique field based on node type
-      // File and Directory use 'path', others use 'uuid'
+      // File and Directory use 'path', Project uses 'projectId', others use 'uuid'
       // Note: ImageFile, ThreeDFile, DocumentFile are MediaFile subtypes and use 'uuid'
       const labelsArray = labels.split(':');
       const isMediaFile = labelsArray.includes('MediaFile') || labelsArray.includes('ImageFile')
         || labelsArray.includes('ThreeDFile') || labelsArray.includes('DocumentFile');
       const isFileOrDirectory = (labelsArray.includes('File') || labelsArray.includes('Directory')) && !isMediaFile;
-      const uniqueField = isFileOrDirectory ? 'path' : 'uuid';
-      const uniqueValue = isFileOrDirectory ? 'nodeData.props.path' : 'nodeData.uuid';
+      const isProject = labelsArray.includes('Project');
+      
+      let uniqueField: string;
+      let uniqueValue: string;
+      if (isFileOrDirectory) {
+        uniqueField = 'path';
+        uniqueValue = 'nodeData.props.path';
+      } else if (isProject) {
+        // Use projectId as unique field for Project nodes (ensures consistency)
+        uniqueField = 'projectId';
+        uniqueValue = 'nodeData.props.projectId';
+      } else {
+        uniqueField = 'uuid';
+        uniqueValue = 'nodeData.uuid';
+      }
 
       await this.client.run(
         `
@@ -866,6 +879,7 @@ export class IncrementalIngestionManager {
     const parseResult = await adapter.parse({
       source: config,
       skipFiles, // Pass unchanged files to skip
+      projectId, // Pass generated projectId so Project node uses it as uuid
       onProgress: undefined
     });
 
@@ -1199,6 +1213,7 @@ export class IncrementalIngestionManager {
     // Parse the file
     const parseResult = await adapter.parse({
       source: singleFileConfig,
+      projectId: options.projectId, // Pass projectId for consistency
       onProgress: undefined
     });
 

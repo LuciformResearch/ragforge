@@ -266,6 +266,7 @@ export interface BrainSearchResult {
   projectId: string;
   projectPath: string;
   projectType: string;
+  filePath: string; // Absolute path to the file (projectPath + "/" + node.file)
 }
 
 export interface UnifiedSearchResult {
@@ -1077,6 +1078,7 @@ volumes:
       lastAccessed?: Date;
       autoCleanup?: boolean;
       displayName?: string;
+      rootPath?: string;
     }
   ): Promise<void> {
     if (!this.neo4jClient) return;
@@ -1103,6 +1105,10 @@ volumes:
     if (metadata.displayName !== undefined) {
       setClause.push('p.displayName = $displayName');
       params.displayName = metadata.displayName;
+    }
+    if (metadata.rootPath !== undefined) {
+      setClause.push('p.rootPath = $rootPath');
+      params.rootPath = metadata.rootPath;
     }
 
     if (setClause.length === 0) return;
@@ -1473,7 +1479,12 @@ volumes:
     console.log(`[QuickIngest] Project ID: ${projectId}${displayName ? ` (${displayName})` : ''}`);
 
     // Register project first (so it shows up in list even if ingestion fails)
-    await this.registerProject(absolutePath, 'quick-ingest', displayName);
+    // IMPORTANT: Use the returned projectId - it may be different if this is a subdirectory
+    const registeredProjectId = await this.registerProject(absolutePath, 'quick-ingest', displayName);
+    
+    // Use the projectId returned by registerProject (handles subdirectory/parent logic)
+    // This ensures consistency: if this is a subdirectory, use parent's projectId
+    const finalProjectId = registeredProjectId;
 
     // Use provided patterns or defaults
     const includePatterns = options.include || [
@@ -1495,7 +1506,9 @@ volumes:
 
     // Start watcher with initial sync (this does the actual ingestion)
     // The watcher handles: lock, ingestion, embeddings, and watching
+    // Pass the finalProjectId to ensure consistency (handles subdirectory case)
     await this.startWatching(absolutePath, {
+      projectId: finalProjectId, // Use registered projectId (handles subdirectory/parent logic)
       includePatterns,
       excludePatterns,
       verbose: true,
@@ -1503,10 +1516,10 @@ volumes:
     });
 
     // Get stats after ingestion
-    const nodeCount = await this.countProjectNodes(projectId);
+    const nodeCount = await this.countProjectNodes(finalProjectId);
 
     // Update node count in cache (no need to persist - it's computed from DB)
-    const project = this.registeredProjects.get(projectId);
+    const project = this.registeredProjects.get(finalProjectId);
     if (project) {
       project.nodeCount = nodeCount;
     }
@@ -1516,7 +1529,7 @@ volumes:
     console.log(`[QuickIngest] Completed in ${elapsed}ms`);
 
     return {
-      projectId,
+      projectId: finalProjectId,
       stats: {
         filesProcessed: nodeCount,
         nodesCreated: nodeCount,
@@ -1532,33 +1545,156 @@ volumes:
   // ============================================
 
   /**
-   * Ingest a web page into the brain
+   * Detect file format from URL
+   */
+  private detectFormatFromUrl(url: string): 'document' | 'media' | 'html' | null {
+    try {
+      const urlObj = new URL(url);
+      const pathname = urlObj.pathname.toLowerCase();
+      const ext = path.extname(pathname).toLowerCase();
+
+      // Document formats
+      const documentExts = ['.pdf', '.docx', '.xlsx', '.xls', '.csv'];
+      if (documentExts.includes(ext)) {
+        return 'document';
+      }
+
+      // Media formats
+      const mediaExts = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico', '.bmp', '.tiff', '.gltf', '.glb'];
+      if (mediaExts.includes(ext)) {
+        return 'media';
+      }
+
+      // Default to HTML
+      return 'html';
+    } catch {
+      return 'html';
+    }
+  }
+
+  /**
+   * Download file from URL to disk
+   * @param maxSizeBytes Maximum file size in bytes (default: 100MB). Throws error if exceeded.
+   */
+  private async downloadFileFromUrl(
+    url: string,
+    destPath: string,
+    maxSizeBytes: number = 100 * 1024 * 1024 // 100MB default
+  ): Promise<{ success: boolean; contentType?: string; sizeBytes?: number; error?: string }> {
+    try {
+      const response = await fetch(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        },
+      });
+
+      if (!response.ok) {
+        return { success: false, error: `HTTP ${response.status}: ${response.statusText}` };
+      }
+
+      // Check Content-Length header if available
+      const contentLength = response.headers.get('content-length');
+      if (contentLength) {
+        const size = parseInt(contentLength, 10);
+        if (size > maxSizeBytes) {
+          return {
+            success: false,
+            error: `File too large: ${(size / 1024 / 1024).toFixed(2)}MB exceeds maximum ${(maxSizeBytes / 1024 / 1024).toFixed(2)}MB`,
+          };
+        }
+      }
+
+      const contentType = response.headers.get('content-type') || '';
+      const buffer = Buffer.from(await response.arrayBuffer());
+
+      // Check actual size after download
+      if (buffer.length > maxSizeBytes) {
+        return {
+          success: false,
+          error: `File too large: ${(buffer.length / 1024 / 1024).toFixed(2)}MB exceeds maximum ${(maxSizeBytes / 1024 / 1024).toFixed(2)}MB`,
+        };
+      }
+
+      await fs.writeFile(destPath, buffer);
+
+      return { success: true, contentType, sizeBytes: buffer.length };
+    } catch (error: any) {
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Ingest a web page or file into the brain
+   * Auto-detects format and routes to appropriate adapter
    */
   async ingestWebPage(params: {
     url: string;
-    title: string;
-    textContent: string;
-    rawHtml: string;
+    title?: string;
+    textContent?: string;
+    rawHtml?: string;
     projectName?: string;
     generateEmbeddings?: boolean;
-  }): Promise<{ success: boolean; nodeId?: string }> {
+  }): Promise<{ success: boolean; nodeId?: string; nodeType?: string }> {
     if (!this.neo4jClient) {
       throw new Error('Brain not initialized. Call initialize() first.');
     }
 
     const { UniqueIDHelper } = await import('../runtime/utils/UniqueIDHelper.js');
-    // Deterministic UUID based on URL - same URL = same node (upsert)
-    const nodeId = UniqueIDHelper.GenerateDeterministicUUID(params.url);
     const projectName = params.projectName || 'web-pages';
 
-    // Ensure project is registered
+    // Ensure project is registered (this creates the web-pages directory)
     const projectId = await this.registerWebProject(projectName);
+    const project = this.registeredProjects.get(projectId);
+    if (!project) {
+      throw new Error(`Failed to register web project: ${projectId}`);
+    }
 
-    // Extract domain
+    // Detect format from URL
+    const format = this.detectFormatFromUrl(params.url);
+
+    // If it's a document or media file, download and ingest with appropriate parser
+    if (format === 'document' || format === 'media') {
+      return this.ingestFileFromUrl(params.url, projectId, project.path, params.generateEmbeddings);
+    }
+
+    // Otherwise, treat as HTML page (existing logic)
+    // Deterministic UUID based on URL - same URL = same node (upsert)
+    const nodeId = UniqueIDHelper.GenerateDeterministicUUID(params.url);
+
+    // Extract domain and create safe directory name
     const urlParsed = new URL(params.url);
     const domain = urlParsed.hostname;
+    const safeDomain = domain.replace(/[^a-zA-Z0-9]/g, '_');
 
-    // Create WebPage node
+    // Create hash for filename (first 16 chars of SHA256)
+    const urlHash = crypto.createHash('sha256').update(params.url).digest('hex').slice(0, 16);
+
+    // Create domain directory within project directory
+    const domainDir = path.join(project.path, safeDomain);
+    await fs.mkdir(domainDir, { recursive: true });
+
+    // Store files on disk
+    const htmlPath = path.join(domainDir, `${urlHash}.html`);
+    const txtPath = path.join(domainDir, `${urlHash}.txt`);
+    const jsonPath = path.join(domainDir, `${urlHash}.json`);
+
+    const rawHtml = params.rawHtml || '';
+    const textContent = params.textContent || '';
+    const title = params.title || '';
+
+    await fs.writeFile(htmlPath, rawHtml, 'utf-8');
+    await fs.writeFile(txtPath, textContent, 'utf-8');
+    await fs.writeFile(jsonPath, JSON.stringify({
+      url: params.url,
+      title,
+      domain,
+      ingestedAt: new Date().toISOString(),
+    }, null, 2), 'utf-8');
+
+    // Calculate relative path from project.path to html file
+    const relativeFilePath = path.relative(project.path, htmlPath);
+
+    // Create WebPage node with file path
     await this.neo4jClient.run(
       `MERGE (n:WebPage {url: $url})
        SET n.uuid = $uuid,
@@ -1567,36 +1703,38 @@ volumes:
            n.textContent = $textContent,
            n.rawHtml = $rawHtml,
            n.projectId = $projectId,
+           n.file = $file,
            n.ingestedAt = $ingestedAt`,
       {
         uuid: nodeId,
         url: params.url,
-        title: params.title,
+        title,
         domain,
-        textContent: params.textContent.slice(0, 100000), // Limit content size
-        rawHtml: params.rawHtml,
+        textContent: textContent.slice(0, 100000), // Limit content size
+        rawHtml,
         projectId,
+        file: relativeFilePath, // Relative path from project.path to the HTML file
         ingestedAt: new Date().toISOString(),
       }
     );
 
     // Update project cache
-    const project = this.registeredProjects.get(projectId);
-    if (project) {
-      project.nodeCount = await this.countProjectNodes(projectId);
-      project.lastAccessed = new Date();
+    const cachedProject = this.registeredProjects.get(projectId);
+    if (cachedProject) {
+      cachedProject.nodeCount = await this.countProjectNodes(projectId);
+      cachedProject.lastAccessed = new Date();
       // Update lastAccessed in DB
-      await this.updateProjectMetadataInDb(projectId, { lastAccessed: project.lastAccessed });
+      await this.updateProjectMetadataInDb(projectId, { lastAccessed: cachedProject.lastAccessed });
     }
 
     // Generate embeddings if requested
     if (params.generateEmbeddings && this.embeddingService?.canGenerateEmbeddings()) {
       try {
         // Generate embeddings for title (name) and textContent (content)
-        const titleEmbedding = await this.embeddingService.getQueryEmbedding(params.title);
-        const contentEmbedding = await this.embeddingService.getQueryEmbedding(
-          params.textContent.slice(0, 8000) // Limit for embedding
-        );
+        const titleEmbedding = title ? await this.embeddingService.getQueryEmbedding(title) : null;
+        const contentEmbedding = textContent
+          ? await this.embeddingService.getQueryEmbedding(textContent.slice(0, 8000))
+          : null;
 
         if (titleEmbedding || contentEmbedding) {
           const setClause: string[] = [];
@@ -1626,7 +1764,224 @@ volumes:
 
     console.log(`[Brain] Ingested web page: ${params.url} → project ${projectName}`);
 
-    return { success: true, nodeId };
+    return { success: true, nodeId, nodeType: 'WebPage' };
+  }
+
+  /**
+   * Ingest a file from URL (PDF, DOCX, images, etc.) using appropriate parser
+   */
+  private async ingestFileFromUrl(
+    url: string,
+    projectId: string,
+    projectPath: string,
+    generateEmbeddings?: boolean
+  ): Promise<{ success: boolean; nodeId?: string; nodeType?: string }> {
+    const { UniqueIDHelper } = await import('../runtime/utils/UniqueIDHelper.js');
+    const nodeId = UniqueIDHelper.GenerateDeterministicUUID(url);
+
+    // Extract domain and filename from URL
+    const urlParsed = new URL(url);
+    const domain = urlParsed.hostname;
+    const safeDomain = domain.replace(/[^a-zA-Z0-9]/g, '_');
+    const pathname = urlParsed.pathname;
+    const filename = path.basename(pathname) || 'file';
+    const ext = path.extname(pathname).toLowerCase();
+
+    // Create domain directory
+    const domainDir = path.join(projectPath, safeDomain);
+    await fs.mkdir(domainDir, { recursive: true });
+
+    // Download file with size limit check
+    const urlHash = crypto.createHash('sha256').update(url).digest('hex').slice(0, 16);
+    const filePath = path.join(domainDir, `${urlHash}${ext}`);
+    
+    // Use larger limit for documents/media (100MB) - they should be complete
+    const maxSizeBytes = 100 * 1024 * 1024; // 100MB
+    const downloadResult = await this.downloadFileFromUrl(url, filePath, maxSizeBytes);
+
+    if (!downloadResult.success) {
+      throw new Error(`Failed to download file from ${url}: ${downloadResult.error}`);
+    }
+
+    const relativeFilePath = path.relative(projectPath, filePath);
+
+    // Route to appropriate parser based on format
+    const format = this.detectFormatFromUrl(url);
+    if (format === 'document') {
+      return this.ingestDocumentFile(filePath, relativeFilePath, url, projectId, nodeId, generateEmbeddings);
+    } else if (format === 'media') {
+      return this.ingestMediaFile(filePath, relativeFilePath, url, projectId, nodeId, generateEmbeddings);
+    }
+
+    throw new Error(`Unsupported format for URL: ${url}`);
+  }
+
+  /**
+   * Ingest a document file (PDF, DOCX, etc.) using document-file-parser
+   */
+  private async ingestDocumentFile(
+    filePath: string,
+    relativeFilePath: string,
+    url: string,
+    projectId: string,
+    nodeId: string,
+    generateEmbeddings?: boolean
+  ): Promise<{ success: boolean; nodeId?: string; nodeType?: string }> {
+    const { parseDocumentFile } = await import('../runtime/adapters/document-file-parser.js');
+    const docInfo = await parseDocumentFile(filePath, { extractText: true });
+
+    if (!docInfo) {
+      throw new Error(`Failed to parse document file: ${filePath}`);
+    }
+
+    // Determine node label based on format
+    let nodeLabel: string;
+    switch (docInfo.format) {
+      case 'pdf':
+        nodeLabel = 'PDFDocument';
+        break;
+      case 'docx':
+        nodeLabel = 'WordDocument';
+        break;
+      case 'xlsx':
+      case 'xls':
+      case 'csv':
+        nodeLabel = 'SpreadsheetDocument';
+        break;
+      default:
+        nodeLabel = 'DocumentFile';
+    }
+
+    // Create node in Neo4j
+    // Store full textContent without truncation for documents (they were validated for size during download)
+    await this.neo4jClient!.run(
+      `MERGE (n:${nodeLabel} {uuid: $uuid})
+       SET n.url = $url,
+           n.file = $file,
+           n.projectId = $projectId,
+           n.format = $format,
+           n.hash = $hash,
+           n.sizeBytes = $sizeBytes,
+           n.textContent = $textContent,
+           n.pageCount = $pageCount,
+           n.ingestedAt = $ingestedAt`,
+      {
+        uuid: nodeId,
+        url,
+        file: relativeFilePath,
+        projectId,
+        format: docInfo.format,
+        hash: docInfo.hash,
+        sizeBytes: docInfo.sizeBytes,
+        textContent: docInfo.textContent || '', // Full content, no truncation
+        pageCount: docInfo.pageCount || null,
+        ingestedAt: new Date().toISOString(),
+      }
+    );
+
+    // Update project cache
+    const cachedProject = this.registeredProjects.get(projectId);
+    if (cachedProject) {
+      cachedProject.nodeCount = await this.countProjectNodes(projectId);
+      cachedProject.lastAccessed = new Date();
+      await this.updateProjectMetadataInDb(projectId, { lastAccessed: cachedProject.lastAccessed });
+    }
+
+    // Generate embeddings if requested
+    // Note: We limit text for embeddings (8000 chars) but store full content in textContent
+    if (generateEmbeddings && this.embeddingService?.canGenerateEmbeddings() && docInfo.textContent) {
+      try {
+        // Limit text for embedding generation (API limit), but full content is stored in DB
+        const textForEmbedding = docInfo.textContent.slice(0, 8000);
+        const contentEmbedding = await this.embeddingService.getQueryEmbedding(textForEmbedding);
+        if (contentEmbedding) {
+          await this.neo4jClient!.run(
+            `MATCH (n {uuid: $uuid}) SET n.embedding_content = $embedding_content`,
+            { uuid: nodeId, embedding_content: contentEmbedding }
+          );
+        }
+      } catch (err: any) {
+        console.warn(`[Brain] Failed to generate embeddings for document: ${err.message}`);
+      }
+    }
+
+    console.log(`[Brain] Ingested document file: ${url} → project ${projectId} (${nodeLabel})`);
+    return { success: true, nodeId, nodeType: nodeLabel };
+  }
+
+  /**
+   * Ingest a media file (image, 3D model) using media-file-parser
+   */
+  private async ingestMediaFile(
+    filePath: string,
+    relativeFilePath: string,
+    url: string,
+    projectId: string,
+    nodeId: string,
+    generateEmbeddings?: boolean
+  ): Promise<{ success: boolean; nodeId?: string; nodeType?: string }> {
+    const { parseMediaFile } = await import('../runtime/adapters/media-file-parser.js');
+    const mediaInfo = await parseMediaFile(filePath);
+
+    if (!mediaInfo) {
+      throw new Error(`Failed to parse media file: ${filePath}`);
+    }
+
+    // Determine node label based on category
+    let nodeLabel: string;
+    switch (mediaInfo.category) {
+      case 'image':
+        nodeLabel = 'ImageFile';
+        break;
+      case '3d':
+        nodeLabel = 'ThreeDFile';
+        break;
+      default:
+        nodeLabel = 'MediaFile';
+    }
+
+    // Create node in Neo4j
+    const nodeProps: Record<string, any> = {
+      uuid: nodeId,
+      url,
+      file: relativeFilePath,
+      projectId,
+      format: mediaInfo.format,
+      hash: mediaInfo.hash,
+      sizeBytes: mediaInfo.sizeBytes,
+      ingestedAt: new Date().toISOString(),
+    };
+
+    if (mediaInfo.category === 'image' && 'dimensions' in mediaInfo && mediaInfo.dimensions) {
+      nodeProps.width = mediaInfo.dimensions.width;
+      nodeProps.height = mediaInfo.dimensions.height;
+    }
+
+    await this.neo4jClient!.run(
+      `MERGE (n:${nodeLabel} {uuid: $uuid})
+       SET n.url = $url,
+           n.file = $file,
+           n.projectId = $projectId,
+           n.format = $format,
+           n.hash = $hash,
+           n.sizeBytes = $sizeBytes,
+           n.ingestedAt = $ingestedAt
+           ${mediaInfo.category === 'image' && 'dimensions' in mediaInfo && mediaInfo.dimensions
+        ? ', n.width = $width, n.height = $height'
+        : ''}`,
+      nodeProps
+    );
+
+    // Update project cache
+    const cachedProject = this.registeredProjects.get(projectId);
+    if (cachedProject) {
+      cachedProject.nodeCount = await this.countProjectNodes(projectId);
+      cachedProject.lastAccessed = new Date();
+      await this.updateProjectMetadataInDb(projectId, { lastAccessed: cachedProject.lastAccessed });
+    }
+
+    console.log(`[Brain] Ingested media file: ${url} → project ${projectId} (${nodeLabel})`);
+    return { success: true, nodeId, nodeType: nodeLabel };
   }
 
   /**
@@ -1636,22 +1991,38 @@ volumes:
     const projectId = `web-${projectName.toLowerCase().replace(/\s+/g, '-')}`;
 
     if (!this.registeredProjects.has(projectId)) {
+      // Create a real directory for web pages: ~/.ragforge/web-pages/{projectId}
+      const webPagesDir = path.join(this.config.path, 'web-pages', projectId);
+      await fs.mkdir(webPagesDir, { recursive: true });
+
       const registered: RegisteredProject = {
         id: projectId,
-        path: `web://${projectName}`,
+        path: webPagesDir, // Use real absolute path instead of virtual URI
         type: 'web-crawl',
         lastAccessed: new Date(),
         nodeCount: 0,
         autoCleanup: true,
       };
       this.registeredProjects.set(projectId, registered);
-      // Persist metadata to Neo4j (Project node will be created by ingestion)
-      await this.updateProjectMetadataInDb(projectId, {
-        type: 'web-crawl',
-        lastAccessed: new Date(),
-        autoCleanup: true,
-        displayName: projectName,
-      });
+      
+      // Create or update Project node in Neo4j with rootPath
+      await this.neo4jClient!.run(
+        `MERGE (p:Project {projectId: $projectId})
+         SET p.rootPath = $rootPath,
+             p.type = $type,
+             p.lastAccessed = $lastAccessed,
+             p.autoCleanup = $autoCleanup,
+             p.displayName = $displayName,
+             p.uuid = coalesce(p.uuid, $projectId)`,
+        {
+          projectId,
+          rootPath: webPagesDir,
+          type: 'web-crawl',
+          lastAccessed: new Date().toISOString(),
+          autoCleanup: true,
+          displayName: projectName,
+        }
+      );
     }
 
     return projectId;
@@ -2016,13 +2387,21 @@ volumes:
         const score = record.get('score');
         const projectId = rawNode.projectId || 'unknown';
         const project = this.registeredProjects.get(projectId);
+        const projectPath = project?.path || 'unknown';
+        
+        // Build absolute file path: projectPath + "/" + node.file
+        const nodeFile = rawNode.file || rawNode.path || '';
+        const filePath = projectPath !== 'unknown' && nodeFile
+          ? path.join(projectPath, nodeFile)
+          : nodeFile || 'unknown';
 
         return {
           node: this.stripEmbeddingFields(rawNode),
           score,
           projectId,
-          projectPath: project?.path || 'unknown',
+          projectPath,
           projectType: project?.type || 'unknown',
+          filePath, // Absolute path to the file
         };
       });
     }
@@ -2176,13 +2555,21 @@ volumes:
             const score = record.get('score');
             const projectId = rawNode.projectId || 'unknown';
             const project = this.registeredProjects.get(projectId);
+            const projectPath = project?.path || 'unknown';
+            
+            // Build absolute file path: projectPath + "/" + node.file
+            const nodeFile = rawNode.file || rawNode.path || '';
+            const filePath = projectPath !== 'unknown' && nodeFile
+              ? path.join(projectPath, nodeFile)
+              : nodeFile || 'unknown';
 
             allResults.push({
               node: this.stripEmbeddingFields(rawNode),
               score,
               projectId,
-              projectPath: project?.path || 'unknown',
+              projectPath,
               projectType: project?.type || 'unknown',
+              filePath, // Absolute path to the file
             });
           }
         } catch (err: any) {
@@ -2217,13 +2604,21 @@ volumes:
 
                 const projectId = rawNode.projectId || 'unknown';
                 const project = this.registeredProjects.get(projectId);
+                const projectPath = project?.path || 'unknown';
+                
+                // Build absolute file path: projectPath + "/" + node.file
+                const nodeFile = rawNode.file || rawNode.path || '';
+                const filePath = projectPath !== 'unknown' && nodeFile
+                  ? path.join(projectPath, nodeFile)
+                  : nodeFile || 'unknown';
 
                 allResults.push({
                   node: this.stripEmbeddingFields(rawNode),
                   score,
                   projectId,
-                  projectPath: project?.path || 'unknown',
+                  projectPath,
                   projectType: project?.type || 'unknown',
+                  filePath, // Absolute path to the file
                 });
               }
             } catch (fallbackErr: any) {
@@ -2614,6 +3009,7 @@ volumes:
   async startWatching(
     projectPath: string,
     options: {
+      projectId?: string; // Optional: use provided projectId (for subdirectory/parent logic)
       includePatterns?: string[];
       excludePatterns?: string[];
       verbose?: boolean;
@@ -2621,7 +3017,9 @@ volumes:
     } = {}
   ): Promise<void> {
     const absolutePath = path.resolve(projectPath);
-    const projectId = ProjectRegistry.generateId(absolutePath);
+    // Use provided projectId if available (handles subdirectory/parent cases),
+    // otherwise generate from path
+    const projectId = options.projectId || ProjectRegistry.generateId(absolutePath);
 
     // Check if already watching
     if (this.activeWatchers.has(projectId)) {

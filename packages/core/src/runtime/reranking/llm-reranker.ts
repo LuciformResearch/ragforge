@@ -17,6 +17,7 @@ import type { SearchResult } from '../types/index.js';
 import type { EntityContext, EntityField } from '../types/entity-context.js';
 import { StructuredLLMExecutor } from '../llm/structured-llm-executor.js';
 import type { LLMStructuredCallConfig, OutputSchema } from '../llm/structured-llm-executor.js';
+import { UniqueIDHelper } from '../utils/UniqueIDHelper.js';
 
 export interface LLMRerankOptions {
   /**
@@ -182,7 +183,8 @@ export class LLMReranker {
     maxResults: number = 3
   ): string {
     const batch = results.slice(0, maxResults);
-    return this.buildPrompt(batch, userQuestion, queryContext, false);
+    const { prompt } = this.buildPrompt(batch, userQuestion, queryContext, false);
+    return prompt;
   }
 
   /**
@@ -190,46 +192,66 @@ export class LLMReranker {
    */
   async rerankWithExecutor(input: RerankInput): Promise<LLMRerankResult> {
     const {
-      batchSize = 10,
-      parallel = 5,
+      batchSize = 20, // Reduced from 100: smaller batches (~25k chars) processed in parallel for better performance
+      parallel = 10, // Increased from 5: process more batches concurrently
       minScore = 0.0,
       topK,
       withSuggestions = false
     } = this.options;
 
-    // Extract entities from SearchResults
-    const entities = input.results.map(r => r.entity);
+    // Create batches
+    const batches = this.createBatches(input.results, batchSize);
 
-    // Use StructuredLLMExecutor for reranking
-    const { evaluations, queryFeedback } = await this.executor.executeReranking(entities, {
-      userQuestion: input.userQuestion,
-      entityContext: this.entityContext,
-      llmProvider: this.llmProvider,
-      batchSize,
-      parallel,
-      withFeedback: withSuggestions,
-      getItemId: (entity, index) => this.getEntityId(entity, index),
-      contextData: input.queryContext ? { queryContext: input.queryContext } : undefined
-    });
+    // Process batches in parallel (up to `parallel` at a time)
+    const allResults: LLMRerankResult[] = [];
+    const batchPromises: Promise<LLMRerankResult>[] = [];
+    
+    for (let i = 0; i < batches.length; i++) {
+      const batch = batches[i];
+      const isFirstBatch = i === 0;
+      
+      // Only include suggestions in first batch
+      const batchPromise = this.evaluateBatch(
+        batch,
+        input.userQuestion,
+        input.queryContext,
+        withSuggestions && isFirstBatch
+      );
+      
+      batchPromises.push(batchPromise);
+      
+      // Limit concurrent batches - when we reach the limit, wait for them
+      if (batchPromises.length >= parallel || i === batches.length - 1) {
+        const results = await Promise.all(batchPromises);
+        allResults.push(...results);
+        batchPromises.length = 0;
+      }
+    }
 
-    // Convert ItemEvaluation to ScopeEvaluation (same structure)
-    const scopeEvaluations: ScopeEvaluation[] = evaluations
-      .filter(e => e.score >= minScore)
-      .map(e => ({
-        scopeId: e.id,
-        relevant: e.relevant ?? true,
-        score: e.score,
-        reasoning: e.reasoning
-      }));
+    // Collect all evaluations from all batches
+    const allEvaluations: ScopeEvaluation[] = [];
+    let queryFeedback: QueryFeedback | undefined;
 
-    // Sort and limit
-    scopeEvaluations.sort((a, b) => b.score - a.score);
-    const limited = topK !== undefined && topK > 0
-      ? scopeEvaluations.slice(0, topK)
-      : scopeEvaluations;
+    for (const result of allResults) {
+      allEvaluations.push(...result.evaluations);
+      
+      // Keep first query feedback if available
+      if (!queryFeedback && result.queryFeedback) {
+        queryFeedback = result.queryFeedback;
+      }
+    }
+
+    // Filter by minimum score
+    let filtered = allEvaluations.filter(e => e.score >= minScore);
+
+    // Sort by score (descending) and limit to topK if specified
+    filtered.sort((a, b) => b.score - a.score);
+    if (topK !== undefined && topK > 0) {
+      filtered = filtered.slice(0, topK);
+    }
 
     return {
-      evaluations: limited,
+      evaluations: filtered,
       queryFeedback
     };
   }
@@ -270,7 +292,7 @@ export class LLMReranker {
         }));
 
         const prompts = promptMetas.map(meta => {
-          const prompt = this.buildPrompt(
+          const { prompt } = this.buildPrompt(
             meta.batch,
             input.userQuestion,
             input.queryContext,
@@ -369,12 +391,123 @@ export class LLMReranker {
       return { evaluations };
     }
 
-    const prompt = this.buildPrompt(batch, userQuestion, queryContext, withSuggestions, agentIntention);
+    // Split batch into sub-batches based on token budget (~25k chars per batch)
+    const MAX_CHARS_PER_BATCH = 25000;
+    const subBatches = this.splitBatchBySize(batch, MAX_CHARS_PER_BATCH, userQuestion, queryContext, withSuggestions);
+
+    // Process sub-batches in parallel
+    const subBatchPromises = subBatches.map((subBatch, idx) => 
+      this.evaluateSubBatch(subBatch, userQuestion, queryContext, withSuggestions && idx === 0, agentIntention)
+    );
+
+    const subResults = await Promise.all(subBatchPromises);
+
+    // Combine results from all sub-batches
+    const allEvaluations: ScopeEvaluation[] = [];
+    let queryFeedback: QueryFeedback | undefined;
+
+    for (const result of subResults) {
+      allEvaluations.push(...result.evaluations);
+      if (!queryFeedback && result.queryFeedback) {
+        queryFeedback = result.queryFeedback;
+      }
+    }
+
+    return {
+      evaluations: allEvaluations,
+      queryFeedback
+    };
+  }
+
+  /**
+   * Split a batch into sub-batches that respect the max chars limit
+   */
+  private splitBatchBySize(
+    batch: SearchResult[],
+    maxChars: number,
+    userQuestion: string,
+    queryContext?: string,
+    withSuggestions: boolean = false
+  ): SearchResult[][] {
+    const subBatches: SearchResult[][] = [];
+    let currentBatch: SearchResult[] = [];
+    let currentSize = this.estimatePromptBaseSize(userQuestion, queryContext, withSuggestions);
+
+    for (const result of batch) {
+      // Estimate size for this item
+      const itemSize = this.estimateItemPromptSize(result);
+      const wouldExceed = currentSize + itemSize > maxChars;
+
+      if (wouldExceed && currentBatch.length > 0) {
+        // Start a new batch
+        subBatches.push(currentBatch);
+        currentBatch = [result];
+        currentSize = this.estimatePromptBaseSize(userQuestion, queryContext, false) + itemSize; // No suggestions in sub-batches
+      } else {
+        currentBatch.push(result);
+        currentSize += itemSize;
+      }
+    }
+
+    if (currentBatch.length > 0) {
+      subBatches.push(currentBatch);
+    }
+
+    return subBatches;
+  }
+
+  /**
+   * Estimate base prompt size (system prompt, user question, instructions)
+   */
+  private estimatePromptBaseSize(userQuestion: string, queryContext?: string, withSuggestions: boolean = false): number {
+    let size = 500; // System prompt overhead
+    size += userQuestion.length;
+    if (queryContext) {
+      size += queryContext.length;
+    }
+    size += 2000; // Instructions overhead
+    if (withSuggestions) {
+      size += 500; // Feedback schema overhead
+    }
+    return size;
+  }
+
+  /**
+   * Estimate prompt size for a single item
+   */
+  private estimateItemPromptSize(result: SearchResult): number {
+    const entity = result.entity;
+    let size = 100; // UUID hash and header overhead
+    
+    // Estimate size based on entity fields
+    for (const field of this.entityContext.fields) {
+      const value = (entity as any)[field.name];
+      if (value !== undefined && value !== null) {
+        const strValue = typeof value === 'string' ? value : JSON.stringify(value);
+        // Limit estimation to avoid huge values
+        size += Math.min(strValue.length, 2000);
+      }
+    }
+    
+    return size;
+  }
+
+  /**
+   * Evaluate a single sub-batch (actual LLM call)
+   */
+  private async evaluateSubBatch(
+    subBatch: SearchResult[],
+    userQuestion: string,
+    queryContext?: string,
+    withSuggestions: boolean = false,
+    agentIntention?: string
+  ): Promise<LLMRerankResult> {
+    const { prompt, uuidMap } = this.buildPrompt(subBatch, userQuestion, queryContext, withSuggestions, agentIntention);
 
     // Debug: log prompt if enabled
     if (this.options.debugPrompt) {
       console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('🔍 LLM RERANKER PROMPT');
+      console.log(`🔍 LLM RERANKER PROMPT (${subBatch.length} items, ${prompt.length} chars)`);
       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
       console.log(prompt);
       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
@@ -391,7 +524,7 @@ export class LLMReranker {
       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
     }
 
-    return this.parseResponse(response, batch);
+    return this.parseResponse(response, subBatch, uuidMap);
   }
 
   private buildPrompt(
@@ -400,7 +533,7 @@ export class LLMReranker {
     queryContext?: string,
     withSuggestions: boolean = false,
     agentIntention?: string
-  ): string {
+  ): { prompt: string; uuidMap: Map<string, string> } {
     // Detect if query explicitly asks for integration/usage (vs implementation)
     const queryLower = userQuestion.toLowerCase();
     const asksForIntegration = /\b(integrat|usage|use|how to use|config|configuration|setup|example|tutorial)\b/.test(queryLower);
@@ -430,8 +563,18 @@ ${this.entityContext.displayName} to evaluate:
 
 `;
 
+    // Create UUID mapping: hash → original UUID
+    const uuidMap = new Map<string, string>();
+    
     batch.forEach((result, idx) => {
       const entity = result.entity;
+      
+      // Get the entity UUID for reliable mapping (use getEntityId to get the real UUID)
+      const entityId = this.getEntityId(entity, idx);
+      
+      // Generate a deterministic short hash from the UUID using UniqueIDHelper
+      const hash = this.generateUuidHash(entityId);
+      uuidMap.set(hash, entityId);
 
       // Render required fields (typically in header line)
       const requiredFields = this.entityContext.fields.filter(f => f.required);
@@ -443,7 +586,10 @@ ${this.entityContext.displayName} to evaluate:
         const headerValue = this.formatValue(rawValue, field, LLMReranker.DEFAULT_HEADER_MAX);
         return headerValue ?? field.name;
       });
-      prompt += `[${idx}] ${headerParts.join(' - ')}
+      // Display hash instead of full UUID to avoid confusion
+      // The LLM should use this hash in the uuid attribute
+      prompt += `[uuid]: "${hash}"
+${headerParts.join(' - ')}
 `;
 
       // Render optional fields
@@ -480,7 +626,7 @@ ${this.entityContext.displayName} to evaluate:
     });
 
     prompt += `
-
+    
 IMPORTANT: You MUST respond with XML ONLY. Do NOT use JSON. Do NOT use markdown code blocks.
 
 Instructions:
@@ -497,10 +643,18 @@ Instructions:
 - INSTEAD, explain HOW and WHY using specific details
 - Output raw XML without any formatting or wrapping
 
-Example XML format (notice how reasons are SPECIFIC):
+CRITICAL: For the "uuid" attribute in each <item> tag:
+- You MUST copy the EXACT hash shown in [uuid]: "..." format in each item's header line
+- Example: If you see "[uuid]: \"a3f2b9c1\"", you MUST use exactly "a3f2b9c1" as the uuid value
+- Copy the ENTIRE string inside the quotes after "[uuid]: \"" - this is a short hash (8 characters)
+- Do NOT modify or generate new hashes - copy character by character from the prompt
+- Do NOT use numeric indices like "0", "1", "2" - use the exact hash shown
+- Each item starts with "[uuid]: \"" followed by the hash you must copy exactly
+
+Example XML format (notice the uuid values are hashes like "a3f2b9c1", "d4e5f6a7", NOT numeric indices):
 <evaluations>
-  <item id="0" score="0.9" reason="references the same keywords the user asked about and explains the overlap" />
-  <item id="1" score="0.2" reason="discusses an unrelated topic; the user query keywords never appear here" />
+  <item uuid="a3f2b9c1" score="0.9" reason="references the same keywords the user asked about and explains the overlap" />
+  <item uuid="d4e5f6a7" score="0.2" reason="discusses an unrelated topic; the user query keywords never appear here" />
 </evaluations>
 
 Your XML response:`;
@@ -511,8 +665,8 @@ Your XML response:`;
 Include query feedback in the same XML:
 
 <evaluations>
-  <item id="0" score="0.8" reason="..." />
-  <item id="1" score="0.3" reason="..." />
+  <item uuid="a3f2b9c1" score="0.8" reason="..." />
+  <item uuid="d4e5f6a7" score="0.3" reason="..." />
   <feedback quality="excellent|good|insufficient|poor">
     <suggestion type="add_filter|change_semantic|expand_relationships">
       description here
@@ -521,7 +675,7 @@ Include query feedback in the same XML:
 </evaluations>`;
     }
 
-    return prompt;
+    return { prompt, uuidMap };
   }
 
   /**
@@ -649,7 +803,7 @@ Include query feedback in the same XML:
     return this.formatValue(value, field);
   }
 
-  private parseResponse(response: string, batch: SearchResult[]): LLMRerankResult {
+  private parseResponse(response: string, batch: SearchResult[], uuidMap: Map<string, string>): LLMRerankResult {
     try {
       // Extract XML from response (remove markdown code blocks if present)
       let xmlText = response.trim();
@@ -685,7 +839,17 @@ Include query feedback in the same XML:
       const evaluations: ScopeEvaluation[] = itemElements.map((itemEl: any, idx) => {
         // Attributes are stored in a Map, use .get() to access them
         const attrs = itemEl.attributes as Map<string, string>;
-        const id = parseInt(attrs.get('id') || '0');
+        
+        // Get hash from uuid attribute (e.g., "a3f2b9c1")
+        const hash = attrs.get('uuid') || attrs.get('id') || '';
+        
+        // Map hash back to original UUID
+        const entityId = uuidMap.get(hash);
+        if (!entityId) {
+          // Hash not found in mapping - skip this evaluation
+          console.warn(`[LLMReranker] Hash "${hash}" not found in UUID mapping, skipping evaluation`);
+          return null;
+        }
 
         // Parse score (handle ranges like "0.2-0.5" by taking the max value)
         const scoreAttr = attrs.get('score') || '0.0';
@@ -700,15 +864,8 @@ Include query feedback in the same XML:
 
         const reason = attrs.get('reason') || '';
 
-        if (id >= batch.length) {
-          return null;
-        }
-
-        // Use the getEntityId helper to get a stable unique identifier
-        const entityId = this.getEntityId(batch[id].entity, id);
-
         const evaluation = {
-          scopeId: entityId,
+          scopeId: entityId, // Use original UUID from mapping
           relevant: score > 0.5,
           score: score,
           reasoning: reason
@@ -758,15 +915,28 @@ Include query feedback in the same XML:
       console.warn('Failed to parse LLM response:', error.message);
       console.warn('Response:', response);
 
+      // Fallback: create evaluations with original UUIDs
       return {
-        evaluations: batch.map(r => ({
-          scopeId: r.entity.uuid,
+        evaluations: batch.map((r, idx) => ({
+          scopeId: this.getEntityId(r.entity, idx),
           relevant: true,
           score: 0.5, // Neutral score
           reasoning: 'Failed to parse LLM response'
         }))
       };
     }
+  }
+
+  /**
+   * Generate a short hash from UUID using UniqueIDHelper
+   * Creates a deterministic hash that's short and readable for the LLM
+   */
+  private generateUuidHash(uuid: string): string {
+    // Use UniqueIDHelper to generate a deterministic UUID from the original UUID
+    // Then take first 8 characters for a short, readable hash
+    const deterministicUuid = UniqueIDHelper.GenerateDeterministicUUID(uuid);
+    // Use first 8 chars (before first dash) as hash - short and unambiguous
+    return deterministicUuid.split('-')[0].toLowerCase();
   }
 
   /**
@@ -781,7 +951,9 @@ Include query feedback in the same XML:
     strategy: LLMRerankOptions['scoreMerging'] = 'weighted',
     weights: { vector: number; llm: number } = { vector: 0.3, llm: 0.7 }
   ): SearchResult[] {
-    const evalMap = new Map(evaluations.map(e => [e.scopeId, e]));
+    // Create map with exact UUIDs for matching
+    // Note: We no longer need normalized matching since we use hash-based mapping
+    const evalMapExact = new Map(evaluations.map(e => [e.scopeId, e]));
 
     // Log for debugging UUID matching
     const entityIds = results.map((r, i) => this.getEntityId(r.entity, i));
@@ -804,9 +976,13 @@ Include query feedback in the same XML:
         const entityId = this.getEntityId(result.entity, index);
         return { result, entityId, index };
       })
-      .filter(({ entityId }) => evalMap.has(entityId))
+      .filter(({ entityId }) => {
+        // Match using exact UUID (from hash mapping)
+        return evalMapExact.has(entityId);
+      })
       .map(({ result, entityId, index }) => {
-        const evaluation = evalMap.get(entityId)!;
+        // Get evaluation using exact UUID match
+        const evaluation = evalMapExact.get(entityId)!;
 
         let finalScore: number;
 

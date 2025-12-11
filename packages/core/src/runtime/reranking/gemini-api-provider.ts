@@ -54,13 +54,14 @@ export class GeminiAPIProvider implements LLMProvider {
     const promptTokens = Math.ceil(promptSize / 4);
 
     // Calculate maxOutputTokens dynamically if not explicitly set via constructor
-    // If user provided maxOutputTokens in constructor, use it; otherwise calculate
-    // For tool calling agents, responses can be large (multiple tool calls with file content)
-    // Use generous bounds to avoid truncation
+    // Gemini Flash 2.0 supports 1M tokens context, so we can be generous
+    // For reranking with 100 items per batch, responses can be large
+    // Each evaluation: ~80-100 tokens (uuid + score + reasoning + relevant)
+    // 100 items × 100 tokens = 10000 tokens, so we need at least 12k for safety
     const calculatedMaxTokens = this.maxOutputTokens === 512 // Check if it's still the default
       ? Math.max(
-          Math.min(promptTokens * 2, 16384), // Cap at 16k tokens, allow 2x prompt for tool calls
-          4096 // Minimum 4k tokens for tool call responses
+          Math.min(promptTokens * 2, 16384), // Cap at 16k output tokens (allows 100-item batches)
+          12288 // Minimum 12k tokens for reranking responses (100 items × ~120 tokens each)
         )
       : this.maxOutputTokens; // Use user-provided value
 

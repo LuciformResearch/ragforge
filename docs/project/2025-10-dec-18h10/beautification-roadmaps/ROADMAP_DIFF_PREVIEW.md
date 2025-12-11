@@ -4,6 +4,8 @@
 
 Cette roadmap couvre l'implémentation d'un système permettant de prévisualiser les modifications de fichiers avant leur application, ainsi que de valider les lectures de fichiers (entières ou avec range de lignes), avec confirmation utilisateur et affichage en historique.
 
+> **📋 Vision Complète** : Pour la vision globale du système de validation pour tous les outils, voir [VALIDATION_SYSTEM_VISION.md](../VALIDATION_SYSTEM_VISION.md) et [VALIDATION_DESIGN_BY_TOOL.md](../VALIDATION_DESIGN_BY_TOOL.md).
+
 ## Objectifs
 
 - **Transparence** : L'utilisateur voit exactement ce qui va être modifié ou lu

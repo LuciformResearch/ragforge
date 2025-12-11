@@ -4,7 +4,7 @@
  * HTTP API server that keeps BrainManager alive between tool calls.
  * Provides persistent file watchers and faster tool execution.
  *
- * Port: 6666 (configurable via RAGFORGE_DAEMON_PORT)
+ * Port: 6969 (configurable via RAGFORGE_DAEMON_PORT)
  * Logs: ~/.ragforge/logs/daemon.log
  *
  * @since 2025-12-08

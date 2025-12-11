@@ -3,7 +3,7 @@
  */
 
 import type { Neo4jClient } from '../client/neo4j-client.js';
-import { formatLocalDate } from '../utils/timestamp.js';
+import { formatLocalDate, normalizeTimestamp } from '../utils/timestamp.js';
 import neo4j from 'neo4j-driver';
 import * as path from 'path';
 import * as fs from 'fs/promises';
@@ -155,8 +155,8 @@ export class ConversationStorage {
   // ==========================================================================
 
   async createConversation(data: ConversationMetadata): Promise<void> {
-    const created_at = data.created_at instanceof Date ? formatLocalDate(data.created_at) : data.created_at;
-    const updated_at = data.updated_at instanceof Date ? formatLocalDate(data.updated_at) : data.updated_at;
+    const created_at = normalizeTimestamp(data.created_at);
+    const updated_at = normalizeTimestamp(data.updated_at);
 
     await this.neo4j.run(
       `CREATE (c:Conversation {
@@ -286,7 +286,7 @@ export class ConversationStorage {
   async storeMessage(options: StoreMessageOptions): Promise<string> {
     const uuid = crypto.randomUUID();
     const charCount = options.content.length + (options.reasoning?.length || 0);
-    const timestamp = options.timestamp instanceof Date ? formatLocalDate(options.timestamp) : options.timestamp;
+    const timestamp = normalizeTimestamp(options.timestamp);
 
     await this.neo4j.run(
       `MATCH (c:Conversation {uuid: $conversation_id})
@@ -356,7 +356,27 @@ export class ConversationStorage {
 
     return result.records.map(r => {
       const props = r.get('m').properties;
-      const toolCalls = r.get('tool_calls').filter((tc: any) => tc.tool_name);
+      const rawToolCalls = r.get('tool_calls').filter((tc: any) => tc.tool_name);
+      
+      // Normalize timestamps in tool calls
+      const toolCalls = rawToolCalls.map((tc: any) => ({
+        uuid: tc.uuid,
+        message_id: tc.message_id,
+        tool_name: tc.tool_name,
+        arguments: tc.arguments,
+        timestamp: normalizeTimestamp(tc.timestamp),
+        duration_ms: tc.duration_ms,
+        success: tc.success,
+        iteration: tc.iteration,
+        result: tc.result ? {
+          uuid: tc.result.uuid,
+          success: tc.result.success,
+          result: tc.result.result,
+          error: tc.result.error,
+          timestamp: normalizeTimestamp(tc.result.timestamp),
+          result_size_bytes: tc.result.result_size_bytes
+        } : undefined
+      }));
 
       return {
         uuid: props.uuid,
@@ -364,7 +384,7 @@ export class ConversationStorage {
         role: props.role,
         content: props.content,
         reasoning: props.reasoning || undefined,
-        timestamp: props.timestamp,
+        timestamp: normalizeTimestamp(props.timestamp),
         token_count: props.token_count ? this.toNumber(props.token_count) : undefined,
         char_count: this.toNumber(props.char_count),
         embedding: props.embedding || undefined,
@@ -549,7 +569,7 @@ export class ConversationStorage {
   // ==========================================================================
 
   async storeSummary(summary: Summary): Promise<void> {
-    const created_at = summary.created_at instanceof Date ? formatLocalDate(summary.created_at) : summary.created_at;
+    const created_at = normalizeTimestamp(summary.created_at);
 
     // IMPORTANT: Summary node must have label "Summary" for vector index "summary_embedding_index" to work
     await this.neo4j.run(
@@ -829,24 +849,20 @@ export class ConversationStorage {
           }
         }
         
-        // Get timestamp (use message timestamp as fallback)
-        const timestamp = tc.timestamp 
-          ? (typeof tc.timestamp === 'string' ? new Date(tc.timestamp).getTime() : tc.timestamp)
-          : (typeof assistantMsg.timestamp === 'string' ? new Date(assistantMsg.timestamp).getTime() : new Date(assistantMsg.timestamp as Date).getTime());
+        // Normalize timestamp - use tool call timestamp or fallback to message timestamp
+        const toolTimestamp = normalizeTimestamp(tc.timestamp || assistantMsg.timestamp);
         
         return {
           toolName: tc.tool_name || 'unknown',
           toolArgs,
           toolResult,
           success: tc.result?.success ?? tc.success ?? true,
-          timestamp
+          timestamp: toolTimestamp
         };
       });
       
-      // Get timestamp (use assistant message timestamp)
-      const timestamp = typeof assistantMsg.timestamp === 'string'
-        ? new Date(assistantMsg.timestamp).getTime()
-        : new Date(assistantMsg.timestamp as Date).getTime();
+      // Normalize timestamp to ISO string
+      const timestamp = normalizeTimestamp(assistantMsg.timestamp);
       
       turns.push({
         userMessage: userMsg.content,
@@ -1152,7 +1168,27 @@ export class ConversationStorage {
               { uuid: props.uuid }
             );
 
-            const toolCalls = toolCallsResult.records[0]?.get('tool_calls') || [];
+            const rawToolCalls = toolCallsResult.records[0]?.get('tool_calls') || [];
+            
+            // Normalize timestamps in tool calls
+            const toolCalls = rawToolCalls.map((tc: any) => ({
+              uuid: tc.uuid,
+              message_id: tc.message_id,
+              tool_name: tc.tool_name,
+              arguments: tc.arguments,
+              timestamp: normalizeTimestamp(tc.timestamp),
+              duration_ms: tc.duration_ms,
+              success: tc.success,
+              iteration: tc.iteration,
+              result: tc.result ? {
+                uuid: tc.result.uuid,
+                success: tc.result.success,
+                result: tc.result.result,
+                error: tc.result.error,
+                timestamp: normalizeTimestamp(tc.result.timestamp),
+                result_size_bytes: tc.result.result_size_bytes
+              } : undefined
+            }));
 
             results.push({
               type: 'turn',
@@ -1162,7 +1198,7 @@ export class ConversationStorage {
                 role: props.role,
                 content: props.content,
                 reasoning: props.reasoning || undefined,
-                timestamp: props.timestamp,
+                timestamp: normalizeTimestamp(props.timestamp),
                 token_count: props.token_count ? this.toNumber(props.token_count) : undefined,
                 char_count: this.toNumber(props.char_count),
                 embedding: props.embedding || undefined,
@@ -1311,7 +1347,27 @@ export class ConversationStorage {
           { uuid: m.uuid }
         );
 
-        const toolCalls = toolCallsResult.records[0]?.get('tool_calls') || [];
+        const rawToolCalls = toolCallsResult.records[0]?.get('tool_calls') || [];
+        
+        // Normalize timestamps in tool calls
+        const toolCalls = rawToolCalls.map((tc: any) => ({
+          uuid: tc.uuid,
+          message_id: tc.message_id,
+          tool_name: tc.tool_name,
+          arguments: tc.arguments,
+          timestamp: normalizeTimestamp(tc.timestamp),
+          duration_ms: tc.duration_ms,
+          success: tc.success,
+          iteration: tc.iteration,
+          result: tc.result ? {
+            uuid: tc.result.uuid,
+            success: tc.result.success,
+            result: tc.result.result,
+            error: tc.result.error,
+            timestamp: normalizeTimestamp(tc.result.timestamp),
+            result_size_bytes: tc.result.result_size_bytes
+          } : undefined
+        }));
 
         results.push({
           type: 'turn',
@@ -1321,7 +1377,7 @@ export class ConversationStorage {
             role: m.role,
             content: m.content,
             reasoning: m.reasoning || undefined,
-            timestamp: m.timestamp,
+            timestamp: normalizeTimestamp(m.timestamp),
             token_count: m.token_count ? this.toNumber(m.token_count) : undefined,
             char_count: this.toNumber(m.char_count),
             embedding: m.embedding,
@@ -2008,7 +2064,7 @@ export class ConversationStorage {
     maxChars: number
   ): Promise<Array<{
     userMessage: string;
-    timestamp: Date | string;
+    timestamp: string;
     turnIndex: number;
   }>> {
     const allMessages = await this.getMessages(conversationId, {
@@ -2021,7 +2077,7 @@ export class ConversationStorage {
     
     const results: Array<{
       userMessage: string;
-      timestamp: Date | string;
+      timestamp: string;
       turnIndex: number;
     }> = [];
     
@@ -2036,7 +2092,7 @@ export class ConversationStorage {
       
       results.unshift({ // Add to beginning to maintain chronological order
         userMessage: msg.content,
-        timestamp: msg.timestamp,
+        timestamp: normalizeTimestamp(msg.timestamp),
         turnIndex: turnIndex--
       });
       
@@ -2573,7 +2629,7 @@ export class ConversationStorage {
           role: props.role,
           content: props.content,
           reasoning: props.reasoning || undefined,
-          timestamp: props.timestamp,
+          timestamp: normalizeTimestamp(props.timestamp),
           char_count: this.toNumber(props.char_count),
           embedding: props.embedding || undefined,
           similarity: r.get('score')
@@ -2665,7 +2721,8 @@ export class ConversationStorage {
             type: 'array',
             description: 'List of key search terms to use for fuzzy search (only if shouldSearch is true). Extract function names, class names, variable names, or code-related concepts from the user query. Each term should be a single word or short identifier (e.g., ["authentification", "login", "userService"]). Provide 2-5 terms max.',
             items: {
-              type: 'string'
+              type: 'string',
+              description: 'A search term (function name, class name, variable name, or code-related concept)'
             },
             required: false
           }
@@ -2818,6 +2875,294 @@ Then fuzzy search would NOT be relevant. Set shouldSearch to false and leave sea
     } catch (error) {
       console.debug('[ConversationStorage] Error in LLM-guided fuzzy search:', error);
       return [];
+    }
+  }
+
+  // ==========================================================================
+  // Dependency Hierarchy Extraction
+  // ==========================================================================
+
+  /**
+   * Extract dependency hierarchy for a scope found at file:line
+   * Used to enrich search results with their dependency context
+   */
+  async extractDependencyHierarchy(
+    file: string,
+    line: number,
+    options: {
+      depth?: number;
+      direction?: 'both' | 'consumes' | 'consumed_by' | 'inherits';
+      include_inheritance?: boolean;
+      max_nodes?: number;
+      include_code_snippets?: boolean;
+      code_snippet_lines?: number;
+    } = {}
+  ): Promise<{
+    root: {
+      uuid: string;
+      name: string;
+      type: string;
+      file: string;
+      startLine: number;
+      endLine: number;
+    } | null;
+    dependencies: Array<{
+      uuid: string;
+      name: string;
+      type: string;
+      file: string;
+      startLine: number;
+      endLine: number;
+      depth: number;
+      relationType: string;
+    }>;
+    consumers: Array<{
+      uuid: string;
+      name: string;
+      type: string;
+      file: string;
+      startLine: number;
+      endLine: number;
+      depth: number;
+      relationType: string;
+    }>;
+    code_snippets: Record<string, string>;
+    error?: string;
+  }> {
+    if (!this.brainManager) {
+      return {
+        root: null,
+        dependencies: [],
+        consumers: [],
+        code_snippets: {},
+        error: 'BrainManager not available',
+      };
+    }
+
+    try {
+      const neo4jClient = this.brainManager.getNeo4jClient();
+      if (!neo4jClient) {
+        return {
+          root: null,
+          dependencies: [],
+          consumers: [],
+          code_snippets: {},
+          error: 'Neo4j client not available',
+        };
+      }
+
+      const {
+        depth = 1, // Default depth=1 for automatic enrichment (shallow)
+        direction = 'both',
+        include_inheritance = false,
+        max_nodes = 20, // Lower limit for automatic enrichment
+        include_code_snippets = true,
+        code_snippet_lines = 10,
+      } = options;
+
+      // 1. Find scope at file:line
+      const scopeResult = await neo4jClient.run(
+        `MATCH (s:Scope)
+         WHERE s.file = $file
+           AND s.startLine IS NOT NULL
+           AND s.endLine IS NOT NULL
+           AND s.startLine <= $line
+           AND s.endLine >= $line
+           AND NOT s:MarkdownSection
+           AND NOT s:WebPage
+           AND NOT s:DocumentFile
+         RETURN s.uuid AS uuid, s.name AS name, s.type AS type, 
+                s.startLine AS startLine, s.endLine AS endLine,
+                s.file AS file
+         ORDER BY (s.endLine - s.startLine) ASC
+         LIMIT 1`,
+        { file, line: neo4j.int(line) }
+      );
+
+      if (scopeResult.records.length === 0) {
+        return {
+          root: null,
+          dependencies: [],
+          consumers: [],
+          code_snippets: {},
+          error: `No scope found at ${file}:${line}`,
+        };
+      }
+
+      const rootRecord = scopeResult.records[0];
+      const rootUuid = rootRecord.get('uuid') as string;
+      const rootName = rootRecord.get('name') as string;
+      const rootType = rootRecord.get('type') as string;
+      const rootStartLine = this.toNumber(rootRecord.get('startLine'));
+      const rootEndLine = this.toNumber(rootRecord.get('endLine'));
+
+      // 2. Build Cypher query for hierarchy extraction
+      let cypher = '';
+      const queryParams: Record<string, any> = {
+        rootUuid,
+        depth: neo4j.int(depth),
+        maxNodes: neo4j.int(max_nodes),
+      };
+
+      if (direction === 'both' || direction === 'consumes') {
+        cypher += `
+        MATCH path = (root:Scope {uuid: $rootUuid})-[:CONSUMES*1..${depth}]->(dep:Scope)
+        WHERE NOT dep.uuid = $rootUuid
+        WITH root, dep, length(path) AS depth_level
+        ORDER BY depth_level, dep.name
+        LIMIT $maxNodes
+        RETURN DISTINCT dep.uuid AS uuid, dep.name AS name, dep.type AS type,
+               dep.file AS file, dep.startLine AS startLine, dep.endLine AS endLine,
+               depth_level AS depth, 'CONSUMES' AS relationType
+        `;
+      }
+
+      if (direction === 'both') {
+        cypher += '\nUNION\n';
+      }
+
+      if (direction === 'both' || direction === 'consumed_by') {
+        cypher += `
+        MATCH path = (consumer:Scope)-[:CONSUMES*1..${depth}]->(root:Scope {uuid: $rootUuid})
+        WHERE NOT consumer.uuid = $rootUuid
+        WITH root, consumer, length(path) AS depth_level
+        ORDER BY depth_level, consumer.name
+        LIMIT $maxNodes
+        RETURN DISTINCT consumer.uuid AS uuid, consumer.name AS name, consumer.type AS type,
+               consumer.file AS file, consumer.startLine AS startLine, consumer.endLine AS endLine,
+               depth_level AS depth, 'CONSUMED_BY' AS relationType
+        `;
+      }
+
+      if (include_inheritance || direction === 'inherits') {
+        if (cypher.length > 0) {
+          cypher += '\nUNION\n';
+        }
+        cypher += `
+        MATCH path = (root:Scope {uuid: $rootUuid})-[:INHERITS_FROM*1..${depth}]->(parent:Scope)
+        WHERE NOT parent.uuid = $rootUuid
+        WITH root, parent, length(path) AS depth_level
+        ORDER BY depth_level, parent.name
+        LIMIT $maxNodes
+        RETURN DISTINCT parent.uuid AS uuid, parent.name AS name, parent.type AS type,
+               parent.file AS file, parent.startLine AS startLine, parent.endLine AS endLine,
+               depth_level AS depth, 'INHERITS_FROM' AS relationType
+        
+        UNION
+        
+        MATCH path = (child:Scope)-[:INHERITS_FROM*1..${depth}]->(root:Scope {uuid: $rootUuid})
+        WHERE NOT child.uuid = $rootUuid
+        WITH root, child, length(path) AS depth_level
+        ORDER BY depth_level, child.name
+        LIMIT $maxNodes
+        RETURN DISTINCT child.uuid AS uuid, child.name AS name, child.type AS type,
+               child.file AS file, child.startLine AS startLine, child.endLine AS endLine,
+               depth_level AS depth, 'INHERITED_BY' AS relationType
+        `;
+      }
+
+      const hierarchyResult = await neo4jClient.run(cypher, queryParams);
+
+      // 3. Parse results
+      const dependencies: Array<{
+        uuid: string;
+        name: string;
+        type: string;
+        file: string;
+        startLine: number;
+        endLine: number;
+        depth: number;
+        relationType: string;
+      }> = [];
+
+      const consumers: Array<{
+        uuid: string;
+        name: string;
+        type: string;
+        file: string;
+        startLine: number;
+        endLine: number;
+        depth: number;
+        relationType: string;
+      }> = [];
+
+      const codeSnippets: Record<string, string> = {};
+
+      for (const record of hierarchyResult.records) {
+        const uuid = record.get('uuid') as string;
+        const name = record.get('name') as string;
+        const type = record.get('type') as string;
+        const file = record.get('file') as string;
+        const startLine = this.toNumber(record.get('startLine'));
+        const endLine = this.toNumber(record.get('endLine'));
+        const depth = this.toNumber(record.get('depth'));
+        const relationType = record.get('relationType') as string;
+
+        if (uuid === rootUuid) continue;
+
+        const node = { uuid, name, type, file, startLine, endLine, depth, relationType };
+
+        if (relationType === 'CONSUMES' || relationType === 'INHERITS_FROM') {
+          dependencies.push(node);
+        } else if (relationType === 'CONSUMED_BY' || relationType === 'INHERITED_BY') {
+          consumers.push(node);
+        }
+
+        // Extract code snippet if requested
+        if (include_code_snippets) {
+          const sourceResult = await neo4jClient.run(
+            `MATCH (s:Scope {uuid: $uuid}) RETURN s.source AS source`,
+            { uuid }
+          );
+          if (sourceResult.records.length > 0) {
+            const source = sourceResult.records[0].get('source') as string | null;
+            if (source) {
+              const lines = source.split('\n');
+              const snippet = lines.slice(0, Math.min(code_snippet_lines, lines.length)).join('\n');
+              codeSnippets[uuid] = snippet;
+            }
+          }
+        }
+      }
+
+      // Extract root snippet
+      if (include_code_snippets) {
+        const rootSourceResult = await neo4jClient.run(
+          `MATCH (s:Scope {uuid: $uuid}) RETURN s.source AS source`,
+          { uuid: rootUuid }
+        );
+        if (rootSourceResult.records.length > 0) {
+          const source = rootSourceResult.records[0].get('source') as string | null;
+          if (source) {
+            const lines = source.split('\n');
+            const snippet = lines.slice(0, Math.min(code_snippet_lines, lines.length)).join('\n');
+            codeSnippets[rootUuid] = snippet;
+          }
+        }
+      }
+
+      return {
+        root: {
+          uuid: rootUuid,
+          name: rootName,
+          type: rootType,
+          file,
+          startLine: rootStartLine,
+          endLine: rootEndLine,
+        },
+        dependencies: dependencies.sort((a, b) => a.depth - b.depth),
+        consumers: consumers.sort((a, b) => a.depth - b.depth),
+        code_snippets: codeSnippets,
+      };
+    } catch (error: any) {
+      console.debug(`[ConversationStorage] Error extracting dependency hierarchy: ${error.message}`);
+      return {
+        root: null,
+        dependencies: [],
+        consumers: [],
+        code_snippets: {},
+        error: error.message,
+      };
     }
   }
 }

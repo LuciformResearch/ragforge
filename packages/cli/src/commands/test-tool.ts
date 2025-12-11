@@ -272,8 +272,8 @@ export function printTestToolHelp(): void {
   console.log(`
 ragforge test-tool - Test MCP tools directly from CLI
 
-By default, uses the Brain Daemon (port 6666) for faster execution.
-The daemon auto-starts if needed and shuts down after 5 min of inactivity.
+By default, uses the Brain Daemon (port 6969) for faster execution.
+The daemon auto-starts if needed and shuts down after 10 min of inactivity.
 
 Usage:
   ragforge test-tool <tool-name> [--param1=value1] [--param2=value2] [-v]

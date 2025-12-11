@@ -14,6 +14,7 @@ import { BrainManager, type QuickIngestOptions, type BrainSearchOptions, type Qu
 import type { GeneratedToolDefinition } from './types/index.js';
 import { getGlobalFetchCache, type CachedFetchResult } from './web-tools.js';
 import { NODE_SCHEMAS, CONTENT_NODE_LABELS, type NodeTypeSchema } from '../utils/node-schema.js';
+import * as path from 'path';
 
 /**
  * Context for brain tools
@@ -601,10 +602,11 @@ export function generateBrainSearchHandler(ctx: BrainToolsContext) {
               score: r.score,
             }));
             
-            // Create reranker with options
+            // Create reranker with options optimized for Gemini Flash 2.0 (1M token context)
+            // batchSize: 100 to match searchLimit (exactly 100 items per batch)
             // topK should be at least the searchLimit (we'll rerank all candidates, then apply limit)
             const reranker = new LLMReranker(provider, {
-              batchSize: 10,
+              batchSize: 100, // Exactly 100 items per batch (matches searchLimit)
               parallel: 5,
               minScore: 0.0,
               topK: searchLimit, // Rerank all candidates we retrieved
@@ -643,15 +645,33 @@ export function generateBrainSearchHandler(ctx: BrainToolsContext) {
               totalEvaluations: evaluationIds.length,
               totalResults: resultUuids.length,
               matchingIds: matchingIds.length,
-              missingInResults: missingInResults.slice(0, 5), // First 5 missing
-              missingInEvaluations: missingInEvaluations.slice(0, 5), // First 5 missing
+              missingInResults: missingInResults.slice(0, 10), // First 10 missing
+              missingInEvaluations: missingInEvaluations.slice(0, 10), // First 10 missing
               sampleEvaluationIds: evaluationIds.slice(0, 5),
               sampleResultUuids: resultUuids.slice(0, 5),
             });
             
+            // Warn if there's a significant mismatch
+            if (matchingIds.length === 0 && evaluationIds.length > 0 && resultUuids.length > 0) {
+              log.error('CRITICAL: No matching UUIDs between evaluations and results! This will cause empty results.', {
+                evaluationIdsSample: evaluationIds.slice(0, 10),
+                resultUuidsSample: resultUuids.slice(0, 10),
+              });
+            } else if (matchingIds.length < Math.min(evaluationIds.length, resultUuids.length) * 0.5) {
+              log.warn('Significant UUID mismatch detected', {
+                matchRatio: matchingIds.length / Math.min(evaluationIds.length, resultUuids.length),
+                matchingIds: matchingIds.length,
+                totalEvaluations: evaluationIds.length,
+                totalResults: resultUuids.length,
+              });
+            }
+            
+            // Store original results before reranking as fallback
+            const originalResultsBeforeReranking = [...result.results];
+            
             if (rerankResult.evaluations.length === 0) {
               log.warn('No evaluations returned from reranking, keeping original results');
-              // Keep original results if no evaluations
+              // Keep original results if no evaluations - result.results already contains them
             } else {
               // Merge scores using reranker's mergeScores method
               const rerankedResults = reranker.mergeScores(
@@ -669,7 +689,18 @@ export function generateBrainSearchHandler(ctx: BrainToolsContext) {
               
               if (rerankedResults.length === 0) {
                 log.warn('mergeScores returned empty array, keeping original results. This may indicate UUID mismatch between evaluations and results.');
-                // Keep original results if mergeScores filtered everything out
+                // Ensure we keep original results if mergeScores filtered everything out
+                // Apply original limit to preserve expected behavior
+                const limitedOriginalResults = originalResultsBeforeReranking.slice(0, originalLimit);
+                result = {
+                  ...result,
+                  results: limitedOriginalResults,
+                  totalCount: limitedOriginalResults.length,
+                };
+                log.info('Restored original results after empty mergeScores', {
+                  restoredCount: limitedOriginalResults.length,
+                  originalLimit,
+                });
               } else {
                 // Convert back to BrainSearchResult format
                 const finalResults = rerankedResults.map(r => {
@@ -687,20 +718,38 @@ export function generateBrainSearchHandler(ctx: BrainToolsContext) {
                   };
                 }).filter((r): r is typeof result.results[0] => r !== null);
                 
-                // Apply original limit after reranking (reranking was done on more candidates)
-                const limitedResults = finalResults.slice(0, originalLimit);
+                // Sort by score descending (highest scores first)
+                finalResults.sort((a, b) => b.score - a.score);
                 
-                result = {
-                  ...result,
-                  results: limitedResults,
-                  totalCount: limitedResults.length,
-                };
-                
-                log.info('Applied limit after reranking', {
-                  beforeLimit: finalResults.length,
-                  afterLimit: limitedResults.length,
-                  originalLimit,
-                });
+                // If finalResults is empty after mapping (UUID mismatch), fall back to original results
+                if (finalResults.length === 0) {
+                  log.warn('finalResults is empty after mapping, falling back to original results');
+                  const limitedOriginalResults = originalResultsBeforeReranking.slice(0, originalLimit);
+                  result = {
+                    ...result,
+                    results: limitedOriginalResults,
+                    totalCount: limitedOriginalResults.length,
+                  };
+                  log.info('Restored original results after empty finalResults', {
+                    restoredCount: limitedOriginalResults.length,
+                    originalLimit,
+                  });
+                } else {
+                  // Apply original limit after reranking (reranking was done on more candidates)
+                  const limitedResults = finalResults.slice(0, originalLimit);
+                  
+                  result = {
+                    ...result,
+                    results: limitedResults,
+                    totalCount: limitedResults.length,
+                  };
+                  
+                  log.info('Applied limit after reranking', {
+                    beforeLimit: finalResults.length,
+                    afterLimit: limitedResults.length,
+                    originalLimit,
+                  });
+                }
               }
             }
             
@@ -750,7 +799,7 @@ export function generateBrainSearchHandler(ctx: BrainToolsContext) {
  * - Flushes pending queue if watcher is active
  * - Waits for any ongoing ingestion
  */
-async function ensureProjectSynced(
+export async function ensureProjectSynced(
   brain: BrainManager,
   projectPath: string
 ): Promise<{ waited: boolean; watcherStarted: boolean; flushed: boolean }> {
@@ -1054,10 +1103,11 @@ Example usage:
 interface IngestWebPageResult {
   success: boolean;
   url: string;
-  title: string;
-  fromCache: boolean;
+  title?: string;
+  fromCache?: boolean;
   projectName: string;
   nodeId?: string;
+  nodeType?: string;
   /** Number of pages ingested (when depth > 0) */
   pagesIngested?: number;
   /** Child pages ingested (when depth > 0) */
@@ -1092,8 +1142,34 @@ export function generateIngestWebPageHandler(ctx: BrainToolsContext) {
     const cache = getGlobalFetchCache();
     const projectName = project_name || 'web-pages';
 
+    // Detect format from URL before fetching
+    const pathModule = await import('path');
+    const urlObj = new URL(url);
+    const pathname = urlObj.pathname.toLowerCase();
+    const ext = pathModule.extname(pathname).toLowerCase();
+    const documentExts = ['.pdf', '.docx', '.xlsx', '.xls', '.csv'];
+    const mediaExts = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico', '.bmp', '.tiff', '.gltf', '.glb'];
+    const isDocumentOrMedia = documentExts.includes(ext) || mediaExts.includes(ext);
+
     // For depth=0, simple single page ingest
     if (depth === 0) {
+      // If it's a document or media file, ingest directly without Playwright
+      if (isDocumentOrMedia) {
+        const result = await ctx.brain.ingestWebPage({
+          url,
+          projectName,
+          generateEmbeddings: generate_embeddings,
+        });
+        return {
+          success: result.success,
+          url,
+          projectName,
+          nodeId: result.nodeId,
+          nodeType: result.nodeType,
+        };
+      }
+
+      // Otherwise, use Playwright for HTML pages
       let cached: CachedFetchResult | undefined;
       let fromCache = false;
 
@@ -1144,12 +1220,13 @@ export function generateIngestWebPageHandler(ctx: BrainToolsContext) {
       });
 
       return {
-        success: true,
+        success: result.success,
         url: cached.url,
         title: cached.title,
         fromCache,
         projectName,
         nodeId: result.nodeId,
+        nodeType: result.nodeType,
       };
     }
 
@@ -1671,6 +1748,154 @@ export function generateStopWatcherHandler(ctx: BrainToolsContext) {
       return {
         success: false,
         message: `Failed to stop watcher: ${err.message}`,
+      };
+    }
+  };
+}
+
+// ============================================
+// Mark File Dirty Tool
+// ============================================
+
+/**
+ * Generate mark_file_dirty tool definition
+ */
+export function generateMarkFileDirtyTool(): GeneratedToolDefinition {
+  return {
+    name: 'mark_file_dirty',
+    description: `Mark a file as "dirty" to force re-ingestion.
+
+Marks all nodes associated with a file (Scope, File, MarkdownSection, CodeBlock, etc.)
+as schemaDirty = true and embeddingsDirty = true. This ensures the file will be
+re-ingested on the next ingestion cycle, even if its content hash hasn't changed.
+
+Useful when:
+- Files were modified outside the watcher's detection
+- You want to force re-ingestion of specific files
+- Files need to be re-indexed after schema changes
+
+The file will be automatically re-ingested by the watcher on the next ingestion cycle,
+or you can trigger immediate re-ingestion by setting queue_for_ingestion = true.
+
+Parameters:
+- file_path: Path to the file to mark as dirty (absolute or relative)
+- queue_for_ingestion: If true, immediately queue the file for re-ingestion (default: false)
+- project_path: Optional project path to find the file (default: searches all projects)
+
+Example: mark_file_dirty({ file_path: "src/utils.ts", queue_for_ingestion: true })`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        file_path: {
+          type: 'string',
+          description: 'Path to the file to mark as dirty (absolute or relative)',
+        },
+        queue_for_ingestion: {
+          type: 'boolean',
+          description: 'If true, immediately queue the file for re-ingestion (default: false)',
+        },
+        project_path: {
+          type: 'string',
+          description: 'Optional project path to find the file (default: searches all projects)',
+        },
+      },
+      required: ['file_path'],
+    },
+  };
+}
+
+/**
+ * Generate handler for mark_file_dirty
+ */
+export function generateMarkFileDirtyHandler(ctx: BrainToolsContext) {
+  return async (params: {
+    file_path: string;
+    queue_for_ingestion?: boolean;
+    project_path?: string;
+  }): Promise<{
+    success: boolean;
+    nodes_marked: number;
+    file_path: string;
+    relative_path?: string;
+    project_id?: string;
+    queued?: boolean;
+    message?: string;
+  }> => {
+    const { file_path, queue_for_ingestion = false, project_path } = params;
+    const pathModule = await import('path');
+
+    // Resolve absolute path
+    const absolutePath = pathModule.isAbsolute(file_path)
+      ? file_path
+      : project_path
+        ? pathModule.resolve(project_path, file_path)
+        : pathModule.resolve(process.cwd(), file_path);
+
+    // Find project for this file
+    const project = await findProjectForFile(ctx.brain, absolutePath);
+    if (!project) {
+      return {
+        success: false,
+        nodes_marked: 0,
+        file_path: absolutePath,
+        message: `File not found in any ingested project: ${absolutePath}`,
+      };
+    }
+
+    // Calculate relative path from project root
+    const relativePath = pathModule.relative(project.path, absolutePath);
+
+    // Check Neo4j client availability
+    const neo4jClient = ctx.brain.getNeo4jClient();
+    if (!neo4jClient) {
+      return {
+        success: false,
+        nodes_marked: 0,
+        file_path: absolutePath,
+        relative_path: relativePath,
+        project_id: project.id,
+        message: 'Neo4j client not available',
+      };
+    }
+
+    try {
+      // Mark all nodes associated with this file as dirty
+      const result = await neo4jClient.run(
+        `MATCH (n)
+         WHERE n.file = $filePath AND n.projectId = $projectId
+         SET n.schemaDirty = true, n.embeddingsDirty = true
+         RETURN count(n) AS count`,
+        { filePath: relativePath, projectId: project.id }
+      );
+
+      const nodesMarked = result.records.length > 0 ? (result.records[0]?.get('count')?.toNumber() || 0) : 0;
+
+      let queued = false;
+      if (queue_for_ingestion && nodesMarked > 0) {
+        // Queue file for immediate re-ingestion
+        ctx.brain.queueFileChange(absolutePath, 'updated');
+        queued = true;
+      }
+
+      return {
+        success: true,
+        nodes_marked: nodesMarked,
+        file_path: absolutePath,
+        relative_path: relativePath,
+        project_id: project.id,
+        queued,
+        message: queued
+          ? `Marked ${nodesMarked} node(s) as dirty and queued for re-ingestion`
+          : `Marked ${nodesMarked} node(s) as dirty (will be re-ingested on next cycle)`,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        nodes_marked: 0,
+        file_path: absolutePath,
+        relative_path: relativePath,
+        project_id: project.id,
+        message: `Failed to mark file as dirty: ${err.message}`,
       };
     }
   };
@@ -2455,15 +2680,16 @@ export function generateBrainTools(): GeneratedToolDefinition[] {
     generateListWatchersTool(),
     generateStartWatcherTool(),
     generateStopWatcherTool(),
-    // Brain-aware file tools
-    generateBrainReadFileTool(),
-    generateBrainWriteFileTool(),
-    generateBrainCreateFileTool(),
-    generateBrainEditFileTool(),
-    generateBrainDeletePathTool(),
+    // File dirty marking
+    generateMarkFileDirtyTool(),
+    // Note: Brain-aware file tools (read_file, write_file, create_file, edit_file, delete_path)
+    // are no longer exposed as separate tools. They are automatically handled by the
+    // regular file tools via the onFileModified callback when brain is available.
     // Advanced: schema and direct Cypher queries
     generateGetSchemaTool(),
     generateRunCypherTool(),
+    // Dependency analysis
+    generateExtractDependencyHierarchyTool(),
     // User communication
     generateNotifyUserTool(),
     generateUpdateTodosTool(),
@@ -2489,15 +2715,16 @@ export function generateBrainToolHandlers(ctx: BrainToolsContext): Record<string
     list_watchers: generateListWatchersHandler(ctx),
     start_watcher: generateStartWatcherHandler(ctx),
     stop_watcher: generateStopWatcherHandler(ctx),
-    // Brain-aware file tools
-    read_file: generateBrainReadFileHandler(ctx),
-    write_file: generateBrainWriteFileHandler(ctx),
-    create_file: generateBrainCreateFileHandler(ctx),
-    edit_file: generateBrainEditFileHandler(ctx),
-    delete_path: generateBrainDeletePathHandler(ctx),
+    // File dirty marking
+    mark_file_dirty: generateMarkFileDirtyHandler(ctx),
+    // Note: Brain-aware file tools (read_file, write_file, create_file, edit_file, delete_path)
+    // are no longer exposed as separate handlers. They are automatically handled by the
+    // regular file tools via the onFileModified callback when brain is available.
     // Advanced: schema and direct Cypher queries
     get_schema: generateGetSchemaHandler(),
     run_cypher: generateRunCypherHandler(ctx),
+    // Dependency analysis
+    extract_dependency_hierarchy: generateExtractDependencyHierarchyHandler(ctx),
     // User communication
     notify_user: generateNotifyUserHandler(),
     update_todos: generateUpdateTodosHandler(),
@@ -3074,6 +3301,695 @@ export function generateRunCypherHandler(ctx: BrainToolsContext) {
     // - Query execution
     // - Result conversion
     return ctx.brain.runCypher(params.query, params.params || {});
+  };
+}
+
+// ============================================
+// Extract Dependency Hierarchy Tool
+// ============================================
+
+/**
+ * Generate extract_dependency_hierarchy tool definition
+ */
+export function generateExtractDependencyHierarchyTool(): GeneratedToolDefinition {
+  return {
+    name: 'extract_dependency_hierarchy',
+    section: 'rag_ops',
+    description: `Extract dependency hierarchy (CONSUMES/CONSUMED_BY) from grep/fuzzy search results.
+
+Takes grep/fuzzy search results (file + line) and builds a dependency graph showing:
+- What the scope consumes (dependencies)
+- What consumes the scope (consumers)
+- Recursive traversal up to specified depth
+- Relevant code snippets for each scope in the hierarchy
+
+Can be used in two ways:
+1. Single scope: Provide file + line directly
+2. Batch from grep/fuzzy results: Provide results array from grep_files or search_files
+
+Parameters:
+- file: File path (relative to project root) - required if not using results
+- line: Line number in the file - required if not using results
+- results: Array of results from grep_files or search_files - alternative to file/line
+- depth: Maximum depth for recursive traversal (default: 2)
+- direction: 'both' (default), 'consumes' (dependencies), 'consumed_by' (consumers), or 'inherits' (inheritance hierarchy)
+- include_inheritance: Include INHERITS_FROM relationships (default: false)
+- max_nodes: Maximum number of nodes to return per scope (default: 50)
+- include_code_snippets: Extract relevant code lines for each scope (default: true)
+- code_snippet_lines: Number of lines to extract per scope (default: 10)
+- max_scopes: Maximum number of scopes to process when using results (default: 10)
+
+Returns a structured dependency graph with:
+- root: The scope found at file:line (or array of roots if using results)
+- dependencies: Scopes that root consumes (recursive)
+- consumers: Scopes that consume root (recursive)
+- graph: Full graph structure for visualization
+- code_snippets: Relevant code snippets for each scope
+
+Example (single): extract_dependency_hierarchy({ file: "src/auth.ts", line: 42, depth: 2 })
+Example (batch): extract_dependency_hierarchy({ results: grepResults.matches, depth: 1 })`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        file: {
+          type: 'string',
+          description: 'File path (relative to project root)',
+        },
+        line: {
+          type: 'number',
+          description: 'Line number in the file',
+        },
+        depth: {
+          type: 'number',
+          description: 'Maximum depth for recursive traversal (default: 2)',
+          default: 2,
+        },
+        direction: {
+          type: 'string',
+          enum: ['both', 'consumes', 'consumed_by', 'inherits'],
+          description: 'Direction of traversal: both (default), consumes (dependencies), consumed_by (consumers), or inherits (inheritance hierarchy)',
+          default: 'both',
+        },
+        include_inheritance: {
+          type: 'boolean',
+          description: 'Include INHERITS_FROM relationships in addition to CONSUMES (default: false)',
+          default: false,
+        },
+        max_nodes: {
+          type: 'number',
+          description: 'Maximum number of nodes to return (default: 50)',
+          default: 50,
+        },
+        include_code_snippets: {
+          type: 'boolean',
+          description: 'Extract relevant code lines for each scope (default: true)',
+          default: true,
+        },
+        code_snippet_lines: {
+          type: 'number',
+          description: 'Number of lines to extract per scope (default: 10)',
+          default: 10,
+        },
+        results: {
+          type: 'array',
+          description: 'Array of results from grep_files or search_files (alternative to file/line)',
+          items: {
+            type: 'object',
+            properties: {
+              file: { type: 'string' },
+              line: { type: 'number' },
+              content: { type: 'string' },
+              match: { type: 'string' },
+            },
+          },
+        },
+        max_scopes: {
+          type: 'number',
+          description: 'Maximum number of scopes to process when using results (default: 10)',
+          default: 10,
+        },
+      },
+      // Either file+line OR results must be provided
+    },
+  };
+}
+
+/**
+ * Helper: Extract relevant code lines from a scope
+ */
+async function extractCodeSnippet(
+  neo4jClient: any,
+  scopeUuid: string,
+  snippetLines: number
+): Promise<string | null> {
+  try {
+    // Get source from Neo4j
+    const sourceResult = await neo4jClient.run(
+      `MATCH (s:Scope {uuid: $uuid})
+       RETURN s.source AS source`,
+      { uuid: scopeUuid }
+    );
+
+    if (sourceResult.records.length > 0) {
+      const source = sourceResult.records[0].get('source') as string | null;
+      if (source) {
+        // Extract first few lines from source (signature + beginning)
+        const lines = source.split('\n');
+        const snippet = lines.slice(0, Math.min(snippetLines, lines.length)).join('\n');
+        return snippet;
+      }
+    }
+
+    return null;
+  } catch (error) {
+    return null;
+  }
+}
+
+/**
+ * Generate handler for extract_dependency_hierarchy
+ */
+export function generateExtractDependencyHierarchyHandler(ctx: BrainToolsContext) {
+  return async (params: {
+    file?: string;
+    line?: number;
+    results?: Array<{ file: string; line: number; content?: string; match?: string }>;
+    depth?: number;
+    direction?: 'both' | 'consumes' | 'consumed_by' | 'inherits';
+    include_inheritance?: boolean;
+    max_nodes?: number;
+    include_code_snippets?: boolean;
+    code_snippet_lines?: number;
+    max_scopes?: number;
+  }) => {
+    const {
+      file,
+      line,
+      results,
+      depth = 2,
+      direction = 'both',
+      include_inheritance = false,
+      max_nodes = 50,
+      include_code_snippets = true,
+      code_snippet_lines = 10,
+      max_scopes = 10,
+    } = params;
+
+    // Validate input: either file+line OR results must be provided
+    if (!results && (!file || line === undefined)) {
+      return {
+        error: 'Either file+line or results array must be provided',
+        root: null,
+        dependencies: [],
+        consumers: [],
+        graph: { nodes: [], edges: [] },
+        code_snippets: {},
+      };
+    }
+
+    // Ensure projects are synced before extraction (like brain_search does)
+    // This starts watchers if not active and waits for ingestion to complete
+    // Note: ensureProjectSynced may initialize the Neo4j connection, so call it first
+    const projects = ctx.brain.listProjects();
+    for (const project of projects) {
+      try {
+        await ensureProjectSynced(ctx.brain, project.path);
+      } catch (err: any) {
+        // Continue if sync fails - extraction can still work
+      }
+    }
+
+    // Wait for ingestion lock if needed (for data consistency)
+    const ingestionLock = ctx.brain.getIngestionLock();
+    if (ingestionLock.isLocked()) {
+      await ingestionLock.waitForUnlock(300000); // 5 minutes timeout
+    }
+
+    // Check Neo4j client availability after syncing (like brain_search pattern)
+    const neo4j = ctx.brain.getNeo4jClient();
+    if (!neo4j) {
+      return {
+        error: 'Neo4j client not available',
+        root: null,
+        dependencies: [],
+        consumers: [],
+        graph: { nodes: [], edges: [] },
+        code_snippets: {},
+      };
+    }
+
+    // If results provided, process batch
+    if (results && results.length > 0) {
+      return await processBatchResults(ctx, results, {
+        depth,
+        direction,
+        include_inheritance,
+        max_nodes,
+        include_code_snippets,
+        code_snippet_lines,
+        max_scopes,
+      });
+    }
+
+    // Otherwise, process single file+line
+    return await processSingleScope(ctx, file!, line!, {
+      depth,
+      direction,
+      include_inheritance,
+      max_nodes,
+      include_code_snippets,
+      code_snippet_lines,
+    });
+  };
+}
+
+/**
+ * Normalize file path to match Neo4j storage format
+ * Tries multiple formats: with/without packages/, relative/absolute
+ */
+function normalizeFilePath(file: string, projectRoot?: string): string[] {
+  const candidates: string[] = [];
+  
+  // Normalize the path (remove ./ and ../)
+  const normalized = path.normalize(file).replace(/^\.\//, '');
+  
+  // Remove leading slash if present
+  const withoutLeadingSlash = normalized.replace(/^\//, '');
+  
+  // Try different formats
+  candidates.push(withoutLeadingSlash); // Most common: relative path without packages/
+  
+  // Try with packages/ prefix removed
+  if (withoutLeadingSlash.startsWith('packages/')) {
+    candidates.push(withoutLeadingSlash.replace(/^packages\//, ''));
+  }
+  
+  // Try adding packages/ if not present
+  if (!withoutLeadingSlash.startsWith('packages/')) {
+    candidates.push(`packages/${withoutLeadingSlash}`);
+  }
+  
+  // Try relative to project root if provided
+  if (projectRoot) {
+    try {
+      const relativePath = path.relative(projectRoot, path.resolve(projectRoot, withoutLeadingSlash));
+      if (relativePath && relativePath !== withoutLeadingSlash) {
+        candidates.push(relativePath);
+      }
+    } catch {
+      // Ignore errors in path resolution
+    }
+  }
+  
+  // Remove duplicates while preserving order
+  return [...new Set(candidates)];
+}
+
+/**
+ * Process single scope extraction
+ */
+async function processSingleScope(
+  ctx: BrainToolsContext,
+  file: string,
+  line: number,
+  options: {
+    depth: number;
+    direction: 'both' | 'consumes' | 'consumed_by' | 'inherits';
+    include_inheritance: boolean;
+    max_nodes: number;
+    include_code_snippets: boolean;
+    code_snippet_lines: number;
+  }
+) {
+  const {
+    depth,
+    direction,
+    include_inheritance,
+    max_nodes,
+    include_code_snippets,
+    code_snippet_lines,
+  } = options;
+
+    const neo4j = ctx.brain.getNeo4jClient();
+    if (!neo4j) {
+      return {
+        error: 'Neo4j client not available',
+        root: null,
+        dependencies: [],
+        consumers: [],
+        graph: { nodes: [], edges: [] },
+        code_snippets: {},
+      };
+    }
+
+    const neo4jDriver = await import('neo4j-driver');
+    const toNumber = (value: any): number => {
+      if (typeof value === 'number') return value;
+      if (value?.toNumber) return value.toNumber();
+      return 0;
+    };
+
+    try {
+      // Normalize file path - try multiple formats
+      const fileCandidates = normalizeFilePath(file);
+      
+      // 1. Trouver le scope correspondant à file:line (try multiple path formats)
+      let scopeResult: any = null;
+      for (const candidateFile of fileCandidates) {
+        const result = await neo4j.run(
+          `MATCH (s:Scope)
+           WHERE s.file = $file
+             AND s.startLine IS NOT NULL
+             AND s.endLine IS NOT NULL
+             AND s.startLine <= $line
+             AND s.endLine >= $line
+             AND NOT s:MarkdownSection
+             AND NOT s:WebPage
+             AND NOT s:DocumentFile
+           RETURN s.uuid AS uuid, s.name AS name, s.type AS type, 
+                  s.startLine AS startLine, s.endLine AS endLine,
+                  s.file AS file, s.source AS source
+           ORDER BY (s.endLine - s.startLine) ASC
+           LIMIT 1`,
+          { file: candidateFile, line: neo4jDriver.int(line) }
+        );
+        
+        if (result.records.length > 0) {
+          scopeResult = result;
+          break; // Found a match, stop trying other formats
+        }
+      }
+
+      if (!scopeResult || scopeResult.records.length === 0) {
+        return {
+          error: `No scope found at ${file}:${line}`,
+          root: null,
+          dependencies: [],
+          consumers: [],
+          graph: { nodes: [], edges: [] },
+          code_snippets: {},
+        };
+      }
+
+      const rootRecord = scopeResult.records[0];
+      const rootUuid = rootRecord.get('uuid') as string;
+      const rootName = rootRecord.get('name') as string;
+      const rootType = rootRecord.get('type') as string;
+      const rootStartLine = toNumber(rootRecord.get('startLine'));
+      const rootEndLine = toNumber(rootRecord.get('endLine'));
+
+      // 2. Construire la requête Cypher pour extraire la hiérarchie
+      let cypher = '';
+      const queryParams: Record<string, any> = {
+        rootUuid,
+        depth: neo4jDriver.int(depth),
+        maxNodes: neo4jDriver.int(max_nodes),
+      };
+
+      if (direction === 'both' || direction === 'consumes') {
+        // Dependencies: ce que le scope consomme (récursif)
+        cypher += `
+        // Dependencies (what root consumes)
+        MATCH path = (root:Scope {uuid: $rootUuid})-[:CONSUMES*1..${depth}]->(dep:Scope)
+        WHERE NOT dep.uuid = $rootUuid
+        WITH root, dep, length(path) AS depth_level
+        ORDER BY depth_level, dep.name
+        LIMIT $maxNodes
+        RETURN DISTINCT dep.uuid AS uuid, dep.name AS name, dep.type AS type,
+               dep.file AS file, dep.startLine AS startLine, dep.endLine AS endLine,
+               depth_level AS depth, 'CONSUMES' AS relationType
+        `;
+      }
+
+      if (direction === 'both') {
+        cypher += '\nUNION\n';
+      }
+
+      if (direction === 'both' || direction === 'consumed_by') {
+        // Consumers: ce qui consomme le scope (récursif)
+        cypher += `
+        // Consumers (what consumes root)
+        MATCH path = (consumer:Scope)-[:CONSUMES*1..${depth}]->(root:Scope {uuid: $rootUuid})
+        WHERE NOT consumer.uuid = $rootUuid
+        WITH root, consumer, length(path) AS depth_level
+        ORDER BY depth_level, consumer.name
+        LIMIT $maxNodes
+        RETURN DISTINCT consumer.uuid AS uuid, consumer.name AS name, consumer.type AS type,
+               consumer.file AS file, consumer.startLine AS startLine, consumer.endLine AS endLine,
+               depth_level AS depth, 'CONSUMED_BY' AS relationType
+        `;
+      }
+
+      // Si include_inheritance est activé, ajouter les relations INHERITS_FROM
+      if (include_inheritance || direction === 'inherits') {
+        if (cypher.length > 0) {
+          cypher += '\nUNION\n';
+        }
+        cypher += `
+        // Inheritance hierarchy (parents)
+        MATCH path = (root:Scope {uuid: $rootUuid})-[:INHERITS_FROM*1..${depth}]->(parent:Scope)
+        WHERE NOT parent.uuid = $rootUuid
+        WITH root, parent, length(path) AS depth_level
+        ORDER BY depth_level, parent.name
+        LIMIT $maxNodes
+        RETURN DISTINCT parent.uuid AS uuid, parent.name AS name, parent.type AS type,
+               parent.file AS file, parent.startLine AS startLine, parent.endLine AS endLine,
+               depth_level AS depth, 'INHERITS_FROM' AS relationType
+        
+        UNION
+        
+        // Inheritance hierarchy (children)
+        MATCH path = (child:Scope)-[:INHERITS_FROM*1..${depth}]->(root:Scope {uuid: $rootUuid})
+        WHERE NOT child.uuid = $rootUuid
+        WITH root, child, length(path) AS depth_level
+        ORDER BY depth_level, child.name
+        LIMIT $maxNodes
+        RETURN DISTINCT child.uuid AS uuid, child.name AS name, child.type AS type,
+               child.file AS file, child.startLine AS startLine, child.endLine AS endLine,
+               depth_level AS depth, 'INHERITED_BY' AS relationType
+        `;
+      }
+
+      const hierarchyResult = await neo4j.run(cypher, queryParams);
+
+      // 3. Construire le graphe structuré
+      const dependencies: Array<{
+        uuid: string;
+        name: string;
+        type: string;
+        file: string;
+        startLine: number;
+        endLine: number;
+        depth: number;
+        relationType: string;
+      }> = [];
+
+      const consumers: Array<{
+        uuid: string;
+        name: string;
+        type: string;
+        file: string;
+        startLine: number;
+        endLine: number;
+        depth: number;
+        relationType: string;
+      }> = [];
+
+      const nodes = new Map<string, {
+        uuid: string;
+        name: string;
+        type: string;
+        file: string;
+        startLine: number;
+        endLine: number;
+      }>();
+
+      const edges: Array<{
+        from: string;
+        to: string;
+        type: string;
+        depth: number;
+      }> = [];
+
+      // Ajouter le root
+      nodes.set(rootUuid, {
+        uuid: rootUuid,
+        name: rootName,
+        type: rootType,
+        file,
+        startLine: rootStartLine,
+        endLine: rootEndLine,
+      });
+
+      for (const record of hierarchyResult.records) {
+        const uuid = record.get('uuid') as string;
+        const name = record.get('name') as string;
+        const type = record.get('type') as string;
+        const file = record.get('file') as string;
+        const startLine = toNumber(record.get('startLine'));
+        const endLine = toNumber(record.get('endLine'));
+        const depth = toNumber(record.get('depth'));
+        const relationType = record.get('relationType') as string;
+
+        if (uuid === rootUuid) {
+          continue; // Skip root itself
+        }
+
+        nodes.set(uuid, { uuid, name, type, file, startLine, endLine });
+
+        if (relationType === 'CONSUMES' || relationType === 'INHERITS_FROM') {
+          dependencies.push({ uuid, name, type, file, startLine, endLine, depth, relationType });
+          edges.push({ from: rootUuid, to: uuid, type: relationType, depth });
+        } else if (relationType === 'CONSUMED_BY' || relationType === 'INHERITED_BY') {
+          consumers.push({ uuid, name, type, file, startLine, endLine, depth, relationType });
+          edges.push({ from: uuid, to: rootUuid, type: relationType, depth });
+        }
+      }
+
+      // 4. Extraire les snippets de code si demandé
+      const codeSnippets: Record<string, string> = {};
+      if (include_code_snippets) {
+        // Extract snippet for root
+        const rootSnippet = await extractCodeSnippet(
+          neo4j,
+          rootUuid,
+          code_snippet_lines
+        );
+        if (rootSnippet) {
+          codeSnippets[rootUuid] = rootSnippet;
+        }
+
+        // Extract snippets for all nodes in hierarchy
+        for (const node of nodes.values()) {
+          if (node.uuid === rootUuid) continue; // Already done
+          
+          const snippet = await extractCodeSnippet(
+            neo4j,
+            node.uuid,
+            code_snippet_lines
+          );
+          if (snippet) {
+            codeSnippets[node.uuid] = snippet;
+          }
+        }
+      }
+
+      return {
+        root: {
+          uuid: rootUuid,
+          name: rootName,
+          type: rootType,
+          file,
+          startLine: rootStartLine,
+          endLine: rootEndLine,
+        },
+        dependencies: dependencies.sort((a, b) => a.depth - b.depth),
+        consumers: consumers.sort((a, b) => a.depth - b.depth),
+        graph: {
+          nodes: Array.from(nodes.values()),
+          edges,
+        },
+        code_snippets: codeSnippets,
+        stats: {
+          total_nodes: nodes.size,
+          dependencies_count: dependencies.length,
+          consumers_count: consumers.length,
+          max_depth_reached: Math.max(
+            ...dependencies.map(d => d.depth),
+            ...consumers.map(c => c.depth),
+            0
+          ),
+        },
+      };
+    } catch (error: any) {
+      return {
+        error: error.message,
+        root: null,
+        dependencies: [],
+        consumers: [],
+        graph: { nodes: [], edges: [] },
+        code_snippets: {},
+      };
+    }
+}
+
+/**
+ * Process batch results from grep_files or search_files
+ */
+async function processBatchResults(
+  ctx: BrainToolsContext,
+  results: Array<{ file: string; line: number; content?: string; match?: string }>,
+  options: {
+    depth: number;
+    direction: 'both' | 'consumes' | 'consumed_by' | 'inherits';
+    include_inheritance: boolean;
+    max_nodes: number;
+    include_code_snippets: boolean;
+    code_snippet_lines: number;
+    max_scopes: number;
+  }
+) {
+  const {
+    depth,
+    direction,
+    include_inheritance,
+    max_nodes,
+    include_code_snippets,
+    code_snippet_lines,
+    max_scopes,
+  } = options;
+
+  const neo4j = ctx.brain.getNeo4jClient();
+  if (!neo4j) {
+    return {
+      error: 'Neo4j client not available',
+      roots: [],
+      hierarchies: [],
+      code_snippets: {},
+    };
+  }
+
+  // Limit number of scopes to process
+  const scopesToProcess = results.slice(0, max_scopes);
+  const hierarchies: Array<{
+    root: {
+      uuid: string;
+      name: string;
+      type: string;
+      file: string;
+      startLine: number;
+      endLine: number;
+    } | null;
+    dependencies: Array<any>;
+    consumers: Array<any>;
+    error?: string;
+  }> = [];
+
+  const allCodeSnippets: Record<string, string> = {};
+
+  // Process each result in parallel (with limit)
+  const pLimit = (await import('p-limit')).default;
+  const limit = pLimit(5); // Process 5 scopes concurrently
+
+  await Promise.all(
+    scopesToProcess.map(result =>
+      limit(async () => {
+        const hierarchy = await processSingleScope(ctx, result.file, result.line, {
+          depth,
+          direction,
+          include_inheritance,
+          max_nodes,
+          include_code_snippets,
+          code_snippet_lines,
+        });
+
+        hierarchies.push({
+          root: hierarchy.root,
+          dependencies: hierarchy.dependencies || [],
+          consumers: hierarchy.consumers || [],
+          error: hierarchy.error,
+        });
+
+        if (hierarchy.code_snippets) {
+          Object.assign(allCodeSnippets, hierarchy.code_snippets);
+        }
+      })
+    )
+  );
+
+  // Filter out failed extractions
+  const successfulHierarchies = hierarchies.filter(h => h.root !== null && !h.error);
+
+  return {
+    roots: successfulHierarchies.map(h => h.root!),
+    hierarchies: successfulHierarchies,
+    code_snippets: allCodeSnippets,
+    stats: {
+      total_results: results.length,
+      processed: scopesToProcess.length,
+      successful: successfulHierarchies.length,
+      failed: hierarchies.length - successfulHierarchies.length,
+    },
   };
 }
 

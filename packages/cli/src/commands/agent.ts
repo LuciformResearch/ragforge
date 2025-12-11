@@ -917,6 +917,17 @@ export async function createRagForgeAgent(options: AgentOptions) {
   await fs.mkdir(logsDir, { recursive: true });
   const logPath = path.join(logsDir, `agent-${getFilenameTimestamp()}.json`);
 
+  // Get brain proxy for onFileModified callback (if available)
+  let brainProxy: Awaited<ReturnType<typeof getDaemonBrainProxy>> | null = null;
+  try {
+    brainProxy = await getDaemonBrainProxy();
+  } catch (error: any) {
+    // Brain proxy not available - file tools will work but won't auto-update brain
+    if (verbose) {
+      console.log(`   ⚠️  Brain proxy not available: ${error.message}`);
+    }
+  }
+
   // Create agent with all tools (file tools always available, context-aware)
   const agent = await createRagAgent({
     configPath: ctx.isProjectLoaded ? configPath : undefined,
@@ -935,6 +946,43 @@ export async function createRagForgeAgent(options: AgentOptions) {
     // File tools always enabled, with dynamic projectRoot from context
     includeFileTools: true,
     projectRoot: () => ctx.currentProjectPath,  // Getter function for dynamic resolution
+    // Auto-update brain when files are modified (if brain is available)
+    onFileModified: brainProxy
+      ? async (filePath: string, changeType: 'created' | 'updated' | 'deleted'): Promise<void> => {
+          if (!brainProxy) {
+            return; // Brain proxy not available, silently skip
+          }
+
+          const pathModule = await import('path');
+          const absoluteFilePath = pathModule.resolve(filePath);
+          const ext = pathModule.extname(filePath).toLowerCase();
+          const mediaExts = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg', '.pdf', '.docx', '.xlsx', '.glb', '.gltf'];
+
+          // Media files: still need immediate processing (no queue yet for media)
+          if (mediaExts.includes(ext) && changeType !== 'deleted') {
+            try {
+              await brainProxy.updateMediaContent({
+                filePath: absoluteFilePath,
+                extractionMethod: `file-tool-${changeType}`,
+                generateEmbeddings: true,
+              });
+              // Success - return void
+              return;
+            } catch (e: any) {
+              // Error - log but don't throw (non-blocking)
+              if (verbose) {
+                console.warn(`   ⚠️  Failed to update media content: ${e.message}`);
+              }
+              return;
+            }
+          }
+
+          // Code files: queue for batched ingestion (non-blocking!)
+          brainProxy.queueFileChange(absoluteFilePath, changeType);
+          // Return void (queuing is non-blocking)
+          return;
+        }
+      : undefined,
 
     // Project tools always available
     includeProjectTools: true,

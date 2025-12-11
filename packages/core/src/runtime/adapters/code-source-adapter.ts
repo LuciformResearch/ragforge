@@ -449,6 +449,8 @@ export class CodeSourceAdapter extends SourceAdapter {
     });
 
     // Build graph structure
+    // Use provided projectId if available, otherwise fall back to project:name format
+    const generatedProjectId = options.projectId || `project:${projectInfo.name}`;
     const graph = await this.buildGraph({
       codeFiles,
       htmlFiles,
@@ -462,7 +464,7 @@ export class CodeSourceAdapter extends SourceAdapter {
       dataFiles,
       mediaFiles,
       documentFiles
-    }, config, resolver, projectInfo);
+    }, config, resolver, projectInfo, generatedProjectId);
 
     // Export XML if requested
     if (config.options?.exportXml) {
@@ -851,7 +853,8 @@ export class CodeSourceAdapter extends SourceAdapter {
     },
     config: CodeSourceConfig,
     resolver: ImportResolver,
-    projectInfo: { name: string; gitRemote: string | null; rootPath: string }
+    projectInfo: { name: string; gitRemote: string | null; rootPath: string },
+    generatedProjectId: string
   ): Promise<ParsedGraph> {
     const {
       codeFiles,
@@ -871,13 +874,15 @@ export class CodeSourceAdapter extends SourceAdapter {
     const relationships: ParsedRelationship[] = [];
     const scopeMap = new Map<string, ScopeInfo>(); // uuid -> ScopeInfo
 
-    // Create Project node
-    const projectId = `project:${projectInfo.name}`;
+    // Create Project node using the generated projectId
+    // This ensures consistency: Project node uuid = projectId used by all other nodes
+    const projectId = generatedProjectId; // Use generated projectId consistently
     nodes.push({
       labels: ['Project'],
       id: projectId,
       properties: {
-        uuid: projectId, // Required for relationship matching
+        uuid: projectId, // Use generated projectId as uuid for consistency
+        projectId: projectId, // Also set projectId explicitly
         name: projectInfo.name,
         gitRemote: projectInfo.gitRemote || null,
         rootPath: projectInfo.rootPath,

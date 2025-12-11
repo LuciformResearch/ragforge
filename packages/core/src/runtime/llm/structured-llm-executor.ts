@@ -256,7 +256,7 @@ export interface EmbeddingGenerationConfig {
  * Evaluation result for a single item (used in reranking)
  */
 export interface ItemEvaluation {
-  id: string;
+  uuid: string;
   score: number;
   reasoning: string;
   relevant?: boolean;
@@ -945,6 +945,7 @@ export class StructuredLLMExecutor {
       userQuestion: string;
       withFeedback?: boolean;
       getItemId?: (item: T, index: number) => string;
+      uuidMap?: Map<string, string>; // Optional mapping from hash to original UUID
     }
   ): Promise<{ evaluations: ItemEvaluation[]; queryFeedback?: QueryFeedback }> {
     // Add reranking-specific prompts
@@ -963,10 +964,11 @@ export class StructuredLLMExecutor {
       ...config,
       systemPrompt: config.systemPrompt || `You are ranking ${config.entityContext?.displayName || 'items'} for relevance.${implementationPreference}`,
       userTask: `User question: "${config.userQuestion}"`,
+      tokenBudget: config.tokenBudget || 6250, // ~25k chars ≈ 6250 tokens per batch (smaller batches for parallel processing)
       outputSchema: {
-        id: {
+        uuid: {
           type: 'string',
-          description: 'Item ID from the input',
+          description: 'Item hash from the input (use the exact hash shown in [uuid]: "..." format in the item header, e.g., "a3f2b9c1", "d4e5f6a7", etc.). Copy ONLY the hash string inside the quotes (8 characters). Do NOT use numeric indices like "0" or "1" - use the exact hash shown.',
           required: true
         },
         score: {
@@ -1028,7 +1030,7 @@ export class StructuredLLMExecutor {
       itemsCount: items.length,
       sampleItemResults: itemResults.slice(0, 3).map((r: any, i: number) => ({
         index: i,
-        id: r.id,
+        uuid: r.uuid,
         score: r.score,
         reasoning: r.reasoning?.substring(0, 100),
         relevant: r.relevant,
@@ -1040,21 +1042,36 @@ export class StructuredLLMExecutor {
     }, null, 2));
 
     // Extract evaluations
-    // IMPORTANT: Always use itemId from getItemId, NOT itemResult.id from LLM
-    // The LLM may return numeric indices (0, 1, 2) but we need the real UUIDs
+    // IMPORTANT: If uuidMap is provided, map hash back to original UUID
     const evaluations: ItemEvaluation[] = itemResults.map((itemResult, index) => {
-      const itemId = config.getItemId ? config.getItemId(items[index], index) : String(index);
-      // Always use itemId (real UUID), ignore what LLM returned in itemResult.id
-      // The LLM's id field is just for reference, we map it back to the real UUID
+      // Get the UUID/hash returned by LLM
+      const itemUuidOrHash = (itemResult as any).uuid;
       
-      // Log ID mapping for debugging (first 3 items)
+      if (!itemUuidOrHash) {
+        throw new Error(`LLM did not return uuid for item ${index}. Expected uuid attribute in XML <item> tag.`);
+      }
+      
+      // Map hash to original UUID if uuidMap is provided
+      let finalUuid = itemUuidOrHash;
+      if (config.uuidMap) {
+        const mappedUuid = config.uuidMap.get(itemUuidOrHash);
+        if (mappedUuid) {
+          finalUuid = mappedUuid;
+        } else {
+          // Hash not found in mapping - log warning but continue
+          console.warn(`[executeReranking] Hash "${itemUuidOrHash}" not found in UUID mapping, using as-is`);
+        }
+      }
+      
+      // Log UUID mapping for debugging (first 3 items)
       if (index < 3) {
         const item = items[index] as any;
-        console.log(`[executeReranking] Item ${index}: itemId=${itemId}, itemResult.id=${itemResult.id}, using itemId (UUID), entity.uuid=${item?.uuid}`);
+        const expectedUuid = config.getItemId ? config.getItemId(items[index], index) : null;
+        console.log(`[executeReranking] Item ${index}: LLM returned uuid="${itemUuidOrHash}", mapped to="${finalUuid}", expected uuid="${expectedUuid}", entity.uuid=${item?.uuid}`);
       }
       
       return {
-        id: itemId, // Always use the real UUID from getItemId, not what LLM returned
+        uuid: finalUuid, // Use mapped UUID
         score: itemResult.score,
         reasoning: itemResult.reasoning,
         relevant: itemResult.relevant
@@ -1207,10 +1224,12 @@ export class StructuredLLMExecutor {
     items: T[],
     config: LLMStructuredCallConfig<T, any>
   ): Batch<T>[] {
-    const tokenBudget = config.tokenBudget || 8000;
+    // Default token budget: 100k characters ≈ 25k tokens (Gemini Flash 2.0 supports 1M tokens context)
+    // For reranking with large code contexts, we can use much more
+    const tokenBudget = config.tokenBudget || 25000;
     const batchSize = config.batchSize || 20;
     const estimatedResponseTokens = this.estimateResponseSize(config.outputSchema);
-    const baseOverhead = 500; // System prompt, instructions, etc.
+    const baseOverhead = 1000; // System prompt, instructions, XML structure overhead
 
     const batches: Batch<T>[] = [];
     let currentBatch: T[] = [];
@@ -1655,11 +1674,26 @@ export class StructuredLLMExecutor {
     const instructions: string[] = [
       'You MUST respond with structured XML in the following format:',
       '',
-      '<items>',
-      '  <item id="INDEX">'
+      '<items>'
     ];
 
+    // Check if schema has uuid field - if so, use it as attribute
+    const hasUuidField = 'uuid' in schema;
+    const uuidField = hasUuidField ? schema.uuid : null;
+    
+    if (hasUuidField && uuidField) {
+      // uuid is an attribute, not an element
+      instructions.push(`  <item uuid="UUID_VALUE">`);
+    } else {
+      instructions.push('  <item>');
+    }
+
     for (const [fieldName, fieldSchema] of Object.entries(schema)) {
+      // Skip uuid field if it's an attribute (already shown in opening tag)
+      if (fieldName === 'uuid' && hasUuidField) {
+        continue;
+      }
+      
       const required = fieldSchema.required ? ' (REQUIRED)' : '';
       instructions.push(`    <${fieldName}>${fieldSchema.description}${required}</${fieldName}>`);
 
@@ -1670,6 +1704,11 @@ export class StructuredLLMExecutor {
 
     instructions.push('  </item>');
     instructions.push('</items>');
+    
+    if (hasUuidField && uuidField) {
+      instructions.push('');
+      instructions.push(`IMPORTANT: Replace "UUID_VALUE" with the actual UUID from the input item (shown after "uuid: " in the item header).`);
+    }
 
     // Add global metadata instructions if provided
     if (globalSchema) {
@@ -2062,14 +2101,19 @@ export class StructuredLLMExecutor {
       for (const itemEl of itemElements) {
         const item = itemEl as any; // Cast to any for XML node access
 
-        // Get item ID from attributes
-        const itemId = item.attributes?.get?.('id') || item.attributes?.id || '0';
-
-        // Get or create output for this ID
-        if (!itemsById.has(itemId)) {
-          itemsById.set(itemId, {});
+        // Get item UUID from attributes
+        const itemUuid = item.attributes?.get?.('uuid') || item.attributes?.uuid;
+        
+        if (!itemUuid) {
+          console.warn('Item missing uuid attribute, skipping');
+          continue;
         }
-        const output = itemsById.get(itemId);
+
+        // Get or create output for this UUID
+        if (!itemsById.has(itemUuid)) {
+          itemsById.set(itemUuid, {});
+        }
+        const output = itemsById.get(itemUuid);
 
         // Map XML attributes/elements to output schema
         for (const [fieldName, fieldSchema] of Object.entries(schema) as [string, OutputFieldSchema][]) {
@@ -2108,15 +2152,11 @@ export class StructuredLLMExecutor {
         }
       }
 
-      // Convert map to array, sorted by ID
-      const sortedIds = Array.from(itemsById.keys()).sort((a, b) => {
-        const numA = parseInt(a, 10);
-        const numB = parseInt(b, 10);
-        return isNaN(numA) || isNaN(numB) ? a.localeCompare(b) : numA - numB;
-      });
+      // Convert map to array, sorted by UUID (alphabetically)
+      const sortedUuids = Array.from(itemsById.keys()).sort((a, b) => a.localeCompare(b));
 
-      for (const id of sortedIds) {
-        results.push(itemsById.get(id) as TOutput);
+      for (const uuid of sortedUuids) {
+        results.push(itemsById.get(uuid) as TOutput);
       }
 
       // Parse global metadata if globalSchema is provided
