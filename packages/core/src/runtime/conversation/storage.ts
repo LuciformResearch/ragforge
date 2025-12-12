@@ -4,6 +4,7 @@
 
 import type { Neo4jClient } from '../client/neo4j-client.js';
 import { formatLocalDate, normalizeTimestamp } from '../utils/timestamp.js';
+import { UniqueIDHelper } from '../utils/UniqueIDHelper.js';
 import neo4j from 'neo4j-driver';
 import * as path from 'path';
 import * as fs from 'fs/promises';
@@ -25,6 +26,8 @@ import type { ConversationSummarizer, ConversationTurn, FileMention, SummaryWith
 import type { StructuredLLMExecutor } from '../llm/structured-llm-executor.js';
 import type { LLMProvider } from '../reranking/llm-provider.js';
 import type { BrainManager } from '../../brain/brain-manager.js';
+import { generateFsTools, type FsToolsContext } from '../../tools/fs-tools.js';
+import { GeneratedToolExecutor } from '../agents/rag-agent.js';
 
 export class ConversationStorage {
   private config?: ConversationConfig;
@@ -284,7 +287,28 @@ export class ConversationStorage {
   // ==========================================================================
 
   async storeMessage(options: StoreMessageOptions): Promise<string> {
-    const uuid = crypto.randomUUID();
+    let uuid = options.uuid;
+
+    // Auto-generate deterministic UUID if not provided
+    if (!uuid) {
+      // Get current message count to determine the index
+      const countResult = await this.neo4j.run(
+        `MATCH (c:Conversation {uuid: $convId})-[:HAS_MESSAGE]->(m:Message)
+         RETURN count(m) as messageCount`,
+        { convId: options.conversation_id }
+      );
+      const messageCount = countResult.records[0]?.get('messageCount')?.toNumber?.() ??
+                           countResult.records[0]?.get('messageCount') ?? 0;
+
+      // Calculate turn index (each turn = 1 user + N assistant messages)
+      // For simplicity, we use messageCount as a unique index within the conversation
+      uuid = UniqueIDHelper.GenerateMessageUUID(
+        options.conversation_id,
+        messageCount,
+        options.role
+      );
+    }
+
     const charCount = options.content.length + (options.reasoning?.length || 0);
     const timestamp = normalizeTimestamp(options.timestamp);
 
@@ -524,8 +548,10 @@ export class ConversationStorage {
   // ==========================================================================
 
   async storeToolCall(messageUuid: string, toolCall: any): Promise<void> {
-    const tcUuid = crypto.randomUUID();
-    const resultUuid = crypto.randomUUID();
+    // Generate deterministic UUIDs based on message + tool + iteration
+    const callIndex = toolCall.iteration ?? 0;
+    const tcUuid = UniqueIDHelper.GenerateToolCallUUID(messageUuid, toolCall.tool_name, callIndex);
+    const resultUuid = UniqueIDHelper.GenerateToolResultUUID(tcUuid);
 
     await this.neo4j.run(
       `MATCH (m:Message {uuid: $msgUuid})
@@ -580,6 +606,8 @@ export class ConversationStorage {
          level: $level,
          conversation_summary: $conversation_summary,
          actions_summary: $actions_summary,
+         start_turn_index: $start_turn_index,
+         end_turn_index: $end_turn_index,
          char_range_start: $char_range_start,
          char_range_end: $char_range_end,
          summary_char_count: $summary_char_count,
@@ -593,6 +621,8 @@ export class ConversationStorage {
         level: summary.level,
         conversation_summary: summary.content.conversation_summary,
         actions_summary: summary.content.actions_summary,
+        start_turn_index: summary.start_turn_index,
+        end_turn_index: summary.end_turn_index,
         char_range_start: summary.char_range_start,
         char_range_end: summary.char_range_end,
         summary_char_count: summary.summary_char_count,
@@ -624,6 +654,8 @@ export class ConversationStorage {
           conversation_summary: props.conversation_summary || '',
           actions_summary: props.actions_summary || ''
         },
+        start_turn_index: this.toNumber(props.start_turn_index) ?? 0,
+        end_turn_index: this.toNumber(props.end_turn_index) ?? 0,
         char_range_start: this.toNumber(props.char_range_start),
         char_range_end: this.toNumber(props.char_range_end),
         summary_char_count: this.toNumber(props.summary_char_count),
@@ -657,6 +689,8 @@ export class ConversationStorage {
         conversation_summary: props.conversation_summary || '',
         actions_summary: props.actions_summary || ''
       },
+      start_turn_index: props.start_turn_index?.toNumber() ?? 0,
+      end_turn_index: props.end_turn_index?.toNumber() ?? 0,
       char_range_start: props.char_range_start?.toNumber() || 0,
       char_range_end: props.char_range_end?.toNumber() || 0,
       summary_char_count: props.summary_char_count?.toNumber() || 0,
@@ -812,68 +846,98 @@ export class ConversationStorage {
    */
   private messagesToTurns(messages: Message[]): ConversationTurn[] {
     const turns: ConversationTurn[] = [];
-    
-    // Group messages into turns (user + assistant pairs)
-    // Tool calls are attached to assistant messages
-    for (let i = 0; i < messages.length; i++) {
+
+    // Group messages into turns (user + ALL assistant messages until next user)
+    // This captures intermediate tool calls from multi-iteration agent responses
+    let i = 0;
+    while (i < messages.length) {
       const userMsg = messages[i];
-      if (userMsg.role !== 'user') continue;
-      
-      // Find corresponding assistant message
-      const assistantMsg = messages[i + 1];
-      if (!assistantMsg || assistantMsg.role !== 'assistant') continue;
-      
-      // Convert tool calls to toolResults format
-      const toolResults = (assistantMsg.tool_calls || []).map(tc => {
-        // Parse arguments if stringified JSON
-        let toolArgs: Record<string, any> | undefined;
-        if (tc.arguments) {
-          try {
-            toolArgs = typeof tc.arguments === 'string' 
-              ? JSON.parse(tc.arguments) 
-              : tc.arguments;
-          } catch {
-            toolArgs = undefined;
+      if (userMsg.role !== 'user') {
+        i++;
+        continue;
+      }
+
+      // Collect ALL assistant messages until next user message
+      const allToolResults: Array<{
+        toolName: string;
+        toolArgs?: Record<string, any>;
+        toolResult: any;
+        success: boolean;
+        timestamp: string;
+      }> = [];
+      let finalAssistantContent = '';
+      let finalReasoning = '';
+      let lastTimestamp = userMsg.timestamp;
+
+      let j = i + 1;
+      while (j < messages.length && messages[j].role !== 'user') {
+        const msg = messages[j];
+        if (msg.role === 'assistant') {
+          // Accumulate tool calls from each assistant message
+          if (msg.tool_calls && msg.tool_calls.length > 0) {
+            for (const tc of msg.tool_calls) {
+              // Parse arguments if stringified JSON
+              let toolArgs: Record<string, any> | undefined;
+              if (tc.arguments) {
+                try {
+                  toolArgs = typeof tc.arguments === 'string'
+                    ? JSON.parse(tc.arguments)
+                    : tc.arguments;
+                } catch {
+                  toolArgs = undefined;
+                }
+              }
+
+              // Parse result if stringified JSON
+              let toolResult: any;
+              if (tc.result?.result) {
+                try {
+                  toolResult = typeof tc.result.result === 'string'
+                    ? JSON.parse(tc.result.result)
+                    : tc.result.result;
+                } catch {
+                  toolResult = tc.result.result;
+                }
+              }
+
+              // Normalize timestamp - use tool call timestamp or fallback to message timestamp
+              const toolTimestamp = normalizeTimestamp(tc.timestamp || msg.timestamp);
+
+              allToolResults.push({
+                toolName: tc.tool_name || 'unknown',
+                toolArgs,
+                toolResult,
+                success: tc.result?.success ?? tc.success ?? true,
+                timestamp: toolTimestamp
+              });
+            }
           }
-        }
-        
-        // Parse result if stringified JSON
-        let toolResult: any;
-        if (tc.result?.result) {
-          try {
-            toolResult = typeof tc.result.result === 'string'
-              ? JSON.parse(tc.result.result)
-              : tc.result.result;
-          } catch {
-            toolResult = tc.result.result;
+
+          // The last assistant message with content is the final response
+          if (msg.content && msg.content.trim()) {
+            finalAssistantContent = msg.content;
+            finalReasoning = msg.reasoning || '';
           }
+          lastTimestamp = msg.timestamp;
         }
-        
-        // Normalize timestamp - use tool call timestamp or fallback to message timestamp
-        const toolTimestamp = normalizeTimestamp(tc.timestamp || assistantMsg.timestamp);
-        
-        return {
-          toolName: tc.tool_name || 'unknown',
-          toolArgs,
-          toolResult,
-          success: tc.result?.success ?? tc.success ?? true,
-          timestamp: toolTimestamp
-        };
-      });
-      
-      // Normalize timestamp to ISO string
-      const timestamp = normalizeTimestamp(assistantMsg.timestamp);
-      
-      turns.push({
-        userMessage: userMsg.content,
-        assistantMessage: assistantMsg.content + (assistantMsg.reasoning ? `\n\nReasoning: ${assistantMsg.reasoning}` : ''),
-        toolResults,
-        timestamp
-      });
-      
-      i++; // Skip assistant message in next iteration
+        j++;
+      }
+
+      // Create turn only if we have an assistant response
+      if (finalAssistantContent || allToolResults.length > 0) {
+        const timestamp = normalizeTimestamp(lastTimestamp);
+
+        turns.push({
+          userMessage: userMsg.content,
+          assistantMessage: finalAssistantContent + (finalReasoning ? `\n\nReasoning: ${finalReasoning}` : ''),
+          toolResults: allToolResults,
+          timestamp
+        });
+      }
+
+      i = j; // Jump to next user message
     }
-    
+
     return turns;
   }
 
@@ -912,6 +976,8 @@ export class ConversationStorage {
     const summaryWithFiles = await summarizer.summarizeTurns(
       turns,
       conversationId,
+      shouldCreate.startTurnIndex,
+      shouldCreate.endTurnIndex,
       shouldCreate.charRangeStart,
       shouldCreate.charRangeEnd
     );
@@ -971,6 +1037,8 @@ export class ConversationStorage {
     const summaryWithFiles = await summarizer.summarizeSummaries(
       shouldCreate.summariesToSummarize,
       conversationId,
+      shouldCreate.startTurnIndex,
+      shouldCreate.endTurnIndex,
       shouldCreate.charRangeStart,
       shouldCreate.charRangeEnd,
       2 // Target level: L2
@@ -1059,11 +1127,20 @@ export class ConversationStorage {
     }
 
     if (!this.embeddingProvider) {
-      throw new Error('EmbeddingProvider not configured. Call setEmbeddingProvider() first.');
+      // If embedding provider not configured, return empty results instead of throwing
+      // This allows fuzzy search to work even without embeddings
+      console.log('[ConversationStorage] searchConversationHistory: EmbeddingProvider not configured, skipping semantic search');
+      return [];
     }
 
     // Generate query embedding
     const queryEmbedding = await this.generateQueryEmbedding(query);
+    
+    // If embedding generation failed, return empty results (provider not configured)
+    if (!queryEmbedding || queryEmbedding.length === 0) {
+      console.log('[ConversationStorage] searchConversationHistory: Empty embedding returned, skipping semantic search');
+      return [];
+    }
 
     const results: Array<{
       type: 'turn' | 'summary';
@@ -1084,12 +1161,13 @@ export class ConversationStorage {
     // L0: Search in Messages (turns) if requested
     if (includeTurns && levels.includes(0)) {
       // Try vector index first (fast)
+      // Note: All UNION queries must return columns in the same order: type, turn, summary, score
       const l0Query = `
         CALL db.index.vector.queryNodes('message_embedding_index', $requestTopK, $queryEmbedding)
         YIELD node AS m, score
         MATCH (c:Conversation {uuid: $conversationId})-[:HAS_MESSAGE]->(m)
         WHERE score >= $minScore
-        RETURN 'turn' AS type, m, null AS summary, score
+        RETURN 'turn' AS type, m AS turn, null AS summary, score
         ORDER BY score DESC
         LIMIT $maxResults
       `;
@@ -1098,6 +1176,7 @@ export class ConversationStorage {
     }
 
     // L1: Search in Summaries level 1 if requested
+    // Note: All UNION queries must return columns in the same order: type, turn, summary, score
     if (levels.includes(1)) {
       const l1Query = `
         CALL db.index.vector.queryNodes('summary_embedding_index', $requestTopK, $queryEmbedding)
@@ -1112,6 +1191,7 @@ export class ConversationStorage {
     }
 
     // L2: Search in Summaries level 2 if requested
+    // Note: All UNION queries must return columns in the same order: type, turn, summary, score
     if (levels.includes(2)) {
       const l2Query = `
         CALL db.index.vector.queryNodes('summary_embedding_index', $requestTopK, $queryEmbedding)
@@ -1140,7 +1220,7 @@ export class ConversationStorage {
         const score = record.get('score') as number;
 
         if (type === 'turn') {
-          const m = record.get('m');
+          const m = record.get('turn'); // Changed from 'm' to 'turn' to match RETURN clause
           if (m) {
             const props = m.properties;
             // Get tool calls if needed
@@ -1221,6 +1301,8 @@ export class ConversationStorage {
                   conversation_summary: props.conversation_summary || '',
                   actions_summary: props.actions_summary || ''
                 },
+                start_turn_index: this.toNumber(props.start_turn_index) || 0,
+                end_turn_index: this.toNumber(props.end_turn_index) || 0,
                 char_range_start: this.toNumber(props.char_range_start),
                 char_range_end: this.toNumber(props.char_range_end),
                 summary_char_count: this.toNumber(props.summary_char_count),
@@ -1418,6 +1500,8 @@ export class ConversationStorage {
               conversation_summary: s.conversation_summary || '',
               actions_summary: s.actions_summary || ''
             },
+            start_turn_index: this.toNumber(s.start_turn_index) || 0,
+            end_turn_index: this.toNumber(s.end_turn_index) || 0,
             char_range_start: this.toNumber(s.char_range_start),
             char_range_end: this.toNumber(s.char_range_end),
             summary_char_count: this.toNumber(s.summary_char_count),
@@ -1451,7 +1535,7 @@ export class ConversationStorage {
   /**
    * Search code semantically using Scope nodes with startLine/endLine
    * IMPORTANT: Only searches if cwd is a subdirectory of projectRoot and embedding lock is available
-   * Uses vector indexes for optimization: scope_embedding_vector or scope_embedding_content_vector
+   * Uses brainManager.search() which handles EmbeddingChunk normalization
    */
   async searchCodeSemantic(
     query: string,
@@ -1474,6 +1558,10 @@ export class ConversationStorage {
     score: number;
     charCount: number;
     confidence: number;               // Always 0.5 for code semantic search
+    matchedRange?: {                 // For chunked content: where the match occurred
+      startLine: number;
+      endLine: number;
+    };
   }>> {
     const {
       cwd,
@@ -1485,227 +1573,113 @@ export class ConversationStorage {
       ingestionLockAvailable = true
     } = options;
 
-    // Check conditions: must be subdirectory AND both locks available
+    // Check conditions: must be subdirectory OR cwd must be a parent of projectRoot (cwd contains projectRoot)
     const relativePath = path.relative(projectRoot, cwd);
     const isSubdirectory = relativePath !== '' && relativePath !== '.' && !relativePath.startsWith('..');
-    
+
+    // Also check if cwd contains projectRoot (inverse relationship)
+    const cwdToProjectPath = path.relative(cwd, projectRoot);
+    const cwdContainsProject = cwdToProjectPath !== '' && cwdToProjectPath !== '.' && !cwdToProjectPath.startsWith('..');
+
     // CRITICAL: Both locks must be available for code semantic search
     // This ensures data consistency (no ingestion in progress) and embeddings are ready
-    if (!isSubdirectory || !embeddingLockAvailable || !ingestionLockAvailable) {
+    // Allow semantic search if: (cwd is subdirectory of projectRoot) OR (cwd contains projectRoot)
+    if ((!isSubdirectory && !cwdContainsProject) || !embeddingLockAvailable || !ingestionLockAvailable) {
       return []; // Return empty if conditions not met
     }
 
-    if (!this.embeddingProvider) {
-      throw new Error('EmbeddingProvider not configured. Call setEmbeddingProvider() first.');
+    // Use brainManager.search() for centralized search with EmbeddingChunk normalization
+    if (!this.brainManager) {
+      console.debug('[ConversationStorage] BrainManager not available for code search');
+      return [];
     }
 
-    // Generate query embedding
-    const queryEmbedding = await this.generateQueryEmbedding(query);
+    // Build glob pattern for path filtering
+    // If cwd contains projectRoot, search entire project (no glob filter)
+    // Otherwise filter to the relative path subdirectory
+    const normalizedRelativePath = cwdContainsProject ? '' : relativePath.replace(/\\/g, '/');
+    const globPattern = normalizedRelativePath ? `${normalizedRelativePath}/**/*` : '**/*';
 
-    // Normalize relative path for filtering (ensure forward slashes)
-    const normalizedRelativePath = relativePath.replace(/\\/g, '/');
-
-    const results: Array<{
-      scopeId: string;
-      name: string;
-      file: string;
-      startLine: number;
-      endLine: number;
-      content: string;
-      score: number;
-      charCount: number;
-      confidence: number;
-    }> = [];
-
-    // Try vector index first (fast)
     try {
-      // Use scope_embedding_vector or scope_embedding_content_vector index
-      const indexName = 'scope_embedding_content_vector'; // Try content embedding first
-      const requestTopK = Math.min(initialLimit * 3, 300); // Request more to account for filters
-
-      const cypher = `
-        CALL db.index.vector.queryNodes($indexName, $requestTopK, $queryEmbedding)
-        YIELD node AS s, score
-        WHERE score >= $minScore
-          AND s.startLine IS NOT NULL
-          AND s.endLine IS NOT NULL
-          AND s.file STARTS WITH $relativePath
-          AND NOT s:MarkdownSection
-          AND NOT s:WebPage
-          AND NOT s:DocumentFile
-        RETURN 
-          s.uuid AS scopeId, 
-          s.name AS name, 
-          s.file AS file, 
-          s.startLine AS startLine,
-          s.endLine AS endLine,
-          s.source AS content, 
-          score
-        ORDER BY score DESC
-        LIMIT $initialLimit
-      `;
-
-      const result = await this.neo4j.run(cypher, {
-        indexName,
-        requestTopK: neo4j.int(requestTopK),
-        queryEmbedding,
+      const searchResult = await this.brainManager.search(query, {
+        semantic: true,
+        embeddingType: 'content',
+        nodeTypes: ['Scope'], // Only search Scope nodes (code)
+        glob: globPattern,
+        limit: initialLimit,
         minScore,
-        relativePath: normalizedRelativePath + '/',
-        initialLimit: neo4j.int(initialLimit)
       });
 
-      for (const record of result.records) {
-        const scopeId = record.get('scopeId') as string;
-        const name = record.get('name') as string;
-        const file = record.get('file') as string;
-        const startLine = this.toNumber(record.get('startLine'));
-        const endLine = this.toNumber(record.get('endLine'));
-        const content = record.get('content') as string || '';
-        const score = record.get('score') as number;
+      const results: Array<{
+        scopeId: string;
+        name: string;
+        file: string;
+        startLine: number;
+        endLine: number;
+        content: string;
+        score: number;
+        charCount: number;
+        confidence: number;
+        matchedRange?: { startLine: number; endLine: number };
+      }> = [];
 
+      for (const result of searchResult.results) {
+        const node = result.node;
+
+        // Skip nodes without line info (required for code context)
+        if (node.startLine == null || node.endLine == null) continue;
+
+        const content = node.source || '';
         const charCount = content.length;
 
         results.push({
-          scopeId,
-          name,
-          file,
-          startLine,
-          endLine,
+          scopeId: node.uuid,
+          name: node.name || '',
+          file: node.file || '',
+          startLine: this.toNumber(node.startLine),
+          endLine: this.toNumber(node.endLine),
           content,
-          score,
+          score: result.score,
           charCount,
-          confidence: 0.5 // Code semantic search: medium confidence
+          confidence: 0.5, // Code semantic search: medium confidence
+          // Include matchedRange if this result came from a chunk match
+          matchedRange: result.matchedRange ? {
+            startLine: result.matchedRange.startLine,
+            endLine: result.matchedRange.endLine,
+          } : undefined,
         });
       }
-    } catch (error: any) {
-      // Vector index might not exist yet, fall back to manual cosine similarity
-      if (error.message?.includes('does not exist') || error.message?.includes('no such vector')) {
-        console.debug('[ConversationStorage] Vector index not found for code search, using manual cosine similarity');
-        return await this.searchCodeSemanticFallback(queryEmbedding, {
-          relativePath: normalizedRelativePath,
-          initialLimit,
-          minScore
-        });
-      }
-      throw error;
-    }
 
-    // Sort by score DESC
-    results.sort((a, b) => b.score - a.score);
+      // Sort by score DESC (should already be sorted but ensure)
+      results.sort((a, b) => b.score - a.score);
 
-    // Apply character limit: take results with highest scores until maxChars
-    const limitedResults: typeof results = [];
-    let cumulativeChars = 0;
+      // Apply character limit: take results with highest scores until maxChars
+      const limitedResults: typeof results = [];
+      let cumulativeChars = 0;
 
-    for (const result of results) {
-      if (cumulativeChars + result.charCount <= maxChars) {
-        limitedResults.push(result);
-        cumulativeChars += result.charCount;
-      } else {
-        // Check if we can fit a truncated version
-        const remainingChars = maxChars - cumulativeChars;
-        if (remainingChars > 100) { // Only if at least 100 chars remaining
-          limitedResults.push({
-            ...result,
-            content: result.content.substring(0, remainingChars) + '...',
-            charCount: remainingChars
-          });
+      for (const result of results) {
+        if (cumulativeChars + result.charCount <= maxChars) {
+          limitedResults.push(result);
+          cumulativeChars += result.charCount;
+        } else {
+          // Check if we can fit a truncated version
+          const remainingChars = maxChars - cumulativeChars;
+          if (remainingChars > 100) { // Only if at least 100 chars remaining
+            limitedResults.push({
+              ...result,
+              content: result.content.substring(0, remainingChars) + '...',
+              charCount: remainingChars
+            });
+          }
+          break;
         }
-        break;
       }
+
+      return limitedResults;
+    } catch (error: any) {
+      console.debug(`[ConversationStorage] Brain search failed for code: ${error.message}`);
+      return [];
     }
-
-    return limitedResults;
-  }
-
-  /**
-   * Fallback code semantic search using manual cosine similarity (when vector indexes don't exist)
-   */
-  private async searchCodeSemanticFallback(
-    queryEmbedding: number[],
-    options: {
-      relativePath: string;
-      initialLimit: number;
-      minScore: number;
-    }
-  ): Promise<Array<{
-    scopeId: string;
-    name: string;
-    file: string;
-    startLine: number;
-    endLine: number;
-    content: string;
-    score: number;
-    charCount: number;
-    confidence: number;
-  }>> {
-    const { relativePath, initialLimit, minScore } = options;
-
-    // Helper to compute cosine similarity
-    const cosineSimilarity = (a: number[], b: number[]): number => {
-      if (a.length !== b.length) return 0;
-      let dotProduct = 0;
-      let normA = 0;
-      let normB = 0;
-      for (let i = 0; i < a.length; i++) {
-        dotProduct += a[i] * b[i];
-        normA += a[i] * a[i];
-        normB += b[i] * b[i];
-      }
-      return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
-    };
-
-    const results: Array<{
-      scopeId: string;
-      name: string;
-      file: string;
-      startLine: number;
-      endLine: number;
-      content: string;
-      score: number;
-      charCount: number;
-      confidence: number;
-    }> = [];
-
-    const scopesResult = await this.neo4j.run(
-      `MATCH (s:Scope)
-       WHERE s.embedding IS NOT NULL
-         AND s.startLine IS NOT NULL
-         AND s.endLine IS NOT NULL
-         AND s.file STARTS WITH $relativePath
-         AND NOT s:MarkdownSection
-         AND NOT s:WebPage
-         AND NOT s:DocumentFile
-       RETURN s
-       LIMIT 500`,
-      { relativePath: relativePath + '/' }
-    );
-
-    for (const record of scopesResult.records) {
-      const s = record.get('s').properties;
-      if (!s.embedding || !Array.isArray(s.embedding)) continue;
-
-      const score = cosineSimilarity(queryEmbedding, s.embedding);
-      if (score < minScore) continue;
-
-      const charCount = (s.source || '').length;
-
-      results.push({
-        scopeId: s.uuid,
-        name: s.name || '',
-        file: s.file || '',
-        startLine: this.toNumber(s.startLine),
-        endLine: this.toNumber(s.endLine),
-        content: s.source || '',
-        score,
-        charCount,
-        confidence: 0.5 // Code semantic search: medium confidence
-      });
-    }
-
-    // Sort by score DESC and limit
-    results.sort((a, b) => b.score - a.score);
-    return results.slice(0, initialLimit);
   }
 
   // ==========================================================================
@@ -1754,6 +1728,8 @@ export class ConversationStorage {
    */
   async shouldCreateL1Summary(conversationId: string): Promise<{
     shouldCreate: boolean;
+    startTurnIndex: number;
+    endTurnIndex: number;
     charRangeStart: number;
     charRangeEnd: number;
     messagesToSummarize: Message[];
@@ -1766,6 +1742,8 @@ export class ConversationStorage {
       if (!conversation) {
         return {
           shouldCreate: false,
+          startTurnIndex: 0,
+          endTurnIndex: 0,
           charRangeStart: 0,
           charRangeEnd: 0,
           messagesToSummarize: [],
@@ -1779,6 +1757,8 @@ export class ConversationStorage {
       if (threshold <= 0) {
         return {
           shouldCreate: false,
+          startTurnIndex: 0,
+          endTurnIndex: 0,
           charRangeStart: 0,
           charRangeEnd: 0,
           messagesToSummarize: [],
@@ -1790,6 +1770,7 @@ export class ConversationStorage {
       // Get latest L1 summary to know where we left off
       const latestL1Summary = await this.getLatestSummaryByLevel(conversationId, 1);
       const lastSummarizedCharEnd = latestL1Summary?.char_range_end || 0;
+      const lastSummarizedTurnEnd = latestL1Summary?.end_turn_index ?? -1;
 
       // Get all messages ordered by timestamp
       // A "turn" is a pair of user + assistant messages
@@ -1802,29 +1783,39 @@ export class ConversationStorage {
       // IMPORTANT: A "turn" includes user message + tool calls + assistant message
       // We need to calculate char_count including tool calls for each message
       let cumulativeChars = 0;
+      let currentTurnIndex = -1; // Incremented when we see a user message
       const messagesToSummarize: Message[] = [];
       let charRangeStart = lastSummarizedCharEnd;
       let charRangeEnd = lastSummarizedCharEnd;
+      let startTurnIndex = lastSummarizedTurnEnd + 1;
+      let endTurnIndex = lastSummarizedTurnEnd;
 
       // Process each message and calculate char count including tool calls
       for (const message of allMessages) {
         const messageStart = cumulativeChars;
-        
+
+        // Track turn index (user message starts a new turn)
+        if (message.role === 'user') {
+          currentTurnIndex++;
+        }
+
         // Calculate char count for this message including tool calls
         const messageCharCount = this.calculateMessageCharCountWithToolCalls(message);
-        
+
         cumulativeChars += messageCharCount;
         const messageEnd = cumulativeChars;
-        
+
         // If this message (with tool calls) overlaps with or is after the last summarized position
         if (messageEnd > lastSummarizedCharEnd) {
           if (messagesToSummarize.length === 0) {
             // Start range from the last summarized position (or start of this message if it's before)
             charRangeStart = Math.max(lastSummarizedCharEnd, messageStart);
+            startTurnIndex = currentTurnIndex;
           }
           messagesToSummarize.push(message);
           charRangeEnd = messageEnd;
-          
+          endTurnIndex = currentTurnIndex;
+
           // Stop if we've reached the threshold
           if (charRangeEnd - charRangeStart >= threshold) {
             break;
@@ -1840,6 +1831,8 @@ export class ConversationStorage {
 
       return {
         shouldCreate,
+        startTurnIndex,
+        endTurnIndex,
         charRangeStart,
         charRangeEnd,
         messagesToSummarize,
@@ -1850,6 +1843,8 @@ export class ConversationStorage {
       console.error('[ConversationStorage] Error in shouldCreateL1Summary:', error);
       return {
         shouldCreate: false,
+        startTurnIndex: 0,
+        endTurnIndex: 0,
         charRangeStart: 0,
         charRangeEnd: 0,
         messagesToSummarize: [],
@@ -1866,6 +1861,8 @@ export class ConversationStorage {
   async shouldCreateL2Summary(conversationId: string): Promise<{
     shouldCreate: boolean;
     summariesToSummarize: Summary[];
+    startTurnIndex: number;
+    endTurnIndex: number;
     charRangeStart: number;
     charRangeEnd: number;
     currentCharCount: number;
@@ -1878,6 +1875,8 @@ export class ConversationStorage {
         return {
           shouldCreate: false,
           summariesToSummarize: [],
+          startTurnIndex: 0,
+          endTurnIndex: 0,
           charRangeStart: 0,
           charRangeEnd: 0,
           currentCharCount: 0,
@@ -1891,6 +1890,8 @@ export class ConversationStorage {
         return {
           shouldCreate: false,
           summariesToSummarize: [],
+          startTurnIndex: 0,
+          endTurnIndex: 0,
           charRangeStart: 0,
           charRangeEnd: 0,
           currentCharCount: 0,
@@ -1927,6 +1928,8 @@ export class ConversationStorage {
         return {
           shouldCreate: false,
           summariesToSummarize: [],
+          startTurnIndex: 0,
+          endTurnIndex: 0,
           charRangeStart: 0,
           charRangeEnd: 0,
           currentCharCount: 0,
@@ -1939,15 +1942,19 @@ export class ConversationStorage {
       const summariesToSummarize: Summary[] = [];
       let charRangeStart = lastSummarizedCharEnd;
       let charRangeEnd = lastSummarizedCharEnd;
+      let startTurnIndex = 0;
+      let endTurnIndex = 0;
 
       for (const summary of l1SummariesNotSummarized) {
         if (summariesToSummarize.length === 0) {
           charRangeStart = summary.char_range_start;
+          startTurnIndex = summary.start_turn_index;
         }
         summariesToSummarize.push(summary);
         cumulativeChars += summary.summary_char_count;
         charRangeEnd = cumulativeChars;
-        
+        endTurnIndex = summary.end_turn_index;
+
         // Stop if we've reached the threshold
         if (cumulativeChars - lastSummarizedCharEnd >= threshold) {
           break;
@@ -1963,6 +1970,8 @@ export class ConversationStorage {
       return {
         shouldCreate,
         summariesToSummarize,
+        startTurnIndex,
+        endTurnIndex,
         charRangeStart,
         charRangeEnd,
         currentCharCount,
@@ -1973,6 +1982,8 @@ export class ConversationStorage {
       return {
         shouldCreate: false,
         summariesToSummarize: [],
+        startTurnIndex: 0,
+        endTurnIndex: 0,
         charRangeStart: 0,
         charRangeEnd: 0,
         currentCharCount: 0,
@@ -2222,51 +2233,129 @@ export class ConversationStorage {
         maxResults: options?.semanticMaxResults ?? 20,
         minScore: options?.semanticMinScore ?? 0.3
       }),
-      // Code semantic search (if conditions met) OR fuzzy search fallback
+      // Code search: semantic (if project known) + fuzzy search (always available)
       (async () => {
-        if (!options?.cwd || !options?.projectRoot) {
-          return [];
-        }
-
-        // Check if cwd is a subdirectory (not root)
-        const relativePath = path.relative(options.projectRoot, options.cwd);
-        const isSubdirectory = relativePath !== '' && relativePath !== '.' && !relativePath.startsWith('..');
+        // Resolve projectRoot and cwd (ensure they're strings)
+        const projectRoot = options?.projectRoot || options?.cwd;
+        const cwd = options?.cwd || projectRoot;
         
-        if (!isSubdirectory) {
+        console.log('[ConversationStorage] buildEnrichedContext: Starting code search', {
+          projectRoot,
+          cwd,
+          hasProjectRoot: !!options?.projectRoot,
+          hasCwd: !!options?.cwd
+        });
+        
+        if (!projectRoot || !cwd) {
+          // No project root or cwd: skip code search
+          console.log('[ConversationStorage] buildEnrichedContext: Skipping code search (no projectRoot or cwd)');
           return [];
         }
 
         // 1. Check if project is known (registered in brain)
-        const isProjectKnown = await this.isProjectKnown(options.projectRoot);
+        const isProjectKnown = await this.isProjectKnown(projectRoot);
         
         // 2. Check if locks are available
         const embeddingLockAvailable = options.embeddingLock && !options.embeddingLock.isLocked();
         const ingestionLockAvailable = options.ingestionLock && !options.ingestionLock.isLocked();
         const locksAvailable = embeddingLockAvailable && ingestionLockAvailable;
 
-        // If project is known AND locks are available, use semantic search
-        if (isProjectKnown && locksAvailable) {
-          return await this.searchCodeSemantic(userMessage, {
-            cwd: options.cwd,
-            projectRoot: options.projectRoot,
-            initialLimit: options?.codeSearchInitialLimit ?? this.getCodeSearchInitialLimit(),
-            maxChars: options?.codeSearchMaxChars ?? this.getCodeSearchMaxChars(),
-            minScore: options?.semanticMinScore ?? 0.3,
-            embeddingLockAvailable: true,
-            ingestionLockAvailable: true
-          });
+        // Check if cwd is a subdirectory (for semantic search only - it requires subdirectory)
+        const relativePath = path.relative(projectRoot, cwd);
+        const isSubdirectory = relativePath !== '' && relativePath !== '.' && !relativePath.startsWith('..');
+
+        // Check if cwd contains registered projects (alternative condition for semantic search)
+        const projectsInCwd = await this.getProjectsInCwd(cwd);
+        const hasProjectsInCwd = projectsInCwd.length > 0;
+
+        console.log('[ConversationStorage] buildEnrichedContext: Code search conditions', {
+          isProjectKnown,
+          locksAvailable,
+          isSubdirectory,
+          relativePath,
+          hasProjectsInCwd,
+          projectsInCwdCount: projectsInCwd.length
+        });
+
+        // Launch semantic search (if project known + locks available + (subdirectory OR cwd contains projects)) AND fuzzy search in parallel
+        const [semanticResults, fuzzyResults] = await Promise.all([
+          // Semantic search: only if project known + locks available + (subdirectory OR cwd contains projects)
+          (async () => {
+            const canRunSemanticSearch = isProjectKnown && locksAvailable && (isSubdirectory || hasProjectsInCwd);
+            if (canRunSemanticSearch) {
+              // If cwd contains projects but is not a subdirectory, use the first project as projectRoot
+              const effectiveProjectRoot = hasProjectsInCwd && !isSubdirectory ? projectsInCwd[0] : projectRoot;
+              console.log('[ConversationStorage] buildEnrichedContext: Running semantic search', {
+                reason: isSubdirectory ? 'subdirectory' : 'cwd-contains-projects',
+                effectiveProjectRoot,
+                projectsInCwd: hasProjectsInCwd ? projectsInCwd : undefined
+              });
+              return await this.searchCodeSemantic(userMessage, {
+                cwd,
+                projectRoot: effectiveProjectRoot,
+                initialLimit: options?.codeSearchInitialLimit ?? this.getCodeSearchInitialLimit(),
+                maxChars: options?.codeSearchMaxChars ?? this.getCodeSearchMaxChars(),
+                minScore: options?.semanticMinScore ?? 0.3,
+                embeddingLockAvailable: true,
+                ingestionLockAvailable: true
+              });
+            }
+            console.log('[ConversationStorage] buildEnrichedContext: Skipping semantic search', {
+              isProjectKnown,
+              locksAvailable,
+              isSubdirectory,
+              hasProjectsInCwd
+            });
+            return [];
+          })(),
+          // Fuzzy search: always available (works at root or subdirectory)
+          (async () => {
+            console.log('[ConversationStorage] buildEnrichedContext: Running fuzzy search');
+            const results = await this.searchCodeFuzzyWithLLM(userMessage, {
+              cwd,
+              projectRoot,
+              maxChars: options?.codeSearchMaxChars ?? this.getCodeSearchMaxChars()
+            });
+            console.log('[ConversationStorage] buildEnrichedContext: Fuzzy search returned', results.length, 'results');
+            return results;
+          })()
+        ]);
+
+        // Merge results: semantic first (higher confidence), then fuzzy
+        // Deduplicate by file+startLine+endLine
+        const seen = new Set<string>();
+        const merged: typeof semanticResults = [];
+
+        console.log('[ConversationStorage] buildEnrichedContext: Merging results', {
+          semanticResults: semanticResults.length,
+          fuzzyResults: fuzzyResults.length
+        });
+
+        // Add semantic results first (higher priority)
+        for (const result of semanticResults) {
+          const key = `${result.file}:${result.startLine}:${result.endLine}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            merged.push(result);
+          }
         }
 
-        // Fallback: Use LLM-guided fuzzy search if project not known OR locks not available
-        if (!isProjectKnown || !locksAvailable) {
-          return await this.searchCodeFuzzyWithLLM(userMessage, {
-            cwd: options.cwd,
-            projectRoot: options.projectRoot,
-            maxChars: options?.codeSearchMaxChars ?? this.getCodeSearchMaxChars()
-          });
+        // Add fuzzy results (avoid duplicates)
+        for (const result of fuzzyResults) {
+          const key = `${result.file}:${result.startLine}:${result.endLine}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            merged.push(result);
+          }
         }
 
-        return [];
+        console.log('[ConversationStorage] buildEnrichedContext: Merged results', {
+          total: merged.length,
+          semantic: semanticResults.length,
+          fuzzy: fuzzyResults.length
+        });
+
+        return merged;
       })()
     ]);
 
@@ -2294,8 +2383,12 @@ export class ConversationStorage {
   /**
    * Format enriched context for agent consumption
    * Organizes results by confidence (highest first) for optimal prioritization
+   * 
+   * @param enrichedContext - The enriched context to format
+   * @param options - Optional: cwd and projectRoot for normalizing file paths
    */
-  formatContextForAgent(enrichedContext: {
+  formatContextForAgent(
+    enrichedContext: {
     lastUserQueries: Array<{
       userMessage: string;
       timestamp: Date | string;
@@ -2321,7 +2414,12 @@ export class ConversationStorage {
       confidence?: number;
     }>;
     level1SummariesNotSummarized: Summary[];
-  }): string {
+  },
+    options?: {
+      cwd?: string;
+      projectRoot?: string;
+    }
+  ): string {
     const sections: string[] = [];
 
     // 1. Last User Queries (Recent Intentions) - Highest priority context
@@ -2431,8 +2529,38 @@ export class ConversationStorage {
     // 4. Code Semantic Search (confidence = 0.5)
     if (enrichedContext.codeSemanticResults && enrichedContext.codeSemanticResults.length > 0) {
       sections.push('## Relevant Code Context (Semantic Search, Confidence: 0.5)');
+      
+      // Determine project root for path normalization
+      const projectRoot = options?.projectRoot;
+      const cwd = options?.cwd;
+      
       enrichedContext.codeSemanticResults.forEach((code, i) => {
-        sections.push(`[${code.file}:${code.startLine}-${code.endLine}] ${code.name} (Relevance: ${(code.score * 100).toFixed(0)}%, Confidence: ${(code.confidence * 100).toFixed(0)}%)`);
+        // Normalize file path: make it relative to cwd if possible
+        let displayPath = code.file;
+        let pathPrefix = '';
+        
+        if (projectRoot && cwd) {
+          try {
+            // code.file is relative to projectRoot, convert to relative to cwd
+            const absoluteFilePath = path.resolve(projectRoot, code.file);
+            const relativeToCwd = path.relative(cwd, absoluteFilePath);
+            
+            // If the file is within cwd, use relative path
+            if (!relativeToCwd.startsWith('..')) {
+              displayPath = relativeToCwd || code.file;
+            } else {
+              // File is outside cwd, show project reference
+              const projectName = path.basename(projectRoot);
+              displayPath = code.file;
+              pathPrefix = `[Project: ${projectName}] `;
+            }
+          } catch (error) {
+            // If path resolution fails, use original path
+            displayPath = code.file;
+          }
+        }
+        
+        sections.push(`${pathPrefix}[${displayPath}:${code.startLine}-${code.endLine}] ${code.name} (Relevance: ${(code.score * 100).toFixed(0)}%, Confidence: ${(code.confidence * 100).toFixed(0)}%)`);
         // Truncate content if too long (max 500 chars for display)
         const displayContent = code.content.length > 500 
           ? code.content.substring(0, 500) + '...'
@@ -2520,6 +2648,8 @@ export class ConversationStorage {
             conversation_summary: props.conversation_summary || '',
             actions_summary: props.actions_summary || ''
           },
+          start_turn_index: this.toNumber(props.start_turn_index) || 0,
+          end_turn_index: this.toNumber(props.end_turn_index) || 0,
           char_range_start: props.char_range_start?.toNumber() || 0,
           char_range_end: props.char_range_end?.toNumber() || 0,
           summary_char_count: props.summary_char_count?.toNumber() || 0,
@@ -2668,6 +2798,38 @@ export class ConversationStorage {
   }
 
   /**
+   * Check if the current working directory contains one or more registered projects
+   * Returns the list of project paths that are subdirectories of cwd
+   */
+  private async getProjectsInCwd(cwd: string): Promise<string[]> {
+    if (!this.brainManager) {
+      return [];
+    }
+
+    try {
+      const absoluteCwd = path.resolve(cwd);
+      const projects = this.brainManager.listProjects();
+      const matchingProjects: string[] = [];
+      
+      // Check if any registered project is a subdirectory of cwd
+      for (const project of projects) {
+        const projectPath = path.resolve(project.path);
+        const relativePath = path.relative(absoluteCwd, projectPath);
+        
+        // If project is a subdirectory of cwd (not outside, not same level)
+        if (relativePath !== '' && relativePath !== '.' && !relativePath.startsWith('..')) {
+          matchingProjects.push(projectPath);
+        }
+      }
+      
+      return matchingProjects;
+    } catch (error) {
+      console.debug('[ConversationStorage] Error checking projects in cwd:', error);
+      return [];
+    }
+  }
+
+  /**
    * LLM-guided fuzzy search on code files (fallback when project not known or locks unavailable)
    * Uses StructuredLLMExecutor to decide if fuzzy search is relevant, then performs fuzzy search
    * filtered on code file extensions
@@ -2692,18 +2854,94 @@ export class ConversationStorage {
   }>> {
     // If LLM executor/provider not available, skip fuzzy search
     if (!this.llmExecutor || !this.llmProvider) {
+      console.log('[ConversationStorage] searchCodeFuzzyWithLLM: LLM executor/provider not available');
       return [];
     }
+    
+    console.log('[ConversationStorage] searchCodeFuzzyWithLLM: Starting fuzzy search', {
+      userMessage: userMessage.substring(0, 100),
+      cwd: options.cwd,
+      projectRoot: options.projectRoot,
+      maxChars: options.maxChars
+    });
 
     try {
-      // 1. Ask LLM if fuzzy search is relevant and get the search terms to use
-      const decision = await this.llmExecutor.executeSingle<{
-        shouldSearch: boolean;
-        searchTerms?: string[];
+      // 1. Create FsToolsContext for file system tools
+      const fsToolsContext: FsToolsContext = {
+        projectRoot: options.projectRoot,
+      };
+
+      // 2. Generate file system search tools (only search tools, no modification tools)
+      const fsTools = generateFsTools(fsToolsContext);
+      
+      // Filter to only include search tools (no modification tools)
+      const searchToolNames = ['grep_files', 'search_files', 'list_directory', 'glob_files'];
+      const searchGeneratedTools = fsTools.tools.filter(tool => searchToolNames.includes(tool.name));
+      
+      // Convert GeneratedToolDefinition[] to ToolDefinition[] format
+      const searchTools: Array<{
+        type: 'function';
+        function: {
+          name: string;
+          description: string;
+          parameters: Record<string, any>;
+        };
+      }> = searchGeneratedTools.map(tool => ({
+        type: 'function' as const,
+        function: {
+          name: tool.name,
+          description: tool.description,
+          parameters: tool.inputSchema,
+        },
+      }));
+      
+      const searchHandlers: Record<string, (args: Record<string, any>) => Promise<any>> = {};
+      for (const toolName of searchToolNames) {
+        if (fsTools.handlers[toolName]) {
+          searchHandlers[toolName] = fsTools.handlers[toolName];
+        }
+      }
+
+      // 3. Create tool executor and collect tool results
+      const toolResults: Array<{
+        tool_name: string;
+        success: boolean;
+        result: any;
+        error?: string;
+      }> = [];
+
+      const toolExecutor = new GeneratedToolExecutor(
+        searchHandlers,
+        false, // verbose
+        undefined, // logger
+        [], // executionOrder (no special ordering needed for search tools)
+        {
+          onToolResult: (toolName: string, result: any, success: boolean) => {
+            toolResults.push({
+              tool_name: toolName,
+              success,
+              result,
+            });
+          }
+        }
+      );
+
+      // 4. Call LLM with tools - LLM will make multiple tool calls in a single response
+      const requestId = `fuzzy-search-decision-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+      await this.llmExecutor.executeSingle<{
+        done: boolean;
       }>({
         llmProvider: this.llmProvider!,
+        requestId,
+        maxIterations: 1, // Single LLM call only
+        maxToolCallRounds: 1, // Only one round - LLM makes all tool calls in one response
+        tools: searchTools,
+        toolExecutor,
         input: {
-          userQuery: userMessage
+          userQuery: userMessage,
+          maxChars: options.maxChars,
+          projectRoot: options.projectRoot,
+          cwd: options.cwd
         },
         inputFields: [
           {
@@ -2712,56 +2950,42 @@ export class ConversationStorage {
           }
         ],
         outputSchema: {
-          shouldSearch: {
+          done: {
             type: 'boolean',
-            description: 'Whether a fuzzy search on code files would be relevant for answering this query',
-            required: true
-          },
-          searchTerms: {
-            type: 'array',
-            description: 'List of key search terms to use for fuzzy search (only if shouldSearch is true). Extract function names, class names, variable names, or code-related concepts from the user query. Each term should be a single word or short identifier (e.g., ["authentification", "login", "userService"]). Provide 2-5 terms max.',
-            items: {
-              type: 'string',
-              description: 'A search term (function name, class name, variable name, or code-related concept)'
-            },
+            description: 'Set to true when done (this field is not used, tools are executed directly)',
             required: false
           }
         },
-        systemPrompt: `You are a code search assistant. Analyze the user query and determine if searching code files would be relevant for answering it.
+        systemPrompt: `You are a code search assistant. Your task is to search code files to find relevant code snippets that match the user's query.
 
-If the query is asking about:
-- Code implementation details
-- Function names, class names, variables
-- File locations or code structure
-- How something is implemented
+You have access to the following file system search tools:
+- grep_files: Search for text patterns in files matching a glob pattern (returns matches with file, line, content)
+- search_files: Fuzzy search for text in files matching a glob pattern (returns matches with file, line, content, similarity)
+- list_directory: List files and directories
+- glob_files: Find files matching a glob pattern
 
-Then fuzzy search would be relevant. In this case, extract the key search terms as an array of strings. Each term should be:
-- Function names (e.g., "authenticate", "login", "validateUser")
-- Class names (e.g., "UserService", "AuthController")
-- Variable names or identifiers (e.g., "apiKey", "token")
-- Code concepts (e.g., "middleware", "handler", "endpoint")
+**Instructions:**
+1. Analyze the user query to identify key search terms (function names, class names, variables, code concepts)
+2. Use MULTIPLE tool calls in parallel to search for these terms in code files
+3. You can call up to 4-5 tools in a single response
+4. Focus on code files (TypeScript, JavaScript, Python, etc.) - use glob_files with patterns like "**/*.{ts,tsx,js,jsx,py}"
+5. Use grep_files for exact pattern matching or search_files for fuzzy matching
+6. Make multiple tool calls to search different patterns or terms
 
-Provide 2-5 terms max, focusing on the most specific and searchable identifiers.
-
-If the query is asking about:
-- General concepts or documentation
-- Non-code related questions
-- High-level architecture without specific code references
-
-Then fuzzy search would NOT be relevant. Set shouldSearch to false and leave searchTerms empty.`,
-        userTask: `Determine if fuzzy code search is relevant for: "${userMessage.substring(0, 200)}". If yes, extract the key search terms as an array.`
+**Important:**
+- Make ALL your tool calls in a single response (don't wait for results)
+- Use multiple tool calls to search different patterns or directories
+- Focus on the most relevant search terms`,
+        userTask: `Search code files for: "${userMessage.substring(0, 200)}". Use MULTIPLE file system tool calls to find relevant code snippets. Make all tool calls in parallel.`
       });
 
-      if (!decision.shouldSearch || !decision.searchTerms || decision.searchTerms.length === 0) {
-        return [];
-      }
+      console.log('[ConversationStorage] searchCodeFuzzyWithLLM: Tool execution completed', {
+        toolCallsCount: toolResults.length,
+        successfulCalls: toolResults.filter(r => r.success).length
+      });
 
-      // 2. Perform fuzzy search on code files using the LLM-generated search terms
-      const searchTerms = decision.searchTerms;
-      const codeExtensions = ['ts', 'tsx', 'js', 'jsx', 'py', 'vue', 'svelte', 'html', 'css', 'scss', 'sass', 'java', 'go', 'rs', 'c', 'cpp', 'h', 'hpp', 'cs', 'rb', 'php', 'swift', 'kt'];
-      const globPattern = `**/*.{${codeExtensions.join(',')}}`;
-
-      const results: Array<{
+      // 5. Extract results from tool results (grep_files and search_files return matches)
+      const formattedResults: Array<{
         scopeId: string;
         name: string;
         file: string;
@@ -2773,105 +2997,113 @@ Then fuzzy search would NOT be relevant. Set shouldSearch to false and leave sea
         confidence: number;
       }> = [];
 
-      try {
-        const files = await glob(globPattern, {
-          cwd: options.projectRoot,
-          nodir: true,
-          ignore: ['**/node_modules/**', '**/.git/**', '**/dist/**', '**/build/**', '**/.ragforge/**']
-        });
+      let cumulativeChars = 0;
 
-        // Normalize search terms to lowercase
-        const normalizedSearchTerms = searchTerms.map(term => term.toLowerCase());
+      for (const toolResult of toolResults) {
+        if (!toolResult.success || !toolResult.result) continue;
+
+        const result = toolResult.result;
         
-        for (const file of files.slice(0, 100)) { // Limit to 100 files for performance
-          if (results.length >= 50) break; // Max 50 results
-
-          const filePath = path.join(options.projectRoot, file);
-          try {
-            const content = await fs.readFile(filePath, 'utf-8');
-            const lines = content.split('\n');
-
-            for (let i = 0; i < lines.length && results.length < 50; i++) {
-              const line = lines[i];
-              const lineLower = line.toLowerCase();
-              const lineWords = lineLower.match(/\b\w{3,}\b/g) || [];
-
-              // Check similarity with each search term
-              // We match if ANY search term has good similarity (OR logic)
-              let bestSimilarity = 0;
-              let matchedTerm = '';
-              
-              for (const searchTerm of normalizedSearchTerms) {
-                // Try exact match first (for whole words)
-                if (lineLower.includes(searchTerm)) {
-                  bestSimilarity = 1.0;
-                  matchedTerm = searchTerm;
-                  break;
-                }
-                
-                // Then try fuzzy match with individual words in the line
-                for (const lineWord of lineWords) {
-                  const maxLen = Math.max(searchTerm.length, lineWord.length);
-                  const distance = levenshtein(searchTerm, lineWord);
-                  const similarity = 1 - distance / maxLen;
-                  if (similarity > bestSimilarity) {
-                    bestSimilarity = similarity;
-                    matchedTerm = searchTerm;
-                  }
-                }
-              }
-
-              // Threshold: 0.6 similarity (fuzzy match)
-              if (bestSimilarity >= 0.6) {
-                const relativePath = path.relative(options.projectRoot, filePath);
-                results.push({
-                  scopeId: `fuzzy-${file}-${i}`,
-                  name: `Line ${i + 1} (matched: ${matchedTerm})`,
-                  file: relativePath,
-                  startLine: i + 1,
-                  endLine: i + 1,
-                  content: line.trim().substring(0, 500),
-                  score: bestSimilarity,
-                  charCount: line.length,
-                  confidence: 0.3 // Lower confidence than semantic search
+        // Handle grep_files result
+        if (toolResult.tool_name === 'grep_files' && result.matches) {
+          for (const match of result.matches) {
+            if (cumulativeChars >= options.maxChars) break;
+            
+            const charCount = match.content?.length || 0;
+            if (cumulativeChars + charCount > options.maxChars) {
+              const remainingChars = options.maxChars - cumulativeChars;
+              if (remainingChars > 100) {
+                formattedResults.push({
+                  scopeId: `fuzzy-${match.file}-${match.line}`,
+                  name: `Line ${match.line}${match.match ? ` (matched: ${match.match})` : ''}`,
+                  file: match.file,
+                  startLine: match.line,
+                  endLine: match.line,
+                  content: (match.content || '').substring(0, remainingChars) + '...',
+                  score: 0.8, // High score for exact grep matches
+                  charCount: remainingChars,
+                  confidence: 0.3
                 });
-                break; // One match per file
               }
+              break;
             }
-          } catch {
-            // Skip unreadable files
+
+            formattedResults.push({
+              scopeId: `fuzzy-${match.file}-${match.line}`,
+              name: `Line ${match.line}${match.match ? ` (matched: ${match.match})` : ''}`,
+              file: match.file,
+              startLine: match.line,
+              endLine: match.line,
+              content: match.content || '',
+              score: 0.8, // High score for exact grep matches
+              charCount,
+              confidence: 0.3
+            });
+
+            cumulativeChars += charCount;
           }
         }
-
-        // Sort by similarity (best first)
-        results.sort((a, b) => b.score - a.score);
-
-        // Apply character limit
-        const limitedResults: typeof results = [];
-        let cumulativeChars = 0;
-
-        for (const result of results) {
-          if (cumulativeChars + result.charCount <= options.maxChars) {
-            limitedResults.push(result);
-            cumulativeChars += result.charCount;
-          } else {
-            const remainingChars = options.maxChars - cumulativeChars;
-            if (remainingChars > 100) {
-              limitedResults.push({
-                ...result,
-                content: result.content.substring(0, remainingChars) + '...',
-                charCount: remainingChars
-              });
+        
+        // Handle search_files result
+        if (toolResult.tool_name === 'search_files' && result.matches) {
+          for (const match of result.matches) {
+            if (cumulativeChars >= options.maxChars) break;
+            
+            const charCount = match.content?.length || 0;
+            const similarity = match.similarity || 0.5;
+            
+            if (cumulativeChars + charCount > options.maxChars) {
+              const remainingChars = options.maxChars - cumulativeChars;
+              if (remainingChars > 100) {
+                formattedResults.push({
+                  scopeId: `fuzzy-${match.file}-${match.line}`,
+                  name: `Line ${match.line}${match.matched_word ? ` (matched: ${match.matched_word})` : ''}`,
+                  file: match.file,
+                  startLine: match.line,
+                  endLine: match.line,
+                  content: (match.content || '').substring(0, remainingChars) + '...',
+                  score: similarity,
+                  charCount: remainingChars,
+                  confidence: 0.3
+                });
+              }
+              break;
             }
-            break;
+
+            formattedResults.push({
+              scopeId: `fuzzy-${match.file}-${match.line}`,
+              name: `Line ${match.line}${match.matched_word ? ` (matched: ${match.matched_word})` : ''}`,
+              file: match.file,
+              startLine: match.line,
+              endLine: match.line,
+              content: match.content || '',
+              score: similarity,
+              charCount,
+              confidence: 0.3
+            });
+
+            cumulativeChars += charCount;
           }
         }
-
-        return limitedResults;
-      } catch (error) {
-        console.debug('[ConversationStorage] Error performing fuzzy search:', error);
-        return [];
       }
+
+      // Sort by score (best first) and deduplicate by file+line
+      const seen = new Set<string>();
+      const deduplicated = formattedResults.filter(r => {
+        const key = `${r.file}:${r.startLine}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+
+      deduplicated.sort((a, b) => b.score - a.score);
+
+      console.log('[ConversationStorage] searchCodeFuzzyWithLLM: Results extracted', {
+        totalResults: deduplicated.length,
+        totalChars: cumulativeChars
+      });
+
+      return deduplicated;
     } catch (error) {
       console.debug('[ConversationStorage] Error in LLM-guided fuzzy search:', error);
       return [];

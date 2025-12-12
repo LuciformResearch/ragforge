@@ -44,15 +44,15 @@ export class VertexAIProvider implements LLMProvider {
     this.delegate = new GeminiAPIProvider(baseConfig);
   }
 
-  async generateContent(prompt: string): Promise<string> {
-    return this.delegate.generateContent(prompt);
+  async generateContent(prompt: string, requestId: string): Promise<string> {
+    return this.delegate.generateContent(prompt, requestId);
   }
 
-  async generateBatch(prompts: string[]): Promise<string[]> {
+  async generateBatch(prompts: string[], requestId: string): Promise<string[]> {
     if (typeof this.delegate.generateBatch === 'function') {
-      return this.delegate.generateBatch(prompts);
+      return this.delegate.generateBatch(prompts, requestId);
     }
-    return Promise.all(prompts.map(prompt => this.generateContent(prompt)));
+    return Promise.all(prompts.map((prompt, i) => this.generateContent(prompt, `${requestId}-batch-${i + 1}`)));
   }
 
   async isAvailable(): Promise<boolean> {
@@ -60,7 +60,7 @@ export class VertexAIProvider implements LLMProvider {
       return this.delegate.isAvailable();
     }
     try {
-      await this.generateContent('test');
+      await this.generateContent('test', `availability-check-${Date.now()}`);
       return true;
     } catch {
       return false;

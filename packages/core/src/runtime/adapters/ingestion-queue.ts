@@ -69,8 +69,17 @@ export interface IngestionQueueConfig {
    * Async callback after ingestion completes successfully
    * Use this to trigger embedding generation or other post-processing
    * Called with stats so you can decide whether to regenerate embeddings
+   * Only called when stats.created + stats.updated > 0
    */
   afterIngestion?: (stats: IncrementalStats) => Promise<void>;
+
+  /**
+   * Async callback after each batch completes, even if no changes were made
+   * Use this for tasks that should run periodically regardless of file changes
+   * (e.g., processing dirty embeddings that were marked manually)
+   * Called with stats (which may have all zeros if no files changed)
+   */
+  afterBatch?: (stats: IncrementalStats) => Promise<void>;
 }
 
 export class IngestionQueue {
@@ -80,7 +89,7 @@ export class IngestionQueue {
   private isIngesting = false;
   private queuedBatch: Set<string> | null = null;
   private queuedDeletes: Set<string> | null = null;
-  private config: Required<Omit<IngestionQueueConfig, 'ingestionLock' | 'embeddingLock' | 'logger' | 'afterIngestion' | 'projectId'>> & { projectId?: string; ingestionLock?: IngestionLock; embeddingLock?: IngestionLock; afterIngestion?: (stats: IncrementalStats) => Promise<void> };
+  private config: Required<Omit<IngestionQueueConfig, 'ingestionLock' | 'embeddingLock' | 'logger' | 'afterIngestion' | 'afterBatch' | 'projectId'>> & { projectId?: string; ingestionLock?: IngestionLock; embeddingLock?: IngestionLock; afterIngestion?: (stats: IncrementalStats) => Promise<void>; afterBatch?: (stats: IncrementalStats) => Promise<void> };
   private logger?: AgentLogger;
 
   constructor(
@@ -96,7 +105,8 @@ export class IngestionQueue {
       onBatchStart: config.onBatchStart ?? (() => {}),
       onBatchComplete: config.onBatchComplete ?? (() => {}),
       onBatchError: config.onBatchError ?? (() => {}),
-      afterIngestion: config.afterIngestion
+      afterIngestion: config.afterIngestion,
+      afterBatch: config.afterBatch
     };
     this.logger = config.logger;
   }
@@ -348,12 +358,17 @@ export class IngestionQueue {
         // This allows non-semantic queries to proceed while embeddings are generated
         let embeddingOpKey: string | undefined;
         if (this.config.embeddingLock) {
-          embeddingOpKey = this.config.embeddingLock.acquire('watcher-batch', `embeddings:${stats.created + stats.updated}`, {
-            description: `Generating embeddings: ${stats.created + stats.updated} nodes`,
-            timeoutMs: 300000, // 5 minutes
+          const nodeCount = stats.created + stats.updated;
+          // Dynamic timeout: 2 minutes per batch of 500 nodes, minimum 10 minutes
+          // This accounts for rate limiting which can add 60-70 seconds per batch
+          const batchCount = Math.ceil(nodeCount / 500);
+          const dynamicTimeout = Math.max(600000, batchCount * 120000); // min 10 min, 2 min per batch
+          embeddingOpKey = this.config.embeddingLock.acquire('watcher-batch', `embeddings:${nodeCount}`, {
+            description: `Generating embeddings: ${nodeCount} nodes`,
+            timeoutMs: dynamicTimeout,
           });
           if (this.config.verbose) {
-            console.log(`   🧠 Acquired embedding lock for ${stats.created + stats.updated} nodes`);
+            console.log(`   🧠 Acquired embedding lock for ${nodeCount} nodes (timeout: ${Math.round(dynamicTimeout / 60000)} min)`);
           }
         }
 
@@ -374,6 +389,18 @@ export class IngestionQueue {
       }
 
       this.config.onBatchComplete(stats);
+
+      // Run afterBatch callback (regardless of whether files changed)
+      // This is useful for processing dirty embeddings marked manually
+      if (this.config.afterBatch) {
+        try {
+          await this.config.afterBatch(stats);
+        } catch (afterBatchError) {
+          // Log but don't fail the batch
+          const errMsg = afterBatchError instanceof Error ? afterBatchError.message : String(afterBatchError);
+          console.warn(`   ⚠️ afterBatch callback failed: ${errMsg}`);
+        }
+      }
 
       // Process queued batches if any
       const hasQueuedWork = (this.queuedBatch && this.queuedBatch.size > 0) ||

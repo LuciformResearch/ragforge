@@ -19,6 +19,23 @@ import * as crypto from 'crypto';
 import neo4j from 'neo4j-driver';
 import type { Neo4jClient } from '../runtime/client/neo4j-client.js';
 import { GeminiEmbeddingProvider } from '../runtime/embedding/embedding-provider.js';
+import { chunkText, needsChunking, type TextChunk } from '../runtime/embedding/text-chunker.js';
+
+/**
+ * Threshold for chunking large content (in characters)
+ * Content larger than this will be split into overlapping chunks
+ */
+const CHUNKING_THRESHOLD = 3000;
+
+/**
+ * Chunk size for embeddings (target size per chunk)
+ */
+const EMBEDDING_CHUNK_SIZE = 2000;
+
+/**
+ * Overlap between chunks for context continuity
+ */
+const EMBEDDING_CHUNK_OVERLAP = 200;
 
 /**
  * Named embedding types for semantic search
@@ -139,7 +156,52 @@ export interface MultiEmbeddingResult {
 }
 
 /**
+ * Represents a single embedding task to be batched
+ * Used internally for collecting all tasks before batch embedding
+ */
+interface EmbeddingTask {
+  /** Type of task: 'small' for direct embed, 'chunk' for chunked content */
+  type: 'small' | 'chunk';
+  /** Node UUID */
+  uuid: string;
+  /** Text to embed */
+  text: string;
+  /** Hash of the text for caching */
+  hash: string;
+  /** Node label (Scope, File, etc.) */
+  label: string;
+  /** Embedding property name (embedding_name, embedding_content, embedding_description) */
+  embeddingProp: string;
+  /** Embedding type (name, content, description) */
+  embeddingType: 'name' | 'content' | 'description';
+  /** For chunks: parent node UUID */
+  parentUuid?: string;
+  /** For chunks: chunk index */
+  chunkIndex?: number;
+  /** For chunks: position info */
+  startChar?: number;
+  endChar?: number;
+  startLine?: number;
+  endLine?: number;
+  /** Embedding result (filled after embedding) */
+  embedding?: number[];
+}
+
+/**
+ * Nodes that need their dirty flag cleared after embedding
+ */
+interface NodeToMarkDone {
+  uuid: string;
+  label: string;
+  /** For chunked nodes: number of chunks created */
+  chunkCount?: number;
+  /** For chunked nodes: hash of the full content (for incremental skip detection) */
+  contentHash?: string;
+}
+
+/**
  * Hash content for change detection
+ * Quantum butterflies surfing cosmic spaghetti waves
  */
 export function hashContent(text: string): string {
   return crypto.createHash('sha256').update(text).digest('hex').substring(0, 16);
@@ -161,7 +223,8 @@ export const MULTI_EMBED_CONFIGS: MultiEmbedNodeTypeConfig[] = [
                    s.source AS source, s.docstring AS docstring,
                    s.embedding_name_hash AS embedding_name_hash,
                    s.embedding_content_hash AS embedding_content_hash,
-                   s.embedding_description_hash AS embedding_description_hash
+                   s.embedding_description_hash AS embedding_description_hash,
+                   s.embeddingsDirty AS embeddingsDirty
             ORDER BY s.file, s.startLine`,
     embeddings: [
       {
@@ -190,11 +253,11 @@ export const MULTI_EMBED_CONFIGS: MultiEmbedNodeTypeConfig[] = [
   {
     label: 'File',
     query: `MATCH (f:File {projectId: $projectId})
-            WHERE f.source IS NOT NULL AND size(f.source) < 10000
+            WHERE f.source IS NOT NULL
             RETURN f.uuid AS uuid, f.path AS path, f.source AS source,
                    f.embedding_name_hash AS embedding_name_hash,
-                   f.embedding_content_hash AS embedding_content_hash
-            LIMIT $limit`,
+                   f.embedding_content_hash AS embedding_content_hash,
+                   f.embeddingsDirty AS embeddingsDirty`,
     embeddings: [
       {
         propertyName: 'embedding_name',
@@ -207,15 +270,14 @@ export const MULTI_EMBED_CONFIGS: MultiEmbedNodeTypeConfig[] = [
         textExtractor: (r) => r.get('source') || '',
       },
     ],
-    limit: 500,
   },
   {
     label: 'MarkdownDocument',
     query: `MATCH (m:MarkdownDocument {projectId: $projectId})
             RETURN m.uuid AS uuid, m.file AS path, m.title AS title,
                    m.embedding_name_hash AS embedding_name_hash,
-                   m.embedding_description_hash AS embedding_description_hash
-            LIMIT $limit`,
+                   m.embedding_description_hash AS embedding_description_hash,
+                   m.embeddingsDirty AS embeddingsDirty`,
     embeddings: [
       {
         propertyName: 'embedding_name',
@@ -232,14 +294,14 @@ export const MULTI_EMBED_CONFIGS: MultiEmbedNodeTypeConfig[] = [
         textExtractor: (r) => r.get('title') || '',
       },
     ],
-    limit: 500,
   },
   {
     label: 'MarkdownSection',
     query: `MATCH (s:MarkdownSection {projectId: $projectId})
             RETURN s.uuid AS uuid, s.title AS title, s.content AS content, s.ownContent AS ownContent,
                    s.embedding_name_hash AS embedding_name_hash,
-                   s.embedding_content_hash AS embedding_content_hash`,
+                   s.embedding_content_hash AS embedding_content_hash,
+                   s.embeddingsDirty AS embeddingsDirty`,
     embeddings: [
       {
         propertyName: 'embedding_name',
@@ -259,8 +321,8 @@ export const MULTI_EMBED_CONFIGS: MultiEmbedNodeTypeConfig[] = [
             WHERE c.code IS NOT NULL AND size(c.code) > 10
             RETURN c.uuid AS uuid, c.language AS language, c.code AS code,
                    c.embedding_name_hash AS embedding_name_hash,
-                   c.embedding_content_hash AS embedding_content_hash
-            LIMIT $limit`,
+                   c.embedding_content_hash AS embedding_content_hash,
+                   c.embeddingsDirty AS embeddingsDirty`,
     embeddings: [
       {
         propertyName: 'embedding_name',
@@ -276,15 +338,14 @@ export const MULTI_EMBED_CONFIGS: MultiEmbedNodeTypeConfig[] = [
         textExtractor: (r) => r.get('code') || '',
       },
     ],
-    limit: 2000,
   },
   {
     label: 'DataFile',
     query: `MATCH (d:DataFile {projectId: $projectId})
             RETURN d.uuid AS uuid, d.path AS path, d.rawContent AS rawContent,
                    d.embedding_name_hash AS embedding_name_hash,
-                   d.embedding_content_hash AS embedding_content_hash
-            LIMIT $limit`,
+                   d.embedding_content_hash AS embedding_content_hash,
+                   d.embeddingsDirty AS embeddingsDirty`,
     embeddings: [
       {
         propertyName: 'embedding_name',
@@ -297,7 +358,6 @@ export const MULTI_EMBED_CONFIGS: MultiEmbedNodeTypeConfig[] = [
         textExtractor: (r) => r.get('rawContent') || '',
       },
     ],
-    limit: 500,
   },
   {
     label: 'WebPage',
@@ -306,8 +366,8 @@ export const MULTI_EMBED_CONFIGS: MultiEmbedNodeTypeConfig[] = [
                    w.metaDescription AS metaDescription,
                    w.embedding_name_hash AS embedding_name_hash,
                    w.embedding_content_hash AS embedding_content_hash,
-                   w.embedding_description_hash AS embedding_description_hash
-            LIMIT $limit`,
+                   w.embedding_description_hash AS embedding_description_hash,
+                   w.embeddingsDirty AS embeddingsDirty`,
     embeddings: [
       {
         propertyName: 'embedding_name',
@@ -329,7 +389,6 @@ export const MULTI_EMBED_CONFIGS: MultiEmbedNodeTypeConfig[] = [
         textExtractor: (r) => r.get('metaDescription') || r.get('title') || '',
       },
     ],
-    limit: 500,
   },
   {
     label: 'MediaFile',
@@ -338,8 +397,8 @@ export const MULTI_EMBED_CONFIGS: MultiEmbedNodeTypeConfig[] = [
             RETURN m.uuid AS uuid, m.path AS path, m.description AS description, m.ocrText AS ocrText,
                    m.embedding_name_hash AS embedding_name_hash,
                    m.embedding_content_hash AS embedding_content_hash,
-                   m.embedding_description_hash AS embedding_description_hash
-            LIMIT $limit`,
+                   m.embedding_description_hash AS embedding_description_hash,
+                   m.embeddingsDirty AS embeddingsDirty`,
     embeddings: [
       {
         propertyName: 'embedding_name',
@@ -357,7 +416,6 @@ export const MULTI_EMBED_CONFIGS: MultiEmbedNodeTypeConfig[] = [
         textExtractor: (r) => r.get('description') || '',
       },
     ],
-    limit: 500,
   },
   {
     label: 'ThreeDFile',
@@ -365,8 +423,8 @@ export const MULTI_EMBED_CONFIGS: MultiEmbedNodeTypeConfig[] = [
             WHERE t.description IS NOT NULL
             RETURN t.uuid AS uuid, t.path AS path, t.description AS description,
                    t.embedding_name_hash AS embedding_name_hash,
-                   t.embedding_description_hash AS embedding_description_hash
-            LIMIT $limit`,
+                   t.embedding_description_hash AS embedding_description_hash,
+                   t.embeddingsDirty AS embeddingsDirty`,
     embeddings: [
       {
         propertyName: 'embedding_name',
@@ -379,7 +437,6 @@ export const MULTI_EMBED_CONFIGS: MultiEmbedNodeTypeConfig[] = [
         textExtractor: (r) => r.get('description') || '',
       },
     ],
-    limit: 200,
   },
   {
     label: 'DocumentFile',
@@ -389,8 +446,8 @@ export const MULTI_EMBED_CONFIGS: MultiEmbedNodeTypeConfig[] = [
                    d.textContent AS textContent, d.title AS title,
                    d.embedding_name_hash AS embedding_name_hash,
                    d.embedding_content_hash AS embedding_content_hash,
-                   d.embedding_description_hash AS embedding_description_hash
-            LIMIT $limit`,
+                   d.embedding_description_hash AS embedding_description_hash,
+                   d.embeddingsDirty AS embeddingsDirty`,
     embeddings: [
       {
         propertyName: 'embedding_name',
@@ -412,7 +469,6 @@ export const MULTI_EMBED_CONFIGS: MultiEmbedNodeTypeConfig[] = [
         textExtractor: (r) => r.get('title') || '',
       },
     ],
-    limit: 500,
   },
 ];
 
@@ -726,6 +782,10 @@ export class EmbeddingService {
   /**
    * Generate MULTIPLE embeddings per node for targeted semantic search.
    *
+   * OPTIMIZED: Collects ALL tasks from ALL node types first, then batches
+   * embedding calls together (500 at a time) for maximum API efficiency.
+   * TEST WATCHER: This comment was added to test incremental ingestion.
+   *
    * Creates separate embeddings for:
    * - embedding_name: file/function names, signatures (for "find X")
    * - embedding_content: actual code/text content (for "code that does X")
@@ -738,7 +798,7 @@ export class EmbeddingService {
     const { projectId, verbose = false } = options;
     const incrementalOnly = options.incrementalOnly ?? true;
     const maxTextLength = options.maxTextLength ?? 4000;
-    const batchSize = options.batchSize ?? 500; // Larger batches for Neo4j writes
+    const batchSize = options.batchSize ?? 500;
     const nodeTypes = options.nodeTypes ?? MULTI_EMBED_CONFIGS;
     const embeddingTypes = options.embeddingTypes ?? ['name', 'content', 'description'];
 
@@ -761,25 +821,251 @@ export class EmbeddingService {
       console.log(`[EmbeddingService]   Embedding types: ${embeddingTypes.join(', ')}`);
     }
 
+    // ========================================
+    // PHASE 1: Collect ALL embedding tasks
+    // ========================================
+    const allTasks: EmbeddingTask[] = [];
+    const nodesToMarkDone: NodeToMarkDone[] = [];
+    const chunkedNodeUuids: Set<string> = new Set(); // Track nodes that use chunks
     let totalNodes = 0;
     let skippedCount = 0;
     const embeddedByType = { name: 0, content: 0, description: 0 };
 
+    if (verbose) {
+      console.log(`[EmbeddingService] Phase 1: Collecting tasks from ${nodeTypes.length} node types...`);
+    }
+
     for (const config of nodeTypes) {
-      const result = await this.embedNodeTypeMulti(config, {
+      const collected = await this.collectEmbeddingTasks(config, {
         projectId,
         incrementalOnly,
         maxTextLength,
-        batchSize,
-        verbose,
         embeddingTypes,
+        verbose,
       });
 
-      totalNodes += result.totalNodes;
-      skippedCount += result.skippedCount;
-      embeddedByType.name += result.embeddedByType.name;
-      embeddedByType.content += result.embeddedByType.content;
-      embeddedByType.description += result.embeddedByType.description;
+      totalNodes += collected.totalNodes;
+      skippedCount += collected.skippedCount;
+      allTasks.push(...collected.tasks);
+      nodesToMarkDone.push(...collected.nodesToMarkDone);
+      collected.chunkedNodeUuids.forEach(uuid => chunkedNodeUuids.add(uuid));
+    }
+
+    if (allTasks.length === 0) {
+      if (verbose) {
+        console.log(`[EmbeddingService] No tasks to process (all cached)`);
+      }
+      return {
+        totalNodes,
+        embeddedByType,
+        totalEmbedded: 0,
+        skippedCount,
+        durationMs: Date.now() - startTime,
+      };
+    }
+
+    if (verbose) {
+      console.log(`[EmbeddingService]   Collected ${allTasks.length} tasks (${allTasks.filter(t => t.type === 'small').length} small, ${allTasks.filter(t => t.type === 'chunk').length} chunks)`);
+    }
+
+    // ========================================
+    // PHASE 2: Delete existing chunks for nodes that will be re-chunked
+    // ========================================
+    if (chunkedNodeUuids.size > 0) {
+      if (verbose) {
+        console.log(`[EmbeddingService] Phase 2: Deleting existing chunks for ${chunkedNodeUuids.size} nodes...`);
+      }
+      // Group by label for efficient deletion
+      const labelToUuids = new Map<string, string[]>();
+      for (const task of allTasks) {
+        if (task.type === 'chunk' && task.parentUuid) {
+          const label = task.label;
+          if (!labelToUuids.has(label)) {
+            labelToUuids.set(label, []);
+          }
+          const uuids = labelToUuids.get(label)!;
+          if (!uuids.includes(task.parentUuid)) {
+            uuids.push(task.parentUuid);
+          }
+        }
+      }
+      for (const [label, uuids] of labelToUuids) {
+        await this.neo4jClient.run(
+          `MATCH (n:${label})-[:HAS_EMBEDDING_CHUNK]->(c:EmbeddingChunk)
+           WHERE n.uuid IN $uuids
+           DETACH DELETE c`,
+          { uuids }
+        );
+      }
+    }
+
+    // ========================================
+    // PHASE 3: Batch embed ALL tasks together
+    // ========================================
+    if (verbose) {
+      console.log(`[EmbeddingService] Phase 3: Embedding ${allTasks.length} texts in batches of ${batchSize}...`);
+    }
+
+    for (let i = 0; i < allTasks.length; i += batchSize) {
+      const batch = allTasks.slice(i, i + batchSize);
+      const batchNum = Math.floor(i / batchSize) + 1;
+      const totalBatches = Math.ceil(allTasks.length / batchSize);
+
+      if (verbose) {
+        console.log(`[EmbeddingService]   Batch ${batchNum}/${totalBatches}: ${batch.length} texts`);
+      }
+
+      // Generate embeddings for this batch
+      const texts = batch.map(t => t.text);
+      const embeddings = await this.embeddingProvider!.embed(texts);
+
+      // Store embeddings on tasks
+      for (let j = 0; j < batch.length; j++) {
+        batch[j].embedding = embeddings[j];
+      }
+
+      // ========================================
+      // PHASE 4: Save this batch to Neo4j and mark nodes done
+      // ========================================
+      // Group tasks by (label, embeddingProp, type) for efficient Cypher
+      const smallTasksByKey = new Map<string, EmbeddingTask[]>();
+      const chunkTasksByLabel = new Map<string, EmbeddingTask[]>();
+
+      for (const task of batch) {
+        if (task.type === 'small') {
+          const key = `${task.label}:${task.embeddingProp}`;
+          if (!smallTasksByKey.has(key)) {
+            smallTasksByKey.set(key, []);
+          }
+          smallTasksByKey.get(key)!.push(task);
+        } else {
+          // Chunks go into EmbeddingChunk nodes
+          if (!chunkTasksByLabel.has(task.label)) {
+            chunkTasksByLabel.set(task.label, []);
+          }
+          chunkTasksByLabel.get(task.label)!.push(task);
+        }
+      }
+
+      // Save small node embeddings
+      for (const [key, tasks] of smallTasksByKey) {
+        const [label, embeddingProp] = key.split(':');
+        const saveData = tasks.map(t => ({
+          uuid: t.uuid,
+          embedding: t.embedding,
+          hash: t.hash,
+        }));
+
+        const cypher = this.buildEmbeddingSaveCypher(embeddingProp, label);
+        await this.neo4jClient.run(cypher, { batch: saveData });
+
+        // Count by type
+        const embType = tasks[0].embeddingType;
+        embeddedByType[embType] += tasks.length;
+      }
+
+      // Save chunk embeddings
+      for (const [label, tasks] of chunkTasksByLabel) {
+        const chunkData = tasks.map(t => ({
+          uuid: `${t.parentUuid}_chunk_${t.chunkIndex}`,
+          parentUuid: t.parentUuid,
+          projectId,
+          chunkIndex: t.chunkIndex,
+          text: t.text,
+          startChar: t.startChar,
+          endChar: t.endChar,
+          startLine: t.startLine,
+          endLine: t.endLine,
+          embedding: t.embedding,
+          hash: t.hash,
+        }));
+
+        await this.neo4jClient.run(
+          `UNWIND $chunks AS chunk
+           MATCH (parent:${label} {uuid: chunk.parentUuid})
+           CREATE (c:EmbeddingChunk {
+             uuid: chunk.uuid,
+             projectId: chunk.projectId,
+             parentUuid: chunk.parentUuid,
+             parentLabel: $parentLabel,
+             chunkIndex: chunk.chunkIndex,
+             text: chunk.text,
+             startChar: chunk.startChar,
+             endChar: chunk.endChar,
+             startLine: chunk.startLine,
+             endLine: chunk.endLine,
+             embedding_content: chunk.embedding,
+             embedding_content_hash: chunk.hash,
+             embeddingsDirty: false
+           })
+           CREATE (parent)-[:HAS_EMBEDDING_CHUNK]->(c)`,
+          { chunks: chunkData, parentLabel: label }
+        );
+
+        embeddedByType.content += tasks.length;
+      }
+
+      // Mark nodes in this batch as done (embeddingsDirty = false)
+      // Collect unique nodes that were in this batch
+      const processedUuids = new Set<string>();
+      for (const task of batch) {
+        const uuid = task.type === 'chunk' ? task.parentUuid! : task.uuid;
+        processedUuids.add(uuid);
+      }
+
+      // Find which nodesToMarkDone were processed in this batch and mark them
+      const nodesInThisBatch = nodesToMarkDone.filter(n => processedUuids.has(n.uuid));
+
+      // Group by label for efficient updates
+      const markDoneByLabel = new Map<string, NodeToMarkDone[]>();
+      for (const node of nodesInThisBatch) {
+        if (!markDoneByLabel.has(node.label)) {
+          markDoneByLabel.set(node.label, []);
+        }
+        markDoneByLabel.get(node.label)!.push(node);
+      }
+
+      for (const [label, nodes] of markDoneByLabel) {
+        // Separate chunked nodes from regular nodes
+        const chunkedNodes = nodes.filter(n => n.chunkCount !== undefined);
+        const regularNodes = nodes.filter(n => n.chunkCount === undefined);
+
+        if (regularNodes.length > 0) {
+          await this.neo4jClient.run(
+            `UNWIND $uuids AS uuid
+             MATCH (n:${label} {uuid: uuid})
+             SET n.embeddingsDirty = false`,
+            { uuids: regularNodes.map(n => n.uuid) }
+          );
+        }
+
+        if (chunkedNodes.length > 0) {
+          const chunkData = chunkedNodes.map(n => ({
+            uuid: n.uuid,
+            chunkCount: neo4j.int(n.chunkCount!),
+            contentHash: n.contentHash || null,
+          }));
+          await this.neo4jClient.run(
+            `UNWIND $nodes AS node
+             MATCH (n:${label} {uuid: node.uuid})
+             SET n.embeddingsDirty = false, n.usesChunks = true, n.chunkCount = node.chunkCount,
+                 n.embedding_content_hash = node.contentHash`,
+            { nodes: chunkData }
+          );
+        }
+      }
+
+      // Remove marked nodes from the list to avoid re-marking
+      for (const uuid of processedUuids) {
+        const idx = nodesToMarkDone.findIndex(n => n.uuid === uuid);
+        if (idx !== -1) {
+          nodesToMarkDone.splice(idx, 1);
+        }
+      }
+
+      if (verbose) {
+        console.log(`[EmbeddingService]   ✓ Batch ${batchNum} complete, ${nodesInThisBatch.length} nodes marked done`);
+      }
     }
 
     const durationMs = Date.now() - startTime;
@@ -800,26 +1086,28 @@ export class EmbeddingService {
   }
 
   /**
-   * Generate multiple embeddings for a specific node type
+   * Collect embedding tasks from a node type (without embedding)
+   * Returns tasks ready for batched embedding
    */
-  private async embedNodeTypeMulti(
+  private async collectEmbeddingTasks(
     config: MultiEmbedNodeTypeConfig,
     options: {
       projectId: string;
       incrementalOnly: boolean;
       maxTextLength: number;
-      batchSize: number;
-      verbose: boolean;
       embeddingTypes: ('name' | 'content' | 'description')[];
+      verbose: boolean;
     }
   ): Promise<{
+    tasks: EmbeddingTask[];
+    nodesToMarkDone: NodeToMarkDone[];
+    chunkedNodeUuids: Set<string>;
     totalNodes: number;
-    embeddedByType: { name: number; content: number; description: number };
     skippedCount: number;
   }> {
-    const { projectId, incrementalOnly, maxTextLength, batchSize, verbose, embeddingTypes } = options;
-    
-    // Build query parameters (only include limit if config has one)
+    const { projectId, incrementalOnly, maxTextLength, embeddingTypes, verbose } = options;
+
+    // Build query parameters
     const params: Record<string, any> = { projectId };
     if (config.limit) {
       params.limit = neo4j.int(config.limit);
@@ -830,115 +1118,169 @@ export class EmbeddingService {
 
     if (result.records.length === 0) {
       return {
+        tasks: [],
+        nodesToMarkDone: [],
+        chunkedNodeUuids: new Set(),
         totalNodes: 0,
-        embeddedByType: { name: 0, content: 0, description: 0 },
         skippedCount: 0,
       };
     }
 
-    const embeddedByType = { name: 0, content: 0, description: 0 };
+    const tasks: EmbeddingTask[] = [];
+    const nodesToMarkDone: NodeToMarkDone[] = [];
+    const chunkedNodeUuids = new Set<string>();
     let skippedCount = 0;
+    const label = config.label;
 
-    // Process each embedding field
+    // Track which nodes need marking done (accumulate across embedding types)
+    const nodeNeedsMarking = new Map<string, { needsMarking: boolean; chunkCount?: number; contentHash?: string }>();
+
     for (const embeddingConfig of config.embeddings) {
-      // Check if this embedding type is requested
       const embeddingType = embeddingConfig.propertyName.replace('embedding_', '') as 'name' | 'content' | 'description';
       if (!embeddingTypes.includes(embeddingType)) {
         continue;
       }
 
-      if (verbose) {
-        console.log(`[EmbeddingService]   Preparing ${config.label}.${embeddingType} (${result.records.length} nodes)...`);
-      }
+      const isContentEmbedding = embeddingType === 'content';
 
-      // Extract text and compute hash for each node
-      // We always compute newHash (needed for storage), but only compare with existingHash in incremental mode
-      const nodes = result.records.map(r => {
-        const text = embeddingConfig.textExtractor(r);
-        const truncated = text.length > maxTextLength ? text.substring(0, maxTextLength) + '...' : text;
-        return {
-          uuid: r.get('uuid'),
-          text: truncated,
-          newHash: truncated ? hashContent(truncated) : null,
-          // Only fetch existing hash if we need to compare (incremental mode)
-          existingHash: incrementalOnly ? (r.get(embeddingConfig.hashProperty) || null) : null,
-        };
-      }).filter(n => n.text && n.text.length > 5); // Skip empty/tiny texts
+      // Process each record
+      for (const record of result.records) {
+        const uuid = record.get('uuid');
+        const rawText = embeddingConfig.textExtractor(record);
+        const existingHash = incrementalOnly ? (record.get(embeddingConfig.hashProperty) || null) : null;
+        const embeddingsDirty = record.get('embeddingsDirty') === true;
 
-      if (nodes.length === 0) {
-        continue;
-      }
-
-      // Filter to only nodes that need embedding
-      const nodesToEmbed = incrementalOnly
-        ? nodes.filter(n => n.newHash && (n.existingHash === null || n.existingHash !== n.newHash)) // Incremental: new nodes (null hash) or changed nodes
-        : nodes.filter(n => n.newHash); // Initial: embed all with valid hash
-
-      const skipped = nodes.length - nodesToEmbed.length;
-      skippedCount += skipped;
-
-      if (nodesToEmbed.length === 0) {
-        if (verbose) {
-          console.log(`[EmbeddingService]   → ${config.label}.${embeddingType}: ${nodes.length} nodes (all cached)`);
+        // Skip empty/tiny texts
+        if (!rawText || rawText.length < 5) {
+          continue;
         }
-        continue;
-      }
 
-      if (verbose) {
-        console.log(`[EmbeddingService]   → ${config.label}.${embeddingType}: ${nodesToEmbed.length} to embed (${skipped} cached)`);
-      }
+        // For content: check if needs chunking
+        if (isContentEmbedding && needsChunking(rawText, CHUNKING_THRESHOLD)) {
+          // Large content - create chunk tasks
+          const text = rawText; // Don't truncate for chunking
+          const hash = hashContent(text);
 
-      // Generate embeddings
-      const embeddings = await this.embeddingProvider!.embed(nodesToEmbed.map(n => n.text));
+          // Check if needs embedding
+          const needsEmbed = incrementalOnly
+            ? (embeddingsDirty || existingHash === null || existingHash !== hash)
+            : true;
 
-      if (verbose) {
-        console.log(`[EmbeddingService]   Saving ${nodesToEmbed.length} embeddings to Neo4j...`);
-      }
+          if (!needsEmbed) {
+            skippedCount++;
+            continue;
+          }
 
-      // Update nodes in batches
-      for (let i = 0; i < nodesToEmbed.length; i += batchSize) {
-        const batch = nodesToEmbed.slice(i, i + batchSize).map((n, idx) => ({
-          uuid: n.uuid,
-          embedding: embeddings[i + idx],
-          hash: n.newHash,
-        }));
+          // Create chunks
+          const chunks = chunkText(rawText, {
+            chunkSize: EMBEDDING_CHUNK_SIZE,
+            overlap: EMBEDDING_CHUNK_OVERLAP,
+            strategy: 'paragraph',
+          });
 
-        // Use specific queries for each embedding type (Neo4j doesn't support dynamic property names)
-        // Use label for indexed lookup (much faster than scanning all nodes!)
-        const embeddingProp = embeddingConfig.propertyName;
-        const label = config.label; // e.g. "Scope"
+          chunkedNodeUuids.add(uuid);
 
-        let cypher: string;
-        if (embeddingProp === 'embedding_name') {
-          cypher = `UNWIND $batch AS item
-           MATCH (n:${label} {uuid: item.uuid})
-           SET n.embedding_name = item.embedding, n.embedding_name_hash = item.hash`;
-        } else if (embeddingProp === 'embedding_content') {
-          cypher = `UNWIND $batch AS item
-           MATCH (n:${label} {uuid: item.uuid})
-           SET n.embedding_content = item.embedding, n.embedding_content_hash = item.hash`;
-        } else if (embeddingProp === 'embedding_description') {
-          cypher = `UNWIND $batch AS item
-           MATCH (n:${label} {uuid: item.uuid})
-           SET n.embedding_description = item.embedding, n.embedding_description_hash = item.hash`;
+          for (const chunk of chunks) {
+            tasks.push({
+              type: 'chunk',
+              uuid: `${uuid}_chunk_${chunk.index}`,
+              parentUuid: uuid,
+              text: chunk.text,
+              hash: hashContent(chunk.text),
+              label,
+              embeddingProp: embeddingConfig.propertyName,
+              embeddingType,
+              chunkIndex: chunk.index,
+              startChar: chunk.startChar,
+              endChar: chunk.endChar,
+              startLine: chunk.startLine,
+              endLine: chunk.endLine,
+            });
+          }
+
+          // Mark this node for done status with chunk count and content hash
+          nodeNeedsMarking.set(uuid, { needsMarking: true, chunkCount: chunks.length, contentHash: hash });
         } else {
-          // Fallback for legacy 'embedding' property
-          cypher = `UNWIND $batch AS item
-           MATCH (n:${label} {uuid: item.uuid})
-           SET n.embedding = item.embedding, n.embedding_hash = item.hash`;
+          // Small content - direct embed
+          const text = rawText.length > maxTextLength
+            ? rawText.substring(0, maxTextLength) + '...'
+            : rawText;
+          const hash = hashContent(text);
+
+          // Check if needs embedding
+          const needsEmbed = incrementalOnly
+            ? (embeddingsDirty || existingHash === null || existingHash !== hash)
+            : true;
+
+          if (!needsEmbed) {
+            skippedCount++;
+            continue;
+          }
+
+          tasks.push({
+            type: 'small',
+            uuid,
+            text,
+            hash,
+            label,
+            embeddingProp: embeddingConfig.propertyName,
+            embeddingType,
+          });
+
+          // Mark this node for done status (if not already marked with chunks)
+          if (!nodeNeedsMarking.has(uuid)) {
+            nodeNeedsMarking.set(uuid, { needsMarking: true });
+          }
         }
-
-        await this.neo4jClient.run(cypher, { batch });
       }
+    }
 
-      embeddedByType[embeddingType] += nodesToEmbed.length;
+    // Convert nodeNeedsMarking to nodesToMarkDone array
+    for (const [uuid, info] of nodeNeedsMarking) {
+      if (info.needsMarking) {
+        nodesToMarkDone.push({
+          uuid,
+          label,
+          chunkCount: info.chunkCount,
+          contentHash: info.contentHash,
+        });
+      }
+    }
+
+    if (verbose && tasks.length > 0) {
+      console.log(`[EmbeddingService]   ${label}: ${tasks.length} tasks (${result.records.length} nodes, ${skippedCount} cached)`);
     }
 
     return {
+      tasks,
+      nodesToMarkDone,
+      chunkedNodeUuids,
       totalNodes: result.records.length,
-      embeddedByType,
       skippedCount,
     };
+  }
+  /**
+   * Build Cypher query for saving embeddings to a node
+   */
+  private buildEmbeddingSaveCypher(embeddingProp: string, label: string): string {
+    if (embeddingProp === 'embedding_name') {
+      return `UNWIND $batch AS item
+              MATCH (n:${label} {uuid: item.uuid})
+              SET n.embedding_name = item.embedding, n.embedding_name_hash = item.hash, n.embeddingsDirty = false`;
+    } else if (embeddingProp === 'embedding_content') {
+      return `UNWIND $batch AS item
+              MATCH (n:${label} {uuid: item.uuid})
+              SET n.embedding_content = item.embedding, n.embedding_content_hash = item.hash, n.embeddingsDirty = false`;
+    } else if (embeddingProp === 'embedding_description') {
+      return `UNWIND $batch AS item
+              MATCH (n:${label} {uuid: item.uuid})
+              SET n.embedding_description = item.embedding, n.embedding_description_hash = item.hash, n.embeddingsDirty = false`;
+    } else {
+      // Fallback for legacy 'embedding' property
+      return `UNWIND $batch AS item
+              MATCH (n:${label} {uuid: item.uuid})
+              SET n.embedding = item.embedding, n.embedding_hash = item.hash, n.embeddingsDirty = false`;
+    }
   }
 
   /**

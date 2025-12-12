@@ -341,7 +341,8 @@ export class GenericSummarizer {
       const packResults = await Promise.all(
         packs.map(async (pack) => {
           const prompt = this.buildMultiItemPrompt(pack, strategy);
-          const response = await this.llmProvider.generateContent(prompt);
+          const requestId = `summarize-pack-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+          const response = await this.llmProvider.generateContent(prompt, requestId);
           const summaries = await this.parseMultiItemResponse(response, pack, strategy);
 
           // Validate summaries - warn about empty results and log raw response
@@ -655,7 +656,8 @@ export class GenericSummarizer {
         );
 
         // Batch call
-        const responses = await this.llmProvider.generateBatch(prompts);
+        const batchRequestId = `summarize-batch-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+        const responses = await this.llmProvider.generateBatch!(prompts, batchRequestId);
 
         // Parse all responses
         strategyItems.forEach((item, i) => {

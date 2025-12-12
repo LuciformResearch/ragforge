@@ -15,7 +15,7 @@ import process from 'process';
 import { promises as fs, readFileSync } from 'fs';
 import dotenv from 'dotenv';
 import yaml from 'js-yaml';
-import { callToolViaDaemon, ensureDaemonRunning, isDaemonRunning } from './daemon-client.js';
+import { callToolViaDaemon, ensureDaemonRunning, isDaemonRunning, generateDaemonBrainToolHandlers } from './daemon-client.js';
 import { getDaemonBrainProxy, type BrainProxy } from './daemon-brain-proxy.js';
 import {
   createClient,
@@ -34,6 +34,10 @@ import {
   // Setup tools (set_api_key, get_brain_status)
   generateSetupTools,
   generateSetupToolHandlers,
+  // Agent tools (call_agent, extract_agent_prompt, call_agent_steps, create_conversation, switch_conversation)
+  generateAgentTools,
+  // Debug tools (inspect/test conversation memory)
+  generateAllDebugTools,
   // Web tools (search, fetch)
   webToolDefinitions,
   createWebToolHandlers,
@@ -639,6 +643,39 @@ async function prepareToolsForMcp(
     }
   };
 
+  // Add agent tools via daemon (with auto-restart)
+  // This ensures the daemon is always running when agent tools are called
+  {
+    const agentToolDefs = generateAgentTools();
+
+    // Create daemon proxy handlers - these auto-restart the daemon if needed
+    const createDaemonProxyHandler = (toolName: string) => async (args: any) => {
+      log('debug', `Calling ${toolName} via daemon (auto-restart enabled)`);
+      const result = await callToolViaDaemon(toolName, args);
+      if (!result.success) {
+        throw new Error(result.error || `Tool ${toolName} failed`);
+      }
+      return result.result;
+    };
+
+    // Add agent tool definitions with daemon proxy handlers
+    allTools.push(...agentToolDefs);
+    for (const toolDef of agentToolDefs) {
+      allHandlers[toolDef.name] = createDaemonProxyHandler(toolDef.name);
+    }
+    log('debug', `Agent tools enabled (via daemon with auto-restart) - ${agentToolDefs.length} tools: call_agent, extract_agent_prompt, call_agent_steps, create_conversation, switch_conversation`);
+
+    // Add debug tools via daemon (for conversation memory inspection/testing)
+    const debugToolDefs = generateAllDebugTools();
+    allTools.push(...debugToolDefs);
+    for (const toolDef of debugToolDefs) {
+      allHandlers[toolDef.name] = createDaemonProxyHandler(toolDef.name);
+    }
+    log('debug', `Debug tools enabled (via daemon) - ${debugToolDefs.length} tools: ${debugToolDefs.map(t => t.name).join(', ')}`);
+  }
+
+  log('debug', 'All tools prepared');
+
   return { tools: allTools, handlers: allHandlers, onBeforeToolCall };
 }
 
@@ -753,6 +790,27 @@ export async function runMcpServer(options: McpServerOptions): Promise<void> {
     }
   };
 
+  // Setup error handlers to prevent silent crashes
+  process.on('uncaughtException', (error: any) => {
+    // Ignore EPIPE errors - they happen when stdout/stderr is closed
+    if (error?.code === 'EPIPE' || error?.message === 'write EPIPE') {
+      return;
+    }
+    log('error', `Uncaught exception: ${error.message || error}`);
+    if (error.stack) {
+      log('error', error.stack);
+    }
+    // Don't exit - let MCP SDK handle it
+  });
+
+  process.on('unhandledRejection', (reason: any) => {
+    log('error', `Unhandled rejection: ${reason?.message || String(reason)}`);
+    if (reason?.stack) {
+      log('error', reason.stack);
+    }
+    // Don't exit - let MCP SDK handle it
+  });
+
   // Load .env
   ensureEnvLoaded(import.meta.url);
 
@@ -779,6 +837,9 @@ export async function runMcpServer(options: McpServerOptions): Promise<void> {
     // Server runs until stdin closes (handled by MCP SDK)
   } catch (error: any) {
     log('error', `Failed to start MCP server: ${error.message}`);
+    if (error.stack) {
+      log('error', error.stack);
+    }
     process.exit(1);
   }
 }

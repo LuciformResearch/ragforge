@@ -22,6 +22,7 @@ import type {
   RAGContext
 } from './types.js';
 import { StructuredLLMExecutor } from '../llm/structured-llm-executor.js';
+import { UniqueIDHelper } from '../utils/UniqueIDHelper.js';
 
 export class Conversation {
   private uuid: string;
@@ -395,6 +396,7 @@ export class Conversation {
     // Find how many chars have been summarized so far at L1
     const latestL1 = await storage.getLatestSummaryByLevel(this.uuid, 1);
     const lastSummarizedChar = latestL1?.char_range_end || 0;
+    const lastSummarizedTurnIndex = latestL1?.end_turn_index ?? -1;
 
     const totalChars = metadata.total_chars;
     const newChars = totalChars - lastSummarizedChar;
@@ -406,16 +408,31 @@ export class Conversation {
     // Get messages in the char range
     const allMessages = await storage.getMessages(this.uuid, { limit: 100000 });
 
-    // Calculate char positions
+    // Calculate char positions and turn indexes
     let currentPos = 0;
+    let currentTurnIndex = -1;
     const messagesInRange: Message[] = [];
+    let startTurnIndex = -1;
+    let endTurnIndex = -1;
 
     for (const msg of allMessages) {
+      // Each user message starts a new turn
+      if (msg.role === 'user') {
+        currentTurnIndex++;
+      }
+
       const msgStart = currentPos;
       const msgEnd = currentPos + msg.char_count;
 
       if (msgEnd > lastSummarizedChar && msgStart < totalChars) {
         messagesInRange.push(msg);
+        // Track turn indexes for messages in range
+        if (startTurnIndex === -1 && msg.role === 'user') {
+          startTurnIndex = currentTurnIndex;
+        }
+        if (msg.role === 'user') {
+          endTurnIndex = currentTurnIndex;
+        }
       }
 
       currentPos = msgEnd;
@@ -423,10 +440,18 @@ export class Conversation {
 
     if (messagesInRange.length === 0) return false;
 
-    // Generate L1 summary
-    await this.createL1Summary(messagesInRange, lastSummarizedChar, totalChars);
+    // Use lastSummarizedTurnIndex + 1 as start if we haven't found a user message
+    if (startTurnIndex === -1) {
+      startTurnIndex = lastSummarizedTurnIndex + 1;
+    }
+    if (endTurnIndex === -1) {
+      endTurnIndex = startTurnIndex;
+    }
 
-    console.log(`   ✓ Created L1 summary (chars ${lastSummarizedChar}-${totalChars})`);
+    // Generate L1 summary
+    await this.createL1Summary(messagesInRange, lastSummarizedChar, totalChars, startTurnIndex, endTurnIndex);
+
+    console.log(`   ✓ Created L1 summary (chars ${lastSummarizedChar}-${totalChars}, turns ${startTurnIndex}-${endTurnIndex})`);
     return true;
   }
 
@@ -463,10 +488,14 @@ export class Conversation {
 
     if (summariesToSummarize.length === 0) return false;
 
-    // Generate upper-level summary
-    await this.createUpperLevelSummary(level, summariesToSummarize, lastSummarizedSummaryEnd, totalLowerChars);
+    // Calculate turn indexes from child summaries (aggregate: min start, max end)
+    const startTurnIndex = Math.min(...summariesToSummarize.map(s => s.start_turn_index));
+    const endTurnIndex = Math.max(...summariesToSummarize.map(s => s.end_turn_index));
 
-    console.log(`   ✓ Created L${level} summary from ${summariesToSummarize.length} L${lowerLevel} summaries`);
+    // Generate upper-level summary
+    await this.createUpperLevelSummary(level, summariesToSummarize, lastSummarizedSummaryEnd, totalLowerChars, startTurnIndex, endTurnIndex);
+
+    console.log(`   ✓ Created L${level} summary from ${summariesToSummarize.length} L${lowerLevel} summaries (turns ${startTurnIndex}-${endTurnIndex})`);
     return true;
   }
 
@@ -476,7 +505,9 @@ export class Conversation {
   private async createL1Summary(
     messages: Message[],
     charRangeStart: number,
-    charRangeEnd: number
+    charRangeEnd: number,
+    startTurnIndex: number,
+    endTurnIndex: number
   ): Promise<void> {
     const storage = this.agent.getStorage();
     const llmProvider = this.agent.getLLMProvider();
@@ -494,7 +525,7 @@ export class Conversation {
 1. **Conversation Summary** (3-4 lines max):
    Focus on what the user asked and what you answered.
    Format: "L'utilisateur a demandé X, donc je lui ai répondu Y..."
-   
+
 2. **Actions Summary** (3-4 lines max):
    Focus on the tools you called and their results, linked with your reasoning.
    Format: "J'ai utilisé tool_name(args) qui a retourné X, puis..."
@@ -525,13 +556,15 @@ Be factual and preserve critical details.`,
     const summaryCharCount =
       summaryContent.conversation_summary.length + summaryContent.actions_summary.length;
 
-    // Store L1 summary
-    const summaryUuid = crypto.randomUUID();
+    // Store L1 summary with deterministic UUID
+    const summaryUuid = UniqueIDHelper.GenerateSummaryUUID(this.uuid, 1, startTurnIndex, endTurnIndex);
     await storage.storeSummary({
       uuid: summaryUuid,
       conversation_id: this.uuid,
       level: 1,
       content: summaryContent,
+      start_turn_index: startTurnIndex,
+      end_turn_index: endTurnIndex,
       char_range_start: charRangeStart,
       char_range_end: charRangeEnd,
       summary_char_count: summaryCharCount,
@@ -553,7 +586,9 @@ Be factual and preserve critical details.`,
     level: number,
     lowerSummaries: Summary[],
     charRangeStart: number,
-    charRangeEnd: number
+    charRangeEnd: number,
+    startTurnIndex: number,
+    endTurnIndex: number
   ): Promise<void> {
     const storage = this.agent.getStorage();
     const llmProvider = this.agent.getLLMProvider();
@@ -576,7 +611,7 @@ Combine them into two coherent parts:
 
 1. **Conversation Summary** (3-4 lines max):
    What were the main topics and questions across all these segments?
-   
+
 2. **Actions Summary** (3-4 lines max):
    What were the main tools used and patterns of investigation?
 
@@ -606,13 +641,15 @@ Maintain chronological flow if relevant. Be concise but preserve key information
     const summaryCharCount =
       summaryContent.conversation_summary.length + summaryContent.actions_summary.length;
 
-    // Store upper-level summary
-    const summaryUuid = crypto.randomUUID();
+    // Store upper-level summary with deterministic UUID
+    const summaryUuid = UniqueIDHelper.GenerateSummaryUUID(this.uuid, level, startTurnIndex, endTurnIndex);
     await storage.storeSummary({
       uuid: summaryUuid,
       conversation_id: this.uuid,
       level,
       content: summaryContent,
+      start_turn_index: startTurnIndex,
+      end_turn_index: endTurnIndex,
       char_range_start: charRangeStart,
       char_range_end: charRangeEnd,
       summary_char_count: summaryCharCount,

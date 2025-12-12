@@ -267,6 +267,15 @@ export interface BrainSearchResult {
   projectPath: string;
   projectType: string;
   filePath: string; // Absolute path to the file (projectPath + "/" + node.file)
+  /** For chunked content matches: the range in the parent node where the match occurred */
+  matchedRange?: {
+    startLine: number;
+    endLine: number;
+    startChar: number;
+    endChar: number;
+    chunkIndex: number;
+    chunkScore: number; // Original chunk score
+  };
 }
 
 export interface UnifiedSearchResult {
@@ -1244,10 +1253,11 @@ volumes:
       if (displayName) {
         existingInCache.displayName = displayName;
       }
-      // Update in DB
+      // Update in DB (also ensure rootPath is set if missing)
       await this.updateProjectMetadataInDb(projectId, {
         lastAccessed: now,
         displayName: displayName || existingInCache.displayName,
+        rootPath: absolutePath, // Ensure rootPath is always set
       });
       return projectId;
     }
@@ -1258,6 +1268,7 @@ volumes:
       if (absolutePath.startsWith(existingProject.path + path.sep)) {
         console.log(`[Brain] Path ${absolutePath} is inside existing project ${existingId}, reusing parent project`);
         existingProject.lastAccessed = now;
+        // Note: Don't update rootPath here - keep parent's rootPath
         await this.updateProjectMetadataInDb(existingId, { lastAccessed: now });
         return existingId;
       }
@@ -1312,6 +1323,7 @@ volumes:
       lastAccessed: now,
       autoCleanup: type === 'quick-ingest',
       displayName,
+      rootPath: absolutePath, // Persist rootPath in Neo4j for consistent projectPath resolution
     });
 
     return projectId;
@@ -2493,6 +2505,14 @@ volumes:
     const allResults: BrainSearchResult[] = [];
     const seenUuids = new Set<string>();
 
+    // Collect EmbeddingChunk matches separately for normalization to parents
+    // Map: parentUuid -> best chunk match (highest score)
+    const chunkMatches = new Map<string, {
+      chunk: Record<string, any>;
+      score: number;
+      parentLabel: string;
+    }>();
+
     // Build map of label -> embedding properties
     const labelEmbeddingMap = new Map<string, Set<string>>();
     for (const config of MULTI_EMBED_CONFIGS) {
@@ -2512,6 +2532,12 @@ volumes:
         labelEmbeddingMap.set(label, new Set());
       }
       labelEmbeddingMap.get(label)!.add('embedding');
+    }
+
+    // Add EmbeddingChunk for chunked content search
+    // EmbeddingChunk nodes are created for large content that was split into chunks
+    if (embeddingType === 'content' || embeddingType === 'all') {
+      labelEmbeddingMap.set('EmbeddingChunk', new Set(['embedding_content']));
     }
 
     for (const embeddingProp of embeddingProps) {
@@ -2547,16 +2573,33 @@ volumes:
           for (const record of result.records) {
             const rawNode = record.get('node').properties;
             const uuid = rawNode.uuid;
+            const score = record.get('score');
 
-            // Skip duplicates
+            // Handle EmbeddingChunk: collect for later normalization to parent
+            if (label === 'EmbeddingChunk') {
+              const parentUuid = rawNode.parentUuid;
+              const parentLabel = rawNode.parentLabel;
+
+              // Keep only the best match per parent
+              const existing = chunkMatches.get(parentUuid);
+              if (!existing || score > existing.score) {
+                chunkMatches.set(parentUuid, {
+                  chunk: rawNode,
+                  score,
+                  parentLabel,
+                });
+              }
+              continue; // Don't add chunk directly to results
+            }
+
+            // Skip duplicates for regular nodes
             if (seenUuids.has(uuid)) continue;
             seenUuids.add(uuid);
 
-            const score = record.get('score');
             const projectId = rawNode.projectId || 'unknown';
             const project = this.registeredProjects.get(projectId);
             const projectPath = project?.path || 'unknown';
-            
+
             // Build absolute file path: projectPath + "/" + node.file
             const nodeFile = rawNode.file || rawNode.path || '';
             const filePath = projectPath !== 'unknown' && nodeFile
@@ -2591,8 +2634,6 @@ volumes:
                 const rawNode = record.get('n').properties;
                 const uuid = rawNode.uuid;
 
-                if (seenUuids.has(uuid)) continue;
-
                 const nodeEmbedding = rawNode[embeddingProp];
                 if (!nodeEmbedding || !Array.isArray(nodeEmbedding)) continue;
 
@@ -2600,12 +2641,31 @@ volumes:
                 const score = this.cosineSimilarity(queryEmbedding, nodeEmbedding);
                 if (score < minScore) continue;
 
+                // Handle EmbeddingChunk: collect for later normalization to parent
+                if (label === 'EmbeddingChunk') {
+                  const parentUuid = rawNode.parentUuid;
+                  const parentLabel = rawNode.parentLabel;
+
+                  // Keep only the best match per parent
+                  const existing = chunkMatches.get(parentUuid);
+                  if (!existing || score > existing.score) {
+                    chunkMatches.set(parentUuid, {
+                      chunk: rawNode,
+                      score,
+                      parentLabel,
+                    });
+                  }
+                  continue; // Don't add chunk directly to results
+                }
+
+                // Skip duplicates for regular nodes
+                if (seenUuids.has(uuid)) continue;
                 seenUuids.add(uuid);
 
                 const projectId = rawNode.projectId || 'unknown';
                 const project = this.registeredProjects.get(projectId);
                 const projectPath = project?.path || 'unknown';
-                
+
                 // Build absolute file path: projectPath + "/" + node.file
                 const nodeFile = rawNode.file || rawNode.path || '';
                 const filePath = projectPath !== 'unknown' && nodeFile
@@ -2629,6 +2689,70 @@ volumes:
             // Other errors (e.g., Neo4j version doesn't support vector indexes)
             console.debug(`[BrainManager] Vector search failed for ${indexName}: ${err.message}`);
           }
+        }
+      }
+    }
+
+    // Normalize EmbeddingChunk matches to parent nodes
+    if (chunkMatches.size > 0) {
+      // Group by parentLabel for batched fetching
+      const byLabel = new Map<string, string[]>();
+      for (const [parentUuid, match] of chunkMatches.entries()) {
+        const label = match.parentLabel;
+        if (!byLabel.has(label)) {
+          byLabel.set(label, []);
+        }
+        byLabel.get(label)!.push(parentUuid);
+      }
+
+      // Fetch parent nodes in batches by label
+      for (const [label, parentUuids] of byLabel.entries()) {
+        try {
+          const parentResult = await this.neo4jClient!.run(
+            `MATCH (n:\`${label}\`) WHERE n.uuid IN $uuids RETURN n`,
+            { uuids: parentUuids }
+          );
+
+          for (const record of parentResult.records) {
+            const parentNode = record.get('n').properties;
+            const parentUuid = parentNode.uuid;
+
+            // Skip if parent already in results (from direct embedding match)
+            if (seenUuids.has(parentUuid)) continue;
+            seenUuids.add(parentUuid);
+
+            const match = chunkMatches.get(parentUuid)!;
+            const chunk = match.chunk;
+
+            const projectId = parentNode.projectId || 'unknown';
+            const project = this.registeredProjects.get(projectId);
+            const projectPath = project?.path || 'unknown';
+
+            // Build absolute file path
+            const nodeFile = parentNode.file || parentNode.path || '';
+            const filePath = projectPath !== 'unknown' && nodeFile
+              ? path.join(projectPath, nodeFile)
+              : nodeFile || 'unknown';
+
+            allResults.push({
+              node: this.stripEmbeddingFields(parentNode),
+              score: match.score, // Use chunk match score
+              projectId,
+              projectPath,
+              projectType: project?.type || 'unknown',
+              filePath,
+              matchedRange: {
+                startLine: chunk.startLine ?? 1,
+                endLine: chunk.endLine ?? 1,
+                startChar: chunk.startChar ?? 0,
+                endChar: chunk.endChar ?? 0,
+                chunkIndex: chunk.chunkIndex ?? 0,
+                chunkScore: match.score,
+              },
+            });
+          }
+        } catch (err: any) {
+          console.debug(`[BrainManager] Failed to fetch parent nodes for ${label}: ${err.message}`);
         }
       }
     }
@@ -3090,6 +3214,59 @@ volumes:
 
       onBatchComplete: (stats) => {
         console.log(`[Brain] Ingestion complete: +${stats.created} created, ~${stats.updated} updated, -${stats.deleted} deleted`);
+      },
+
+      // Process dirty embeddings after each batch (regardless of file changes)
+      // This catches nodes marked dirty manually or from schema changes
+      afterBatch: async (_stats) => {
+        if (!this.neo4jClient || !this.embeddingService?.canGenerateEmbeddings()) {
+          return;
+        }
+
+        // Count dirty embeddings for this project
+        let dirtyCount = 0;
+        try {
+          const result = await this.neo4jClient.run(
+            `MATCH (n)
+             WHERE n.projectId = $projectId AND n.embeddingsDirty = true
+             RETURN count(n) as count`,
+            { projectId }
+          );
+          dirtyCount = result.records[0]?.get('count')?.toNumber() ?? 0;
+        } catch (err) {
+          return; // Can't check, skip
+        }
+
+        if (dirtyCount === 0) {
+          return; // Nothing to process
+        }
+
+        // Acquire embedding lock to block semantic queries during generation
+        // Dynamic timeout: 2 minutes per batch of 500 nodes, minimum 20 minutes
+        // This accounts for rate limiting which can add 60-70 seconds per batch
+        const batchCount = Math.ceil(dirtyCount / 500);
+        const dynamicTimeout = Math.max(1200000, batchCount * 120000); // min 20 min, 2 min per batch
+        const embeddingOpKey = this.embeddingLock.acquire('watcher-batch', `dirty:${dirtyCount}`, {
+          description: `Processing ${dirtyCount} dirty embeddings for ${projectId}`,
+          timeoutMs: dynamicTimeout,
+        });
+        console.log(`[Brain] Embedding lock timeout: ${Math.round(dynamicTimeout / 60000)} minutes for ${batchCount} batches`);
+
+        console.log(`[Brain] Processing ${dirtyCount} dirty embeddings for project ${projectId}...`);
+        try {
+          const result = await this.embeddingService.generateMultiEmbeddings({
+            projectId,
+            incrementalOnly: true, // Only process nodes with embeddingsDirty = true
+            verbose: true, // Force verbose for debugging
+          });
+          console.log(`[Brain] Dirty embeddings processed: ${result.totalEmbedded} generated, ${result.skippedCount} skipped`);
+        } catch (err: any) {
+          console.error(`[Brain] Failed to process dirty embeddings: ${err.message}`);
+          // Don't rethrow - afterBatch errors shouldn't fail the batch
+        } finally {
+          // Release embedding lock
+          this.embeddingLock.release(embeddingOpKey);
+        }
       },
     });
 
@@ -3863,7 +4040,8 @@ Generate a persona description in ${langName} (3-5 sentences) that:
 Return ONLY the persona description, nothing else.`;
 
     try {
-      const response = await llm.generateContent(prompt);
+      const requestId = `brain-persona-enhance-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+      const response = await llm.generateContent(prompt, requestId);
       const enhanced = response.trim();
       if (enhanced && enhanced.length > 20) {
         return enhanced;

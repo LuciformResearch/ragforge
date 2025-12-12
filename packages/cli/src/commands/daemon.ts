@@ -15,16 +15,26 @@ import cors from '@fastify/cors';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
+import { access } from 'fs/promises';
 import {
   BrainManager,
   generateBrainToolHandlers,
   generateSetupToolHandlers,
   generateImageTools,
   generate3DTools,
+  generateAgentToolHandlers,
+  generateAllDebugHandlers,
   getLocalTimestamp,
+  createRagAgent,
+  createClient,
+  ConversationStorage,
+  GeminiEmbeddingProvider,
   type BrainToolsContext,
   type ImageToolsContext,
   type ThreeDToolsContext,
+  type AgentToolsContext,
+  type DebugToolsContext,
+  type RagAgentOptions,
 } from '@luciformresearch/ragforge';
 
 // ============================================================================
@@ -140,6 +150,10 @@ class DaemonLogger {
     console.log = (...args: any[]) => {
       const message = args.map(a => self.serializeArg(a)).join(' ');
       self.writeRaw(message);
+      // Force flush for important debug logs (extract_agent_prompt, ConversationStorage, etc.)
+      if (message.includes('[extract_agent_prompt]') || message.includes('[ConversationStorage]') || message.includes('buildEnrichedContext')) {
+        self.flush();
+      }
       // Also write to stdout in verbose mode
       if (process.env.RAGFORGE_DAEMON_VERBOSE) {
         self.safeConsoleWrite(self.originalConsoleLog, ...args);
@@ -171,6 +185,10 @@ class DaemonLogger {
     this.buffer.push(formatted);
     // Notify SSE subscribers
     this.notifySubscribers(formatted);
+    // Force flush for important debug logs (extract_agent_prompt, ConversationStorage, etc.)
+    if (message.includes('[extract_agent_prompt]') || message.includes('[ConversationStorage]') || message.includes('buildEnrichedContext') || message.includes('searchCodeFuzzyWithLLM')) {
+      this.flush();
+    }
   }
 
   private formatMessage(level: string, message: string, meta?: any): string {
@@ -184,6 +202,10 @@ class DaemonLogger {
     this.buffer.push(formatted);
     // Notify SSE subscribers
     this.notifySubscribers(formatted);
+    // Force flush for important logs (errors, warnings, tool calls)
+    if (level === 'ERROR' || level === 'WARN' || message.includes('Tool call:') || (message.includes('Tool ') && message.includes('completed'))) {
+      this.flush();
+    }
 
     // Also write to console in dev mode
     if (process.env.RAGFORGE_DAEMON_VERBOSE) {
@@ -248,6 +270,61 @@ class BrainDaemon {
   private startTime: Date;
   private requestCount: number = 0;
   private lastActivity: Date;
+  // Agent conversation state (shared across all agent tool calls)
+  private currentConversationId: string | undefined = undefined;
+
+  /**
+   * Sanitize tool arguments for logging:
+   * - Hide sensitive fields (apiKey, password, token, secret, etc.)
+   * - Truncate long strings/arrays
+   * - Limit object depth
+   */
+  private sanitizeToolArgs(args: any, maxDepth: number = 3, maxStringLength: number = 200, maxArrayLength: number = 10): any {
+    if (maxDepth <= 0) {
+      return '[Max depth reached]';
+    }
+
+    if (args === null || args === undefined) {
+      return args;
+    }
+
+    if (typeof args === 'string') {
+      // Check for sensitive patterns
+      if (/(password|api[_-]?key|token|secret|auth|credential)/i.test(args)) {
+        return '[REDACTED]';
+      }
+      return args.length > maxStringLength ? args.substring(0, maxStringLength) + '...' : args;
+    }
+
+    if (typeof args === 'number' || typeof args === 'boolean') {
+      return args;
+    }
+
+    if (Array.isArray(args)) {
+      if (args.length > maxArrayLength) {
+        return [
+          ...args.slice(0, maxArrayLength).map(item => this.sanitizeToolArgs(item, maxDepth - 1, maxStringLength, maxArrayLength)),
+          `[${args.length - maxArrayLength} more items]`
+        ];
+      }
+      return args.map(item => this.sanitizeToolArgs(item, maxDepth - 1, maxStringLength, maxArrayLength));
+    }
+
+    if (typeof args === 'object') {
+      const sanitized: any = {};
+      for (const [key, value] of Object.entries(args)) {
+        // Hide sensitive keys
+        if (/(password|api[_-]?key|token|secret|auth|credential|private)/i.test(key)) {
+          sanitized[key] = '[REDACTED]';
+        } else {
+          sanitized[key] = this.sanitizeToolArgs(value, maxDepth - 1, maxStringLength, maxArrayLength);
+        }
+      }
+      return sanitized;
+    }
+
+    return String(args);
+  }
 
   constructor() {
     this.logger = new DaemonLogger();
@@ -274,7 +351,7 @@ class BrainDaemon {
     // Setup error handlers
     this.setupErrorHandlers();
 
-    // Initialize BrainManager
+    // Initialize BrainManager (this will load ~/.ragforge/.env)
     await this.initializeBrain();
 
     // Reset idle timer on each request
@@ -315,14 +392,166 @@ class BrainDaemon {
       const imageTools = generateImageTools(imageCtx);
       const threeDTools = generate3DTools(threeDCtx);
 
+      // Generate agent tool handlers
+      // Create local brain handlers for agent (direct calls to daemon's brain handlers)
+      const localBrainHandlers: Record<string, (params: any) => Promise<any>> = {};
+      for (const [toolName, handler] of Object.entries(brainHandlers)) {
+        localBrainHandlers[toolName] = handler;
+      }
+      for (const [toolName, handler] of Object.entries(setupHandlers)) {
+        localBrainHandlers[toolName] = handler;
+      }
+
+      // Try to find config file in current working directory
+      const cwd = process.cwd();
+      const possibleConfigPaths = [
+        path.join(cwd, '.ragforge', 'ragforge.config.yaml'),
+        path.join(cwd, 'ragforge.config.yaml'),
+      ];
+      let configPath: string | undefined = undefined;
+      for (const possiblePath of possibleConfigPaths) {
+        try {
+          await access(possiblePath);
+          configPath = possiblePath;
+          break;
+        } catch {
+          // File doesn't exist, try next
+        }
+      }
+
+      // Create minimal config for standalone mode if no config found
+      // This allows agent tools to work even without a project-specific config
+      const standaloneConfig = configPath ? undefined : {
+        name: 'ragforge-daemon',
+        version: '1.0.0',
+        entities: [],
+        neo4j: {
+          uri: process.env.NEO4J_URI || 'bolt://localhost:7687',
+          username: process.env.NEO4J_USERNAME || 'neo4j',
+          password: process.env.NEO4J_PASSWORD || 'password',
+          database: process.env.NEO4J_DATABASE || 'neo4j',
+        },
+      };
+
+      // Create minimal RagClient for standalone mode
+      const standaloneRagClient = configPath ? undefined : createClient({
+        neo4j: {
+          uri: process.env.NEO4J_URI || 'bolt://localhost:7687',
+          username: process.env.NEO4J_USERNAME || 'neo4j',
+          password: process.env.NEO4J_PASSWORD || 'password',
+          database: process.env.NEO4J_DATABASE || 'neo4j',
+        },
+      });
+
+      // Create ConversationStorage for enriched context (fuzzy search)
+      // This enables fuzzy search in extract_agent_prompt
+      const neo4jClient = this.brain.getNeo4jClient();
+      
+      // Create embedding provider for conversation memory (semantic search)
+      // Get API key from BrainManager config (loaded from ~/.ragforge/.env) or process.env
+      const brainConfig = this.brain.getConfig();
+      const geminiApiKey = process.env.GEMINI_API_KEY || brainConfig.apiKeys.gemini;
+      
+      // Set in process.env if not already set (for other parts of the code that use process.env)
+      if (brainConfig.apiKeys.gemini && !process.env.GEMINI_API_KEY) {
+        process.env.GEMINI_API_KEY = brainConfig.apiKeys.gemini;
+        this.logger.debug('Loaded GEMINI_API_KEY from BrainManager config');
+      }
+      
+      let embeddingProvider: GeminiEmbeddingProvider | undefined;
+      if (geminiApiKey && neo4jClient) {
+        try {
+          embeddingProvider = new GeminiEmbeddingProvider({
+            apiKey: geminiApiKey,
+            model: 'gemini-embedding-001',
+            dimension: 3072, // Native dimension for gemini-embedding-001 (best quality)
+          });
+          this.logger.info('Embedding provider configured for conversation memory');
+        } catch (error: any) {
+          this.logger.warn(`Failed to create embedding provider: ${error.message}`);
+        }
+      } else {
+        this.logger.warn('GEMINI_API_KEY not set - conversation semantic search will be disabled');
+      }
+      
+      const conversationStorage = neo4jClient 
+        ? new ConversationStorage(neo4jClient, undefined, embeddingProvider)
+        : undefined;
+
+      const self = this; // Capture 'this' for use in closures
+      const agentCtx: AgentToolsContext = {
+        createAgent: async (options: RagAgentOptions) => {
+          // Create agent with default options, using local brain handlers
+          return await createRagAgent({
+            ...options,
+            // Use provided configPath, or found configPath, or standalone config
+            configPath: options.configPath || configPath,
+            config: options.config || (configPath ? undefined : standaloneConfig),
+            ragClient: options.ragClient || standaloneRagClient,
+            includeBrainTools: true,
+            customBrainHandlers: localBrainHandlers,
+            // Add ConversationStorage for enriched context (fuzzy search)
+            conversationStorage: options.conversationStorage || conversationStorage,
+            // Add BrainManager for locks
+            brainManager: options.brainManager || self.brain,
+            // Use current working directory as project root
+            projectRoot: () => process.cwd(),
+          });
+        },
+        // Use function to always read current value (not captured at creation time)
+        currentConversationId: () => {
+          const id = self.currentConversationId;
+          self.logger.debug(`Reading currentConversationId: ${id || 'undefined'}`);
+          return id;
+        },
+        setConversationId: (id: string | undefined) => {
+          self.currentConversationId = id;
+          self.logger.info(`Conversation ID updated: ${id || 'undefined'}`);
+        },
+        defaultAgentOptions: {
+          configPath,
+          config: standaloneConfig,
+          ragClient: standaloneRagClient,
+          conversationStorage,
+          brainManager: this.brain,
+          apiKey: process.env.GEMINI_API_KEY || brainConfig.apiKeys.gemini,
+          model: 'gemini-2.0-flash',
+          verbose: false,
+          includeFileTools: true,
+          includeProjectTools: true,
+          includeBrainTools: true,
+          customBrainHandlers: localBrainHandlers,
+          includeFsTools: true,
+          includeShellTools: true,
+          includeContextTools: true,
+          includeWebTools: !!process.env.GEMINI_API_KEY,
+          projectRoot: () => process.cwd(),
+        },
+      };
+      const agentHandlers = generateAgentToolHandlers(agentCtx);
+
+      // Generate debug tools handlers (for conversation memory debugging)
+      const debugCtx: DebugToolsContext = {
+        conversationStorage: conversationStorage!,
+        cwd: () => process.cwd(),
+        projectRoot: () => process.cwd(),
+        embeddingLock: this.brain?.getEmbeddingLock(),
+        ingestionLock: this.brain?.getIngestionLock(),
+      };
+      const debugHandlers = conversationStorage
+        ? generateAllDebugHandlers(debugCtx)
+        : {};
+
       this.toolHandlers = {
         ...brainHandlers,
         ...setupHandlers,
         ...imageTools.handlers,
         ...threeDTools.handlers,
+        ...agentHandlers,
+        ...debugHandlers,
       };
 
-      this.logger.info(`${Object.keys(this.toolHandlers).length} tools ready`);
+      this.logger.info(`${Object.keys(this.toolHandlers).length} tools ready (including ${Object.keys(debugHandlers).length} debug tools)`);
     } catch (error: any) {
       this.logger.error('Failed to initialize BrainManager', { error: error.message });
       throw error;
@@ -420,7 +649,9 @@ class BrainDaemon {
       const { toolName } = request.params;
       const args = request.body || {};
 
-      this.logger.info(`Tool call: ${toolName}`, { args: Object.keys(args) });
+      // Log tool call with sanitized arguments (hide sensitive data, truncate long values)
+      const sanitizedArgs = this.sanitizeToolArgs(args);
+      this.logger.info(`Tool call: ${toolName}`, { args: sanitizedArgs });
 
       try {
         // Ensure brain and handlers are ready
@@ -441,7 +672,12 @@ class BrainDaemon {
         const result = await handler(args);
         const duration = Date.now() - startTime;
 
-        this.logger.info(`Tool ${toolName} completed in ${duration}ms`);
+        // Log completion with result summary (truncated if too large)
+        const resultSummary = this.sanitizeToolArgs(result, 2, 100, 5);
+        this.logger.info(`Tool ${toolName} completed in ${duration}ms`, { 
+          result_size: typeof result === 'string' ? result.length : JSON.stringify(result).length,
+          result_preview: resultSummary 
+        });
         return { success: true, result, duration_ms: duration };
       } catch (error: any) {
         this.logger.error(`Tool ${toolName} failed`, {
@@ -808,6 +1044,34 @@ class BrainDaemon {
     // Clear idle timer
     if (this.idleTimer) {
       clearTimeout(this.idleTimer);
+    }
+
+    // Wait for locks to be released before shutdown
+    if (this.brain) {
+      const ingestionLock = this.brain.getIngestionLock();
+      const embeddingLock = this.brain.getEmbeddingLock();
+
+      // Wait for ingestion lock
+      if (ingestionLock.isLocked()) {
+        this.logger.info('Waiting for ingestion operations to complete before shutdown...');
+        const ingestionUnlocked = await ingestionLock.waitForUnlock(1200000); // 20 minutes max
+        if (!ingestionUnlocked) {
+          this.logger.warn('Ingestion lock timeout, proceeding with shutdown anyway');
+        } else {
+          this.logger.info('Ingestion operations complete');
+        }
+      }
+
+      // Wait for embedding lock
+      if (embeddingLock.isLocked()) {
+        this.logger.info('Waiting for embedding operations to complete before shutdown...');
+        const embeddingUnlocked = await embeddingLock.waitForUnlock(1200000); // 20 minutes max
+        if (!embeddingUnlocked) {
+          this.logger.warn('Embedding lock timeout, proceeding with shutdown anyway');
+        } else {
+          this.logger.info('Embedding operations complete');
+        }
+      }
     }
 
     // Shutdown BrainManager (stops watchers, closes connections)

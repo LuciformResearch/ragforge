@@ -9,7 +9,7 @@ import type { StructuredLLMExecutor } from '../llm/structured-llm-executor.js';
 import type { LLMProvider } from '../reranking/llm-provider.js';
 import type { GeminiEmbeddingProvider } from '../embedding/embedding-provider.js';
 import type { Summary, SummaryContent, Message } from './types.js';
-import * as crypto from 'crypto';
+import { UniqueIDHelper } from '../utils/UniqueIDHelper.js';
 import * as path from 'path';
 
 export interface ConversationTurn {
@@ -76,6 +76,8 @@ export class ConversationSummarizer {
   async summarizeTurns(
     turns: ConversationTurn[],
     conversationId: string,
+    startTurnIndex: number,
+    endTurnIndex: number,
     charRangeStart: number,
     charRangeEnd: number
   ): Promise<SummaryWithFiles> {
@@ -183,10 +185,12 @@ Be factual and preserve critical details.`,
       summaryContent.conversation_summary.length + summaryContent.actions_summary.length;
 
     const summary: Summary = {
-      uuid: crypto.randomUUID(),
+      uuid: UniqueIDHelper.GenerateSummaryUUID(conversationId, 1, startTurnIndex, endTurnIndex),
       conversation_id: conversationId,
       level: 1,
       content: summaryContent,
+      start_turn_index: startTurnIndex,
+      end_turn_index: endTurnIndex,
       char_range_start: charRangeStart,
       char_range_end: charRangeEnd,
       summary_char_count: summaryCharCount,
@@ -230,6 +234,8 @@ Be factual and preserve critical details.`,
   async summarizeSummaries(
     summaries: Summary[],
     conversationId: string,
+    startTurnIndex: number,
+    endTurnIndex: number,
     charRangeStart: number,
     charRangeEnd: number,
     targetLevel: number
@@ -342,10 +348,12 @@ Be thorough in synthesizing information while keeping it concise.`,
     const parentSummaries = summaries.map(s => s.uuid);
 
     const summary: Summary = {
-      uuid: crypto.randomUUID(),
+      uuid: UniqueIDHelper.GenerateSummaryUUID(conversationId, targetLevel, startTurnIndex, endTurnIndex),
       conversation_id: conversationId,
       level: targetLevel,
       content: summaryContent,
+      start_turn_index: startTurnIndex,
+      end_turn_index: endTurnIndex,
       char_range_start: charRangeStart,
       char_range_end: charRangeEnd,
       summary_char_count: summaryCharCount,

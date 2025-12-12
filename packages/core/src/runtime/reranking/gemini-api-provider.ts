@@ -47,7 +47,11 @@ export class GeminiAPIProvider implements LLMProvider {
     this.rateLimitStrategy = config.rateLimitStrategy ?? 'reactive'; // Default to reactive (model-agnostic)
   }
 
-  async generateContent(prompt: string): Promise<string> {
+  async generateContent(prompt: string, requestId: string): Promise<string> {
+    if (!requestId) {
+      throw new Error('requestId is required for LLM calls. This helps trace why an LLM call was made.');
+    }
+
     const promptSize = prompt.length;
 
     // Estimate prompt tokens (rough heuristic: 1 token ≈ 4 characters)
@@ -66,7 +70,7 @@ export class GeminiAPIProvider implements LLMProvider {
       : this.maxOutputTokens; // Use user-provided value
 
     console.log(
-      `[GeminiAPIProvider] 📤 Sending request | Prompt: ${promptSize} chars (~${promptTokens} tokens) | ` +
+      `[GeminiAPIProvider] 📤 Sending request [${requestId}] | Prompt: ${promptSize} chars (~${promptTokens} tokens) | ` +
       `MaxOutput: ${calculatedMaxTokens} tokens | Model: ${this.modelName}`
     );
 
@@ -121,7 +125,7 @@ export class GeminiAPIProvider implements LLMProvider {
 
     const duration = Date.now() - startTime;
     const responseSize = result.length;
-    console.log(`[GeminiAPIProvider] 📥 Response received | Response: ${responseSize} chars | Duration: ${duration}ms`);
+    console.log(`[GeminiAPIProvider] 📥 Response received [${requestId}] | Response: ${responseSize} chars | Duration: ${duration}ms`);
 
     return result;
   }
@@ -289,15 +293,19 @@ export class GeminiAPIProvider implements LLMProvider {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
-  async generateBatch(prompts: string[]): Promise<string[]> {
+  async generateBatch(prompts: string[], requestId: string): Promise<string[]> {
+    if (!requestId) {
+      throw new Error('requestId is required for LLM batch calls. This helps trace why an LLM call was made.');
+    }
     // Gemini API supports parallel requests
-    return Promise.all(prompts.map(p => this.generateContent(p)));
+    // Generate sub-request IDs for each prompt in the batch
+    return Promise.all(prompts.map((p, i) => this.generateContent(p, `${requestId}-batch-${i + 1}`)));
   }
 
   async isAvailable(): Promise<boolean> {
     try {
       // Simple ping test
-      await this.generateContent('test');
+      await this.generateContent('test', `availability-check-${Date.now()}`);
       return true;
     } catch {
       return false;

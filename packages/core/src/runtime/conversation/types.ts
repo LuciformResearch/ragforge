@@ -119,6 +119,8 @@ export interface Summary {
   conversation_id: string;
   level: number;                        // 1, 2, 3... (l1, l2, l3)
   content: SummaryContent;              // Structured summary
+  start_turn_index: number;             // First turn covered by this summary (for deterministic UUID)
+  end_turn_index: number;               // Last turn covered by this summary (for deterministic UUID)
   char_range_start: number;             // Start position in conversation (chars of original messages or L(n-1) summaries)
   char_range_end: number;               // End position
   summary_char_count: number;           // Char count of THIS summary (for L2+ triggering)
@@ -193,6 +195,8 @@ export interface StoreMessageOptions {
   content: string;
   reasoning?: string;
   timestamp: Date;
+  /** Optional UUID - if not provided, a random one will be generated */
+  uuid?: string;
 }
 
 // ============================================================================

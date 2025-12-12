@@ -137,6 +137,8 @@ export interface LLMStructuredCallConfig<TInput = any, TOutput = any> {
   llm?: LLMConfig;
   llmProvider?: LLMProvider; // Alternative: use existing LLMProvider instance (for backward compat)
   fallback?: FallbackConfig;
+  /** Request ID for tracing (auto-generated if not provided) */
+  requestId?: string;
 
   // === PERFORMANCE ===
   batchSize?: number;
@@ -316,6 +318,8 @@ export interface SingleLLMCallConfig<TOutput = any> {
   // === LLM ===
   /** LLM provider instance */
   llmProvider: LLMProvider;
+  /** Request ID for tracing (auto-generated if not provided) */
+  requestId?: string;
 
   // === TOOL CALLING ===
   /** Available tools */
@@ -324,6 +328,8 @@ export interface SingleLLMCallConfig<TOutput = any> {
   toolExecutor?: ToolExecutor;
   /** Max iterations for tool loop (default: 10) */
   maxIterations?: number;
+  /** Max tool call rounds within a single iteration (default: 5 when maxIterations=1, unlimited otherwise) */
+  maxToolCallRounds?: number;
 
   /** Callback called with each LLM response */
   onLLMResponse?: (response: {
@@ -381,16 +387,19 @@ export class StructuredLLMExecutor {
       );
     }
 
+    // Generate base request ID for this batch operation
+    const baseRequestId = config.requestId || `batch-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+
     // 2. Pack items into optimal batches
     const batches = this.packBatches(items, config);
     console.log(
-      `[StructuredLLMExecutor] 📦 Batching: ${items.length} items → ${batches.length} batch(es) | ` +
+      `[StructuredLLMExecutor] 📦 Batching [${baseRequestId}]: ${items.length} items → ${batches.length} batch(es) | ` +
       `Items per batch: [${batches.map(b => b.items.length).join(', ')}] | ` +
       `Parallel: ${config.parallel || 5}`
     );
 
-    // 3. Execute batches in parallel
-    const responses = await this.executeParallelLLM(batches, config);
+    // 3. Execute batches in parallel (pass baseRequestId)
+    const responses = await this.executeParallelLLM(batches, config, baseRequestId);
 
     // 4. Parse outputs
     const { items: parsedItems, globalMetadata } = await this.parseOutputs(
@@ -428,53 +437,115 @@ export class StructuredLLMExecutor {
     const maxIterations = config.maxIterations ?? 10;
     const toolsUsed: string[] = [];
     let toolContext: ToolExecutionResult[] = [];
+    
+    // Debug logging for fuzzy search decision
+    if (config.requestId?.includes('fuzzy-search-decision')) {
+      console.log(`[executeSingle] [${config.requestId}] Starting with maxIterations=${maxIterations}, config.maxIterations=${config.maxIterations}, hasTools=${!!(config.tools && config.tools.length > 0)}`);
+    }
+
+    // Generate request ID if not provided (for tracing)
+    const baseRequestId = config.requestId || `llm-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+
+    // Allow multiple tool call rounds within a single iteration (for mini-agents like fuzzy search)
+    // This is controlled by maxToolCallRounds (default: 5 for single iteration, unlimited for multi-iteration)
+    const maxToolCallRounds = maxIterations === 1 ? (config.maxToolCallRounds ?? 5) : Infinity;
+    let toolCallRound = 0;
 
     for (let iteration = 1; iteration <= maxIterations; iteration++) {
-      // Build prompt
-      const prompt = this.buildSinglePrompt(config, toolContext);
+      // Reset tool call round counter for each iteration
+      toolCallRound = 0;
+      
+      // Declare variables outside the while loop so they're accessible after it
+      let parsed: TOutput | undefined;
+      let requestId: string = baseRequestId;
 
-      // Log prompt if requested
-      if (config.logPrompts) {
-        await this.logContent(`PROMPT [iter ${iteration}]`, prompt, config.logPrompts);
-      }
+      // Inner loop for multiple tool call rounds within a single iteration
+      while (toolCallRound < maxToolCallRounds) {
+        toolCallRound++;
 
-      // Call LLM
-      const response = await config.llmProvider.generateContent(prompt);
+        // Build prompt
+        const prompt = this.buildSinglePrompt(config, toolContext);
 
-      // Log response if requested
-      if (config.logResponses) {
-        await this.logContent(`RESPONSE [iter ${iteration}]`, response, config.logResponses);
-      }
+        // Generate request ID for this iteration/round
+        requestId = iteration === 1 && toolCallRound === 1 
+          ? baseRequestId 
+          : `${baseRequestId}-iter${iteration}${toolCallRound > 1 ? `-round${toolCallRound}` : ''}`;
 
-      // Parse response
-      const format = config.outputFormat || 'xml';
-      const parsedOrPromise = this.parseSingleResponse<TOutput>(response, config.outputSchema, format);
-      const parsed = parsedOrPromise instanceof Promise ? await parsedOrPromise : parsedOrPromise;
+        // Log prompt if requested
+        if (config.logPrompts) {
+          await this.logContent(`PROMPT [${requestId}] [iter ${iteration}, round ${toolCallRound}]`, prompt, config.logPrompts);
+        }
 
-      // Extract tool_calls if present
-      const toolCalls = (parsed as any).tool_calls as ToolCallRequest[] | undefined;
-      const validToolCalls = this.filterValidToolCalls(toolCalls);
+        // Call LLM with request ID
+        const response = await config.llmProvider.generateContent(prompt, requestId);
 
-      // Call callback
-      if (config.onLLMResponse) {
-        config.onLLMResponse({
-          iteration,
-          reasoning: (parsed as any).answer || (parsed as any).reasoning,
-          toolCalls: validToolCalls,
-          output: parsed,
-        });
-      }
+        // Log raw response for fuzzy search decision debugging
+        if (requestId.includes('fuzzy-search-decision')) {
+          console.log(`[executeSingle] [${requestId}] Raw LLM response [iter ${iteration}, round ${toolCallRound}]:`, response.substring(0, 500));
+        }
 
-      // If we have tool calls, execute them and continue
-      if (validToolCalls.length > 0 && config.toolExecutor) {
-        const toolResults = await this.executeToolCalls(validToolCalls, config.toolExecutor);
-        toolContext.push(...toolResults);
-        toolResults.forEach(r => {
-          if (!toolsUsed.includes(r.tool_name)) {
-            toolsUsed.push(r.tool_name);
+        // Log response if requested
+        if (config.logResponses) {
+          await this.logContent(`RESPONSE [iter ${iteration}, round ${toolCallRound}]`, response, config.logResponses);
+        }
+
+        // Parse response
+        const format = config.outputFormat || 'xml';
+        const parsedOrPromise = this.parseSingleResponse<TOutput>(response, config.outputSchema, format);
+        parsed = parsedOrPromise instanceof Promise ? await parsedOrPromise : parsedOrPromise;
+        
+        // Log parsed response for fuzzy search decision debugging
+        if (requestId.includes('fuzzy-search-decision')) {
+          console.log(`[executeSingle] [${requestId}] Parsed response [iter ${iteration}, round ${toolCallRound}]:`, JSON.stringify(parsed, null, 2));
+        }
+
+        // Extract tool_calls if present
+        const toolCalls = (parsed as any).tool_calls as ToolCallRequest[] | undefined;
+        const validToolCalls = this.filterValidToolCalls(toolCalls);
+
+        // Call callback
+        if (config.onLLMResponse) {
+          config.onLLMResponse({
+            iteration,
+            reasoning: (parsed as any).answer || (parsed as any).reasoning,
+            toolCalls: validToolCalls,
+            output: parsed,
+          });
+        }
+
+        // If we have tool calls, execute them
+        if (validToolCalls.length > 0 && config.toolExecutor) {
+          const toolResults = await this.executeToolCalls(validToolCalls, config.toolExecutor);
+          toolContext.push(...toolResults);
+          toolResults.forEach(r => {
+            if (!toolsUsed.includes(r.tool_name)) {
+              toolsUsed.push(r.tool_name);
+            }
+          });
+          
+          // Special case: if maxIterations === 1 and maxToolCallRounds === 1,
+          // return immediately after executing tools (no need for final LLM response)
+          if (maxIterations === 1 && maxToolCallRounds === 1 && toolContext.length > 0) {
+            // Return a minimal output indicating tools were executed
+            return { done: true } as TOutput;
           }
-        });
-        continue;
+          
+          // Continue to next tool call round within the same iteration
+          continue;
+        }
+
+        // No tool calls - check if we have valid output and break from inner loop
+        break;
+      }
+
+      // After the while loop, parsed and requestId are available
+      // Special case: if we executed tools and maxIterations === 1, return immediately
+      if (maxIterations === 1 && toolContext.length > 0) {
+        return { done: true } as TOutput;
+      }
+      
+      if (!parsed) {
+        throw new Error(`No valid output after iteration ${iteration}`);
       }
 
       // No tool calls - check if we have valid output
@@ -496,17 +567,49 @@ export class StructuredLLMExecutor {
                                   outputText.includes('trouvé') ||
                                   outputText.includes('terminé');
 
-      if (hasValidOutput && (hasUsedTools || indicatesCompletion || iteration >= maxIterations)) {
+      // If no tools are configured, return immediately when we have valid output
+      const hasToolsConfigured = config.tools && config.tools.length > 0;
+      
+      // Debug logging for fuzzy search decision case
+      if (requestId.includes('fuzzy-search-decision')) {
+        console.log(`[executeSingle] [${requestId}] Debug:`, {
+          hasValidOutput,
+          hasToolsConfigured,
+          hasUsedTools,
+          indicatesCompletion,
+          iteration,
+          maxIterations,
+          outputFields,
+          parsedKeys: Object.keys(parsed as any),
+          parsedValues: Object.fromEntries(outputFields.map(k => [k, (parsed as any)[k]]))
+        });
+      }
+      
+      if (hasValidOutput && (!hasToolsConfigured || hasUsedTools || indicatesCompletion || iteration >= maxIterations)) {
         // Remove tool_calls from output
         const { tool_calls: _, ...output } = parsed as any;
+        if (requestId.includes('fuzzy-search-decision')) {
+          console.log(`[executeSingle] [${requestId}] Returning output after iteration ${iteration}`);
+        }
         return output as TOutput;
       }
 
       // If we have output but haven't used tools yet and tools are available, encourage tool usage
-      if (hasValidOutput && !hasUsedTools && config.tools && config.tools.length > 0 && iteration < maxIterations) {
+      if (hasValidOutput && !hasUsedTools && hasToolsConfigured && iteration < maxIterations) {
         // Don't return yet - we want the agent to use tools first
         // This ensures thorough investigation before answering
         // The prompt will remind the agent to use tools
+        if (requestId.includes('fuzzy-search-decision')) {
+          console.log(`[executeSingle] [${requestId}] Continuing iteration ${iteration} - waiting for tools`);
+        }
+        continue;
+      }
+      
+      // If no valid output and not at max iterations, continue
+      if (!hasValidOutput && iteration < maxIterations) {
+        if (requestId.includes('fuzzy-search-decision')) {
+          console.log(`[executeSingle] [${requestId}] No valid output at iteration ${iteration}, continuing...`);
+        }
         continue;
       }
 
@@ -1305,7 +1408,8 @@ export class StructuredLLMExecutor {
 
   private async executeParallelLLM<T>(
     batches: Batch<T>[],
-    config: LLMStructuredCallConfig<T, any>
+    config: LLMStructuredCallConfig<T, any>,
+    baseRequestId: string
   ): Promise<LLMResponse[]> {
     const parallel = config.parallel || 5;
     const results: LLMResponse[] = [];
@@ -1319,7 +1423,10 @@ export class StructuredLLMExecutor {
       );
 
       const groupResults = await Promise.all(
-        batchGroup.map(batch => this.executeSingleLLMBatch(batch, config))
+        batchGroup.map((batch, batchIndex) => {
+          const batchRequestId = `${baseRequestId}-batch${i * parallel + batchIndex + 1}`;
+          return this.executeSingleLLMBatch(batch, config, batchRequestId);
+        })
       );
 
       results.push(...groupResults);
@@ -1330,7 +1437,8 @@ export class StructuredLLMExecutor {
 
   private async executeSingleLLMBatch<T>(
     batch: Batch<T>,
-    config: LLMStructuredCallConfig<T, any>
+    config: LLMStructuredCallConfig<T, any>,
+    requestId: string
   ): Promise<LLMResponse> {
     // Build prompt
     const prompt = this.buildPrompt(batch.items, config);
@@ -1344,7 +1452,9 @@ export class StructuredLLMExecutor {
 
     // Use LLMProvider (required - LlamaIndex multi-provider support disabled)
     if (config.llmProvider) {
-      response = await config.llmProvider.generateContent(prompt);
+      // Generate request ID for batch call (use config.requestId if available, otherwise generate)
+      const requestId = (config as any).requestId || `batch-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+      response = await config.llmProvider.generateContent(prompt, requestId);
     } else {
       // LlamaIndex multi-provider fallback - DISABLED
       // To restore, uncomment provider-adapter.ts imports and getLLMProvider method

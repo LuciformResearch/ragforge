@@ -311,7 +311,8 @@ export class LLMReranker {
           return prompt;
         });
 
-        const responses = await this.llmProvider.generateBatch(prompts);
+        const batchRequestId = `rerank-batch-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+        const responses = await this.llmProvider.generateBatch!(prompts, batchRequestId);
 
         responses.forEach((response, idx) => {
           if (this.options.debugPrompt) {
@@ -513,7 +514,8 @@ export class LLMReranker {
       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
     }
 
-    const response = await this.llmProvider.generateContent(prompt);
+    const requestId = `rerank-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+    const response = await this.llmProvider.generateContent(prompt, requestId);
 
     // Debug: log response if enabled
     if (this.options.debugPrompt) {

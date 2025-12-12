@@ -571,7 +571,7 @@ const FILE_MODIFICATION_TOOLS = new Set(['write_file', 'edit_file']);
 
 const PROJECT_MANAGEMENT_TOOLS = new Set(['create_project', 'setup_project', 'load_project']);
 
-class GeneratedToolExecutor extends BaseToolExecutor {
+export class GeneratedToolExecutor extends BaseToolExecutor {
   private handlers: Record<string, (args: Record<string, any>) => Promise<any>>;
   private verbose: boolean;
   private logger?: AgentLogger;
@@ -769,7 +769,8 @@ Only return the translated text, nothing else.
 ${personaTemplate}`;
 
   try {
-    const response = await llmProvider.generateContent(prompt);
+    const requestId = `persona-enhance-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+    const response = await llmProvider.generateContent(prompt, requestId);
     return response.trim() || personaTemplate;
   } catch (error) {
     console.warn('[RagAgent] Failed to translate persona, using original:', error);

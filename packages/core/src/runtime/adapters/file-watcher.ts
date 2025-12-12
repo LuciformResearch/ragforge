@@ -160,6 +160,15 @@ export class FileWatcher {
     // Watcher is ready immediately - no need to wait for 'ready' event
     // The watcher can detect file changes right away
     console.log(`[FileWatcher] Watcher ready immediately (functional, initial scan may continue in background)`);
+
+    // Call afterBatch on startup to process any existing dirty embeddings
+    // This handles nodes that were marked dirty before the watcher started
+    if (this.config.afterBatch) {
+      const emptyStats = { unchanged: 0, updated: 0, created: 0, deleted: 0 };
+      this.config.afterBatch(emptyStats).catch(err => {
+        console.warn(`[FileWatcher] Initial afterBatch failed: ${err.message}`);
+      });
+    }
   }
 
   /**

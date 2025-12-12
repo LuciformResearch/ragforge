@@ -168,6 +168,30 @@ export {
 } from './tools/brain-tools.js';
 export type { BrainToolsContext } from './tools/brain-tools.js';
 
+// Agent Tools (call agent, extract prompts, call steps)
+export {
+  generateAgentTools,
+  generateAgentToolHandlers,
+} from './tools/agent-tools.js';
+export type { AgentToolsContext } from './tools/agent-tools.js';
+
+// Debug Tools (inspect/test conversation memory)
+export {
+  generateAllDebugTools,
+  generateAllDebugHandlers,
+  generateDebugContextTool,
+  generateDebugContextHandler,
+  generateDebugConversationSearchTool,
+  generateDebugConversationSearchHandler,
+  generateDebugInjectTurnTool,
+  generateDebugInjectTurnHandler,
+  generateDebugListSummariesTool,
+  generateDebugListSummariesHandler,
+  generateDebugMessageTool,
+  generateDebugMessageHandler,
+} from './tools/debug-tools.js';
+export type { DebugToolsContext } from './tools/debug-tools.js';
+
 // Database Tools (query external databases)
 export {
   generateDatabaseTools,
