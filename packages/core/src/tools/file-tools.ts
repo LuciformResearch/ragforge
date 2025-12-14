@@ -15,6 +15,10 @@ import type {
 import { createTwoFilesPatch } from 'diff';
 import { distance as levenshtein } from 'fastest-levenshtein';
 import type { IngestionLock } from './ingestion-lock.js';
+import { isDocumentFile, parseDocumentFile, type DocumentFileInfo } from '../runtime/adapters/document-file-parser.js';
+
+// Image and document extensions for delegation
+const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg']);
 
 // ============================================
 // Constants
@@ -284,12 +288,97 @@ export function generateReadFileHandler(ctx: FileToolsContext): (args: any) => P
       throw err;
     }
 
-    // Check if binary
-    if (await isBinaryFile(absolutePath)) {
-      return { error: `Cannot read binary file: ${absolutePath}` };
+    // Get file extension
+    const ext = pathModule.extname(absolutePath).toLowerCase();
+
+    // Check if it's a document file (PDF, DOCX, XLSX, CSV)
+    if (isDocumentFile(absolutePath)) {
+      try {
+        // Import Gemini Vision fallback for low-confidence OCR
+        const { getOCRService } = await import('../runtime/index.js');
+        const ocrService = getOCRService({ primaryProvider: 'gemini' });
+
+        const geminiVisionFallback = ocrService.isAvailable()
+          ? async (imageBuffer: Buffer, prompt: string): Promise<string> => {
+              const result = await ocrService.extractTextFromData(imageBuffer, 'image/png', { prompt });
+              if (result.error) throw new Error(result.error);
+              return result.text || '';
+            }
+          : undefined;
+
+        const docInfo = await parseDocumentFile(absolutePath, {
+          extractText: true,
+          useOcr: true,
+          geminiVisionFallback,
+        });
+
+        if (!docInfo) {
+          return { error: `Failed to parse document: ${absolutePath}` };
+        }
+
+        // Notify touched-files tracker (non-blocking)
+        if (ctx.onFileAccessed) {
+          ctx.onFileAccessed(absolutePath).catch((err: Error) => {
+            console.error('[FileTools] onFileAccessed error:', err.message);
+          });
+        }
+
+        return {
+          path: filePath,
+          absolute_path: absolutePath,
+          format: docInfo.format,
+          page_count: docInfo.pageCount,
+          extraction_method: docInfo.extractionMethod,
+          ocr_confidence: docInfo.ocrConfidence,
+          has_full_text: docInfo.hasFullText,
+          needs_gemini_vision: docInfo.needsGeminiVision,
+          metadata: docInfo.metadata,
+          content: docInfo.textContent || '(No text extracted)',
+        };
+      } catch (err: any) {
+        return { error: `Document parsing error: ${err.message}` };
+      }
     }
 
-    // Read file
+    // Check if it's an image file
+    if (IMAGE_EXTENSIONS.has(ext)) {
+      try {
+        const { getOCRService } = await import('../runtime/index.js');
+        const ocrService = getOCRService(); // Use default provider (Tesseract, fallback to Gemini)
+
+        if (!ocrService.isAvailable()) {
+          return { error: `OCR service not available for image: ${absolutePath}` };
+        }
+
+        const result = await ocrService.extractText(absolutePath);
+
+        // Notify touched-files tracker (non-blocking)
+        if (ctx.onFileAccessed) {
+          ctx.onFileAccessed(absolutePath).catch((err: Error) => {
+            console.error('[FileTools] onFileAccessed error:', err.message);
+          });
+        }
+
+        return {
+          path: filePath,
+          absolute_path: absolutePath,
+          format: 'image',
+          extraction_method: result.provider,
+          ocr_confidence: result.confidence,
+          content: result.text || '(No text extracted from image)',
+          processing_time_ms: result.processingTimeMs,
+        };
+      } catch (err: any) {
+        return { error: `Image OCR error: ${err.message}` };
+      }
+    }
+
+    // Check if other binary file
+    if (await isBinaryFile(absolutePath)) {
+      return { error: `Cannot read binary file: ${absolutePath}. Supported binary formats: PDF, DOCX, XLSX, XLS, CSV, PNG, JPG, JPEG, GIF, WEBP, BMP, SVG` };
+    }
+
+    // Read text file
     const content = await fs.readFile(absolutePath, 'utf-8');
     const lines = content.split('\n');
     const totalLines = lines.length;

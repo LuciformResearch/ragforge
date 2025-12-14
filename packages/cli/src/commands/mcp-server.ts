@@ -319,21 +319,15 @@ async function prepareToolsForMcp(
     log('info', 'Running in standalone mode with limited tools');
   }
 
-  // File tools (read, write, edit, delete, move, copy) are routed via daemon
-  // This ensures brain integration for all file operations, including:
-  // - touchFile for orphan files on read
-  // - triggerReIngestion on file modifications
-  // See the brain tools section below where these are added via daemon proxy
-
-  // Add FS tools (list_directory, glob_files, etc.)
-  // Note: delete_path, move_file, copy_file are excluded - they're routed via daemon for brain integration
+  // Add FS tools (list_directory, glob_files, etc.) - these run locally as they don't need brain
   const fsTools = generateFsTools({ projectRoot: () => ctx.currentProjectPath || process.cwd() });
-  const brainRoutedTools = new Set(['delete_path', 'move_file', 'copy_file']);
-  const filteredFsTools = fsTools.tools.filter(t => !brainRoutedTools.has(t.name));
+  // Filter out tools that are routed via daemon for brain integration
+  const daemonRoutedFsTools = new Set(['delete_path', 'move_file', 'copy_file']);
+  const filteredFsTools = fsTools.tools.filter(t => !daemonRoutedFsTools.has(t.name));
   allTools.push(...filteredFsTools);
   for (const [name, handler] of Object.entries(fsTools.handlers)) {
     // Skip tools routed via daemon
-    if (brainRoutedTools.has(name)) continue;
+    if (daemonRoutedFsTools.has(name)) continue;
     // Wrap handlers for grep_files and search_files to handle extract_hierarchy via daemon
     if (name === 'grep_files' || name === 'search_files') {
       allHandlers[name] = async (args: any) => {
@@ -443,109 +437,9 @@ async function prepareToolsForMcp(
     log('debug', 'Discovery tools disabled (no project loaded)');
   }
 
-  // Add web tools (search, fetch) - if Gemini API key available
-  // Try brain proxy config first, then fallback to env
-  const webGeminiKey = ctx.brainProxy?.getGeminiKey() || getEnv(['GEMINI_API_KEY']);
-  if (webGeminiKey) {
-    const webToolsCtx: WebToolsContext = {
-      geminiApiKey: webGeminiKey,
-      // Wire up web page ingestion to brain
-      ingestWebPage: ctx.brainProxy
-        ? async (params) => {
-            log('debug', `Ingesting web page: ${params.url}`);
-            try {
-              const result = await ctx.brainProxy!.ingestWebPage({
-                url: params.url,
-                title: params.title,
-                textContent: params.textContent,
-                rawHtml: params.rawHtml,
-                projectName: params.projectName,
-                generateEmbeddings: true,
-              });
-              log('debug', `Web page ingested: ${params.url} → ${result.nodeId}`);
-              return result;
-            } catch (e: any) {
-              log('debug', `Web ingestion failed: ${e.message}`);
-              return { success: false };
-            }
-          }
-        : undefined,
-    };
-    const webHandlers = createWebToolHandlers(webToolsCtx);
-    allTools.push(...webToolDefinitions);
-    for (const [name, handler] of Object.entries(webHandlers)) {
-      allHandlers[name] = handler;
-    }
-    log('debug', 'Web tools enabled');
-  } else {
-    log('debug', 'Web tools disabled (no GEMINI_API_KEY in ~/.ragforge/.env)');
-  }
-
-  // Add image tools
+  // File, Web, Image, and 3D tools are routed via daemon (see daemon section below)
+  // This ensures they benefit from daemon's brain integration and atomic ingestion
   const projectRoot = ctx.currentProjectPath || process.cwd();
-  const imageToolsCtx: ImageToolsContext = {
-    projectRoot: projectRoot,
-    // Auto-ingest generated/edited images
-    onContentExtracted: ctx.brainProxy
-      ? async (params) => {
-          log('debug', `Image content extracted: ${params.filePath}`);
-          try {
-            await ctx.brainProxy!.updateMediaContent({
-              filePath: params.filePath,
-              textContent: params.textContent,
-              description: params.description,
-              ocrConfidence: params.ocrConfidence,
-              extractionMethod: params.extractionMethod,
-              generateEmbeddings: params.generateEmbeddings,
-              sourceFiles: params.sourceFiles,
-            });
-            log('debug', `Image ingested: ${params.filePath}`);
-            return { updated: true };
-          } catch (e: any) {
-            log('debug', `Image ingestion failed: ${e.message}`);
-            return { updated: false };
-          }
-        }
-      : undefined,
-  };
-  const imageTools = generateImageTools(imageToolsCtx);
-  allTools.push(...imageTools.tools);
-  for (const [name, handler] of Object.entries(imageTools.handlers)) {
-    allHandlers[name] = handler;
-  }
-  log('debug', 'Image tools enabled');
-
-  // Add 3D tools
-  const threeDToolsCtx: ThreeDToolsContext = {
-    projectRoot: projectRoot,
-    // Auto-ingest generated 3D models
-    onContentExtracted: ctx.brainProxy
-      ? async (params) => {
-          log('debug', `3D content extracted: ${params.filePath}`);
-          try {
-            await ctx.brainProxy!.updateMediaContent({
-              filePath: params.filePath,
-              textContent: params.textContent,
-              description: params.description,
-              extractionMethod: params.extractionMethod,
-              generateEmbeddings: params.generateEmbeddings,
-              sourceFiles: params.sourceFiles,
-            });
-            log('debug', `3D model ingested: ${params.filePath}`);
-            return { updated: true };
-          } catch (e: any) {
-            log('debug', `3D ingestion failed: ${e.message}`);
-            return { updated: false };
-          }
-        }
-      : undefined,
-  };
-  const threeDTools = generate3DTools(threeDToolsCtx);
-  allTools.push(...threeDTools.tools);
-  for (const [name, handler] of Object.entries(threeDTools.handlers)) {
-    allHandlers[name] = handler;
-  }
-  log('debug', '3D tools enabled');
 
   log('info', `Prepared ${allTools.length} tools total`);
 
@@ -565,11 +459,9 @@ async function prepareToolsForMcp(
     }
   };
 
-  // Add agent tools via daemon (with auto-restart)
-  // This ensures the daemon is always running when agent tools are called
+  // Add tools via daemon (with auto-restart)
+  // This ensures the daemon is always running and handles brain integration atomically
   {
-    const agentToolDefs = generateAgentTools();
-
     // Create daemon proxy handlers - these auto-restart the daemon if needed
     const createDaemonProxyHandler = (toolName: string) => async (args: any) => {
       log('debug', `Calling ${toolName} via daemon (auto-restart enabled)`);
@@ -580,12 +472,46 @@ async function prepareToolsForMcp(
       return result.result;
     };
 
-    // Add agent tool definitions with daemon proxy handlers
+    // Add file tools via daemon (for brain integration - touchFile on read, triggerReIngestion on modify)
+    const fileTools = generateFileTools({ projectRoot: () => ctx.currentProjectPath || process.cwd() });
+    allTools.push(...fileTools.tools);
+    for (const toolDef of fileTools.tools) {
+      allHandlers[toolDef.name] = createDaemonProxyHandler(toolDef.name);
+    }
+    log('debug', `File tools enabled (via daemon) - ${fileTools.tools.length} tools`);
+
+    // Add web tools via daemon (for brain integration and web page ingestion)
+    allTools.push(...webToolDefinitions);
+    for (const toolDef of webToolDefinitions) {
+      allHandlers[toolDef.name] = createDaemonProxyHandler(toolDef.name);
+    }
+    log('debug', `Web tools enabled (via daemon) - ${webToolDefinitions.length} tools`);
+
+    // Add image tools via daemon (for brain integration and atomic ingestion)
+    const imageToolsCtx: ImageToolsContext = { projectRoot };
+    const imageTools = generateImageTools(imageToolsCtx);
+    allTools.push(...imageTools.tools);
+    for (const toolDef of imageTools.tools) {
+      allHandlers[toolDef.name] = createDaemonProxyHandler(toolDef.name);
+    }
+    log('debug', `Image tools enabled (via daemon) - ${imageTools.tools.length} tools`);
+
+    // Add 3D tools via daemon (for brain integration and atomic ingestion)
+    const threeDToolsCtx: ThreeDToolsContext = { projectRoot };
+    const threeDTools = generate3DTools(threeDToolsCtx);
+    allTools.push(...threeDTools.tools);
+    for (const toolDef of threeDTools.tools) {
+      allHandlers[toolDef.name] = createDaemonProxyHandler(toolDef.name);
+    }
+    log('debug', `3D tools enabled (via daemon) - ${threeDTools.tools.length} tools`);
+
+    // Add agent tools via daemon
+    const agentToolDefs = generateAgentTools();
     allTools.push(...agentToolDefs);
     for (const toolDef of agentToolDefs) {
       allHandlers[toolDef.name] = createDaemonProxyHandler(toolDef.name);
     }
-    log('debug', `Agent tools enabled (via daemon with auto-restart) - ${agentToolDefs.length} tools: call_agent, extract_agent_prompt, call_agent_steps, create_conversation, switch_conversation`);
+    log('debug', `Agent tools enabled (via daemon) - ${agentToolDefs.length} tools`);
 
     // Add debug tools via daemon (for conversation memory inspection/testing)
     const debugToolDefs = generateAllDebugTools();
@@ -593,7 +519,7 @@ async function prepareToolsForMcp(
     for (const toolDef of debugToolDefs) {
       allHandlers[toolDef.name] = createDaemonProxyHandler(toolDef.name);
     }
-    log('debug', `Debug tools enabled (via daemon) - ${debugToolDefs.length} tools: ${debugToolDefs.map(t => t.name).join(', ')}`);
+    log('debug', `Debug tools enabled (via daemon) - ${debugToolDefs.length} tools`);
   }
 
   log('debug', 'All tools prepared');

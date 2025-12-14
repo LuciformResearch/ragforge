@@ -14,7 +14,32 @@ import { BrainManager, type QuickIngestOptions, type BrainSearchOptions, type Qu
 import type { GeneratedToolDefinition } from './types/index.js';
 import { getGlobalFetchCache, type CachedFetchResult } from './web-tools.js';
 import { NODE_SCHEMAS, CONTENT_NODE_LABELS, type NodeTypeSchema } from '../utils/node-schema.js';
+import { isDocumentFile, parseDocumentFile, type DocumentFileInfo } from '../runtime/adapters/document-file-parser.js';
 import * as path from 'path';
+
+// Image file extensions
+const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg']);
+
+/**
+ * Gemini Vision fallback for low-confidence OCR
+ * Used by parseDocumentFile when Tesseract OCR confidence is too low
+ */
+async function geminiVisionFallback(imageBuffer: Buffer, prompt: string): Promise<string> {
+  const { getOCRService } = await import('../runtime/index.js');
+  const ocrService = getOCRService({ primaryProvider: 'gemini' });
+
+  if (!ocrService.isAvailable()) {
+    throw new Error('Gemini Vision not available. Set GEMINI_API_KEY.');
+  }
+
+  // pdf-to-img outputs PNG images
+  const result = await ocrService.extractTextFromData(imageBuffer, 'image/png', { prompt });
+  if (result.error) {
+    throw new Error(result.error);
+  }
+
+  return result.text || '';
+}
 
 /**
  * Context for brain tools
@@ -2192,15 +2217,26 @@ export function generateBrainReadFileTool(): GeneratedToolDefinition {
 Returns file content with line numbers (format: "00001| content").
 Supports pagination with offset and limit for large files.
 
+**File type handling:**
+- Text/code files: Read content with line numbers
+- Images: Visual description (default) or OCR text extraction
+- PDFs/Documents: OCR text extraction (default) or visual analysis
+- 3D models (.glb, .gltf): Render and describe
+
 Parameters:
 - path: Absolute or relative file path
 - offset: Start line (0-based, optional)
 - limit: Max lines to read (default: 2000)
+- ocr: For images/documents - use OCR text extraction (default: false for images, true for PDFs)
+  When OCR confidence is low, automatically falls back to Gemini Vision.
 
 Long lines (>2000 chars) are truncated with "...".
-Binary files cannot be read.
 
-Example: read_file({ path: "src/index.ts" })`,
+Example: read_file({ path: "src/index.ts" })
+Example: read_file({ path: "screenshot.png" })  // Visual description
+Example: read_file({ path: "screenshot.png", ocr: true })  // Extract text from image
+Example: read_file({ path: "document.pdf" })  // Extract text (OCR)
+Example: read_file({ path: "document.pdf", ocr: false })  // Visual analysis`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -2215,6 +2251,10 @@ Example: read_file({ path: "src/index.ts" })`,
         limit: {
           type: 'number',
           description: 'Max lines to read (default: 2000)',
+        },
+        ocr: {
+          type: 'boolean',
+          description: 'For images/documents: use OCR text extraction. Default: false for images (visual description), true for PDFs (text extraction). Low confidence OCR automatically falls back to Gemini Vision.',
         },
       },
       required: ['path'],
@@ -2425,23 +2465,25 @@ function stripLineNumberPrefix(text: string): string {
 }
 
 /**
- * Generate handler for read_file (brain-aware)
+ * Generate handler for read_file (brain-aware with caching)
  */
 export function generateBrainReadFileHandler(ctx: BrainToolsContext) {
-  return async (params: { path: string; offset?: number; limit?: number }): Promise<any> => {
-    const { path: filePath, offset = 0, limit = DEFAULT_READ_LIMIT } = params;
+  return async (params: { path: string; offset?: number; limit?: number; ocr?: boolean }): Promise<any> => {
+    const { path: filePath, offset = 0, limit = DEFAULT_READ_LIMIT, ocr } = params;
     const fs = await import('fs/promises');
     const pathModule = await import('path');
+    const crypto = await import('crypto');
 
     // Resolve path (use cwd as fallback)
     const absolutePath = pathModule.isAbsolute(filePath)
       ? filePath
       : pathModule.resolve(process.cwd(), filePath);
 
-    // Check file exists
+    // Check file exists and get stats
+    let fileStats: import('fs').Stats;
     try {
-      const stat = await fs.stat(absolutePath);
-      if (stat.isDirectory()) {
+      fileStats = await fs.stat(absolutePath);
+      if (fileStats.isDirectory()) {
         return { error: `Path is a directory, not a file: ${absolutePath}` };
       }
     } catch (err: any) {
@@ -2451,12 +2493,332 @@ export function generateBrainReadFileHandler(ctx: BrainToolsContext) {
       throw err;
     }
 
-    // Check if binary
-    if (await isBinaryFile(absolutePath)) {
-      return { error: `Cannot read binary file: ${absolutePath}` };
+    // Check file type and delegate to appropriate parser
+    const ext = pathModule.extname(absolutePath).toLowerCase();
+
+    // Helper: compute file hash for cache validation
+    const computeFileHash = async (): Promise<string> => {
+      const fileBuffer = await fs.readFile(absolutePath);
+      return crypto.createHash('sha256').update(fileBuffer).digest('hex').substring(0, 16);
+    };
+
+    // Helper: check cache in brain DB
+    const checkCache = async (): Promise<{
+      cached: boolean;
+      textContent?: string;
+      extractionMethod?: string;
+      ocrConfidence?: number;
+      storedHash?: string;
+    }> => {
+      const result = await ctx.brain.getCachedMediaContent(absolutePath);
+      return {
+        cached: result.cached,
+        textContent: result.textContent,
+        extractionMethod: result.extractionMethod,
+        ocrConfidence: result.ocrConfidence,
+        storedHash: result.hash,
+      };
+    };
+
+    // Helper: store extracted content in brain DB
+    const storeContent = async (content: string, hash: string, method: string, confidence?: number): Promise<void> => {
+      try {
+        await ctx.brain.updateMediaContent({
+          filePath: absolutePath,
+          textContent: content,
+          extractionMethod: method,
+          ocrConfidence: confidence,
+        });
+        // Update hash
+        await ctx.brain.updateMediaHash(absolutePath, hash);
+      } catch (err) {
+        console.warn('[read_file] Failed to store content in cache:', err);
+      }
+    };
+
+    // 1. Document files (PDF, DOCX, XLSX, etc.) - use document parser with cache
+    if (isDocumentFile(absolutePath)) {
+      try {
+        // Check cache first
+        const cache = await checkCache();
+        const currentHash = await computeFileHash();
+
+        let textContent: string;
+        let extractionMethod: string;
+        let ocrConfidence: number | undefined;
+        let fromCache = false;
+
+        if (cache.cached && cache.storedHash === currentHash && cache.textContent) {
+          // Cache hit - file unchanged
+          textContent = cache.textContent;
+          extractionMethod = cache.extractionMethod || 'cached';
+          ocrConfidence = cache.ocrConfidence;
+          fromCache = true;
+        } else {
+          // Cache miss or file changed - extract content
+          const docInfo = await parseDocumentFile(absolutePath, {
+            extractText: true,
+            useOcr: true,
+            geminiVisionFallback, // Auto-fallback to Gemini Vision for low OCR confidence
+          });
+
+          if (!docInfo) {
+            return { error: `Failed to parse document: ${absolutePath}` };
+          }
+
+          textContent = docInfo.textContent || '';
+          extractionMethod = docInfo.extractionMethod || 'unknown';
+          ocrConfidence = docInfo.ocrConfidence;
+
+          // IMPORTANT: Store in cache SYNCHRONOUSLY to ensure File state is updated
+          // before read_file returns. This prevents the watcher from re-parsing the file.
+          try {
+            await storeContent(textContent, currentHash, extractionMethod, ocrConfidence);
+          } catch {
+            // Cache storage failed - continue anyway
+          }
+        }
+
+        const lines = textContent.split('\n');
+        const totalLines = lines.length;
+        const selectedLines = lines.slice(offset, offset + limit);
+
+        const formattedLines = selectedLines.map((line, index) => {
+          const lineNum = (index + offset + 1).toString().padStart(5, '0');
+          const truncatedLine = line.length > MAX_LINE_LENGTH
+            ? line.substring(0, MAX_LINE_LENGTH) + '...'
+            : line;
+          return `${lineNum}| ${truncatedLine}`;
+        });
+
+        const lastReadLine = offset + selectedLines.length;
+        const hasMoreLines = totalLines > lastReadLine;
+
+        let output = formattedLines.join('\n');
+        if (hasMoreLines) {
+          output += `\n\n(Document has more lines. Use offset=${lastReadLine} to continue. Total: ${totalLines} lines)`;
+        } else {
+          output += `\n\n(End of document - ${totalLines} lines)`;
+        }
+
+        // Track file access (async)
+        // Only call touchFile if we got content from cache (storeContent already calls it for cache misses)
+        if (fromCache) {
+          ctx.brain.touchFile(absolutePath).catch(() => {});
+        }
+        ctx.brain.updateFileAccess(absolutePath).catch(() => {});
+
+        return {
+          path: filePath,
+          absolute_path: absolutePath,
+          file_type: ext.replace('.', ''),
+          extraction_method: fromCache ? `${extractionMethod} (cached)` : extractionMethod,
+          total_lines: totalLines,
+          lines_read: selectedLines.length,
+          offset,
+          has_more: hasMoreLines,
+          content: output,
+        };
+      } catch (err: any) {
+        return { error: `Failed to parse document: ${err.message}` };
+      }
     }
 
-    // Read file
+    // 2. Image files - visual description (default) or OCR
+    // ocr defaults to false for images (visual description is more useful)
+    const useOcrForImage = ocr === true; // Only use OCR if explicitly requested
+    if (IMAGE_EXTENSIONS.has(ext)) {
+      try {
+        // Check cache first (cache key includes ocr mode)
+        const cacheMode = useOcrForImage ? 'ocr' : 'vision';
+        const cache = await checkCache();
+        const currentHash = await computeFileHash();
+
+        let textContent: string;
+        let extractionMethod: string;
+        let fromCache = false;
+
+        // Check if cached content matches current mode
+        const cacheValid = cache.cached &&
+          cache.storedHash === currentHash &&
+          cache.textContent &&
+          (useOcrForImage ? cache.extractionMethod?.includes('ocr') : cache.extractionMethod?.includes('vision'));
+
+        if (cacheValid) {
+          // Cache hit - file unchanged and same mode
+          textContent = cache.textContent!;
+          extractionMethod = cache.extractionMethod || 'cached';
+          fromCache = true;
+        } else if (useOcrForImage) {
+          // OCR mode - extract text with OCR, fallback to Gemini Vision if confidence is low
+          const { generateReadImageHandler } = await import('./image-tools.js');
+          const readImageHandler = generateReadImageHandler({
+            projectRoot: process.cwd(),
+            onContentExtracted: async () => ({ updated: false }),
+          });
+          const ocrResult = await readImageHandler({ path: absolutePath });
+
+          if (ocrResult.error) {
+            return { error: ocrResult.error };
+          }
+
+          // Check if OCR confidence is low and fallback to Gemini Vision
+          const LOW_CONFIDENCE_THRESHOLD = 0.6;
+          if (ocrResult.confidence !== undefined && ocrResult.confidence < LOW_CONFIDENCE_THRESHOLD) {
+            // Fallback to Gemini Vision for better results
+            const { generateDescribeImageHandler } = await import('./image-tools.js');
+            const describeHandler = generateDescribeImageHandler({
+              projectRoot: process.cwd(),
+              onContentExtracted: async () => ({ updated: false }),
+            });
+            const visionResult = await describeHandler({
+              path: absolutePath,
+              prompt: 'Extract and transcribe all text visible in this image. If there is no text, describe what you see.',
+            });
+
+            if (!visionResult.error) {
+              textContent = visionResult.description || '';
+              extractionMethod = 'gemini-vision-ocr-fallback';
+            } else {
+              // Keep OCR result even if low confidence
+              textContent = ocrResult.text || ocrResult.description || '';
+              extractionMethod = `${ocrResult.provider || 'ocr'} (low-confidence: ${(ocrResult.confidence * 100).toFixed(0)}%)`;
+            }
+          } else {
+            textContent = ocrResult.text || ocrResult.description || '';
+            extractionMethod = ocrResult.provider || 'ocr';
+          }
+
+          // Store in cache
+          try {
+            await storeContent(textContent, currentHash, extractionMethod, ocrResult.confidence);
+          } catch {
+            // Cache storage failed - continue anyway
+          }
+        } else {
+          // Vision mode (default) - visual description with Gemini Vision
+          const { generateDescribeImageHandler } = await import('./image-tools.js');
+          const describeHandler = generateDescribeImageHandler({
+            projectRoot: process.cwd(),
+            onContentExtracted: async () => ({ updated: false }),
+          });
+          const visionResult = await describeHandler({ path: absolutePath });
+
+          if (visionResult.error) {
+            return { error: visionResult.error };
+          }
+
+          textContent = visionResult.description || '';
+          extractionMethod = 'gemini-vision';
+
+          // Store in cache
+          try {
+            await storeContent(textContent, currentHash, extractionMethod);
+          } catch {
+            // Cache storage failed - continue anyway
+          }
+        }
+
+        const lines = textContent.split('\n');
+
+        // Track file access
+        if (fromCache) {
+          ctx.brain.touchFile(absolutePath).catch(() => {});
+        }
+        ctx.brain.updateFileAccess(absolutePath).catch(() => {});
+
+        return {
+          path: filePath,
+          absolute_path: absolutePath,
+          file_type: 'image',
+          extraction_method: fromCache ? `${extractionMethod} (cached)` : extractionMethod,
+          mode: useOcrForImage ? 'ocr' : 'vision',
+          total_lines: lines.length,
+          lines_read: lines.length,
+          offset: 0,
+          has_more: false,
+          content: textContent,
+        };
+      } catch (err: any) {
+        return { error: `Failed to read image: ${err.message}` };
+      }
+    }
+
+    // 3. 3D model files (.glb, .gltf) - render and describe
+    const THREED_EXTENSIONS = new Set(['.glb', '.gltf']);
+    if (THREED_EXTENSIONS.has(ext)) {
+      try {
+        // Check cache first
+        const cache = await checkCache();
+        const currentHash = await computeFileHash();
+
+        let description: string;
+        let extractionMethod: string;
+        let fromCache = false;
+
+        if (cache.cached && cache.storedHash === currentHash && cache.textContent) {
+          // Cache hit - file unchanged
+          description = cache.textContent;
+          extractionMethod = cache.extractionMethod || 'cached';
+          fromCache = true;
+        } else {
+          // Cache miss - analyze 3D model (render + describe with Gemini Vision)
+          const { generateAnalyze3DModelHandler } = await import('./threed-tools.js');
+
+          // Create minimal context for analysis
+          const analyzeCtx = {
+            projectRoot: process.cwd(),
+            onContentExtracted: async () => ({ updated: false }),
+          };
+
+          const analyze3DHandler = generateAnalyze3DModelHandler(analyzeCtx);
+          const analyzeResult = await analyze3DHandler({
+            model_path: absolutePath,
+            views: ['perspective'], // Single view for quick analysis
+          });
+
+          if (analyzeResult.error) {
+            return { error: `Failed to analyze 3D model: ${analyzeResult.error}` };
+          }
+
+          // Use the global description from analysis
+          description = analyzeResult.global_description || analyzeResult.description || 'No description available';
+          extractionMethod = '3d-render-describe';
+
+          // Store in cache
+          try {
+            await storeContent(description, currentHash, extractionMethod);
+          } catch {
+            // Cache storage failed - continue anyway
+          }
+        }
+
+        // Track file access
+        if (fromCache) {
+          ctx.brain.touchFile(absolutePath).catch(() => {});
+        }
+        ctx.brain.updateFileAccess(absolutePath).catch(() => {});
+
+        return {
+          path: filePath,
+          absolute_path: absolutePath,
+          file_type: '3d-model',
+          format: ext.replace('.', ''),
+          extraction_method: fromCache ? `${extractionMethod} (cached)` : extractionMethod,
+          content: description,
+          hint: 'Use analyze_3d_model for detailed multi-view analysis with rendered images.',
+        };
+      } catch (err: any) {
+        return { error: `Failed to analyze 3D model: ${err.message}` };
+      }
+    }
+
+    // 4. Check if binary (other file types)
+    if (await isBinaryFile(absolutePath)) {
+      return { error: `Cannot read binary file: ${absolutePath}. Use specific tools for this file type.` };
+    }
+
+    // 5. Text files - read normally
     const content = await fs.readFile(absolutePath, 'utf-8');
     const lines = content.split('\n');
     const totalLines = lines.length;

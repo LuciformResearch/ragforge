@@ -1780,11 +1780,12 @@ volumes:
    *
    * @returns Info about what happened
    */
-  async touchFile(filePath: string): Promise<{
+  async touchFile(filePath: string, options?: { initialState?: string }): Promise<{
     created: boolean;
     previousState: string | null;
     newState: string;
   }> {
+    const initialState = options?.initialState ?? 'discovered';
     const absolutePath = path.resolve(filePath);
 
     // Check if in a known project - if so, skip
@@ -1819,7 +1820,7 @@ volumes:
         f.uuid = $fileUuid,
         f.name = $name,
         f.extension = $extension,
-        f.state = 'discovered',
+        f.state = $initialState,
         f.projectId = 'touched-files',
         f.firstAccessed = $timestamp,
         f.lastAccessed = $timestamp,
@@ -1828,7 +1829,11 @@ volumes:
         f.lastAccessed = $timestamp,
         f.accessCount = COALESCE(f.accessCount, 0) + 1,
         f.state = CASE
-          WHEN f.state = 'mentioned' THEN 'discovered'
+          // Allow 'parsing' to claim a 'discovered' or 'mentioned' file
+          WHEN $initialState = 'parsing' AND f.state IN ['discovered', 'mentioned'] THEN 'parsing'
+          // Allow 'discovered' to upgrade 'mentioned'
+          WHEN $initialState = 'discovered' AND f.state = 'mentioned' THEN 'discovered'
+          // Otherwise keep current state (don't regress)
           ELSE f.state
         END
       WITH f,
@@ -1840,6 +1845,7 @@ volumes:
     `, {
       absolutePath,
       fileUuid,
+      initialState,
       name: path.basename(absolutePath),
       extension: path.extname(absolutePath),
       dirPath: path.dirname(absolutePath),
@@ -1863,7 +1869,9 @@ volumes:
 
     // Trigger background processing if file needs indexing
     // Non-blocking: fire and forget
-    if (newState === 'discovered') {
+    // - 'discovered' → needs parsing + embedding
+    // - 'parsing' or 'linked' → needs embedding only (content already extracted)
+    if (newState === 'discovered' || newState === 'parsing' || newState === 'linked') {
       this.processOrphanFiles().catch(err => {
         console.warn(`[TouchedFiles] Background processing failed: ${err.message}`);
       });
@@ -2892,6 +2900,61 @@ volumes:
   // ============================================
 
   /**
+   * Get cached media content for a file (if exists and hash matches)
+   * Used by read_file to avoid re-extracting content for unchanged files
+   */
+  async getCachedMediaContent(filePath: string): Promise<{
+    cached: boolean;
+    textContent?: string;
+    extractionMethod?: string;
+    ocrConfidence?: number;
+    hash?: string;
+  }> {
+    if (!this.neo4jClient) {
+      return { cached: false };
+    }
+
+    try {
+      const result = await this.neo4jClient.run(`
+        MATCH (n)
+        WHERE n.absolutePath = $absolutePath
+          AND (n:DocumentFile OR n:MediaFile OR n:ImageFile OR n:PDFDocument OR n:SpreadsheetDocument OR n:WordDocument)
+        RETURN n.textContent as textContent, n.hash as hash,
+               n.extractionMethod as extractionMethod, n.ocrConfidence as ocrConfidence
+        LIMIT 1
+      `, { absolutePath: filePath });
+
+      if (result.records[0]) {
+        const record = result.records[0];
+        return {
+          cached: true,
+          textContent: record.get('textContent'),
+          extractionMethod: record.get('extractionMethod'),
+          ocrConfidence: record.get('ocrConfidence'),
+          hash: record.get('hash'),
+        };
+      }
+    } catch {
+      // Cache check failed
+    }
+    return { cached: false };
+  }
+
+  /**
+   * Update hash for a media/document node
+   */
+  async updateMediaHash(filePath: string, hash: string): Promise<void> {
+    if (!this.neo4jClient) return;
+
+    await this.neo4jClient.run(`
+      MATCH (n)
+      WHERE n.absolutePath = $absolutePath
+        AND (n:DocumentFile OR n:MediaFile OR n:ImageFile OR n:PDFDocument OR n:SpreadsheetDocument OR n:WordDocument)
+      SET n.hash = $hash
+    `, { absolutePath: filePath, hash });
+  }
+
+  /**
    * Update media content with extracted text/description
    * Used by read_image, describe_image, analyze_visual, etc.
    */
@@ -2942,11 +3005,12 @@ volumes:
         projectId = BrainManager.TOUCHED_FILES_PROJECT_ID;
         console.log(`[BrainManager] Using orphan file tracking for: ${filePath}`);
       } else {
-        // Create as new orphan file using touchFile method
+        // Create as new orphan file using touchFile method with 'parsing' state
+        // This prevents the watcher from processing it (watcher only processes 'discovered')
         try {
-          await this.touchFile(filePath);
+          await this.touchFile(filePath, { initialState: 'parsing' });
           projectId = BrainManager.TOUCHED_FILES_PROJECT_ID;
-          console.log(`[BrainManager] Created orphan file tracking for: ${filePath}`);
+          console.log(`[BrainManager] Created orphan file tracking for: ${filePath} (state: parsing)`);
         } catch (err) {
           console.log(`[BrainManager] File not in any project and cannot create orphan tracking: ${filePath}`);
           return { updated: false };
@@ -2954,13 +3018,15 @@ volumes:
       }
     }
 
-    // Find existing node by file path
-    // For orphan files, use absolutePath; for project files, use file/path
+    // Find existing CONTENT node by file path (not File nodes - those are structural)
+    // Content nodes: DocumentFile, MediaFile, ImageFile, PDFDocument, etc.
     const fileName = pathModule.basename(filePath);
     const findResult = await this.neo4jClient.run(
       `MATCH (n)
        WHERE n.projectId = $projectId
          AND (n.file = $fileName OR n.path = $filePath OR n.absolutePath = $filePath)
+         AND (n:DocumentFile OR n:MediaFile OR n:ImageFile OR n:PDFDocument
+              OR n:SpreadsheetDocument OR n:WordDocument OR n:ThreeDFile)
        RETURN n.uuid as uuid, labels(n) as labels LIMIT 1`,
       { fileName, filePath, projectId }
     );
@@ -3030,11 +3096,13 @@ volumes:
           uuid: $uuid,
           file: $fileName,
           path: $filePath,
+          absolutePath: $filePath,
           format: $format,
           category: $category,
           sizeBytes: $sizeBytes,
           projectId: $projectId,
-          indexedAt: $indexedAt
+          indexedAt: $indexedAt,
+          embeddingsDirty: true
         })`,
         {
           uuid,
@@ -3057,13 +3125,17 @@ volumes:
     const updates: string[] = [];
     const updateParams: Record<string, any> = { uuid };
 
+    // Track if content changed to auto-mark embeddingsDirty
+    let contentChanged = false;
     if (textContent) {
       updates.push('n.textContent = $textContent');
       updateParams.textContent = textContent;
+      contentChanged = true;
     }
     if (description) {
       updates.push('n.description = $description');
       updateParams.description = description;
+      contentChanged = true;
     }
     if (ocrConfidence !== undefined) {
       updates.push('n.ocrConfidence = $ocrConfidence');
@@ -3083,8 +3155,8 @@ volumes:
       );
     }
 
-    // Mark for embedding regeneration if requested
-    if (generateEmbeddings) {
+    // Mark for embedding regeneration if content changed or explicitly requested
+    if (generateEmbeddings || contentChanged) {
       // Mark node as dirty so embeddings will be regenerated on next ingest
       await this.neo4jClient.run(
         'MATCH (n {uuid: $uuid}) SET n.embeddingsDirty = true',
@@ -3179,6 +3251,48 @@ volumes:
           { targetUuid: uuid, sourceUuid }
         );
         console.log(`[BrainManager] Created GENERATED_FROM relationship: ${uuid} -> ${sourceUuid}`);
+      }
+    }
+
+    // IMPORTANT: After creating/updating a content node for a document/media file,
+    // we need to:
+    // 1. Create DEFINED_IN relationship between content node and File node
+    // 2. Update File node state to 'linked' to prevent re-parsing by watcher
+    // This prevents duplicate DocumentFile nodes from being created by FileProcessor
+
+    // Find the File node for this path
+    const fileNodeResult = await this.neo4jClient.run(
+      `MATCH (f:File {absolutePath: $filePath, projectId: $projectId})
+       RETURN f.uuid as fileUuid, f.state as state`,
+      { filePath, projectId }
+    );
+
+    if (fileNodeResult.records.length > 0) {
+      const fileUuid = fileNodeResult.records[0].get('fileUuid');
+      const currentState = fileNodeResult.records[0].get('state');
+
+      // Create DEFINED_IN relationship if not exists
+      await this.neo4jClient.run(
+        `MATCH (content {uuid: $contentUuid}), (file:File {uuid: $fileUuid})
+         MERGE (content)-[:DEFINED_IN]->(file)`,
+        { contentUuid: uuid, fileUuid }
+      );
+
+      // Update File state to 'linked' to skip parsing in TouchedFilesWatcher
+      // Only if current state is 'discovered' or 'parsing' (don't downgrade from embedded)
+      if (currentState === 'discovered' || currentState === 'parsing' || currentState === 'mentioned') {
+        await this.neo4jClient.run(
+          `MATCH (f:File {uuid: $fileUuid})
+           SET f.state = 'linked', f.stateUpdatedAt = datetime()`,
+          { fileUuid }
+        );
+        console.log(`[BrainManager] Updated File state to 'linked': ${fileName} (was: ${currentState})`);
+
+        // Trigger background processing to generate embeddings
+        // Non-blocking: fire and forget
+        this.processOrphanFiles().catch(err => {
+          console.warn(`[BrainManager] Background embedding failed: ${err.message}`);
+        });
       }
     }
 

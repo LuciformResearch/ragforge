@@ -168,6 +168,32 @@ export class FileProcessor {
     const startTime = Date.now();
 
     try {
+      // 0. Re-check current state from database (in case it was updated since queuing)
+      // This prevents race conditions where:
+      // - read_file calls touchFile (state="discovered")
+      // - Watcher queues the file for processing
+      // - read_file calls updateMediaContent which sets state="linked"
+      // - Watcher starts processFile with stale state info
+      const currentStateResult = await this.neo4jClient.run(
+        `MATCH (f:File {uuid: $uuid}) RETURN f.state as state`,
+        { uuid: file.uuid }
+      );
+
+      if (currentStateResult.records.length > 0) {
+        const currentState = currentStateResult.records[0].get('state');
+        // Skip if file is already being processed or was processed by another path
+        // - 'parsing': being processed by updateMediaContent or another processFile call
+        // - 'linked': content nodes created, waiting for embeddings
+        // - 'embedded': fully processed with embeddings
+        if (currentState === 'parsing' || currentState === 'linked' || currentState === 'embedded') {
+          // File already processed by another path (e.g., read_file → updateMediaContent)
+          if (this.verbose) {
+            console.log(`[FileProcessor] Skipping ${file.absolutePath}: already in state '${currentState}'`);
+          }
+          return { status: 'skipped', scopesCreated: 0, relationshipsCreated: 0, referencesCreated: 0 };
+        }
+      }
+
       // 1. Transition to parsing state
       await this.stateMachine.transition(file.uuid, 'parsing');
 

@@ -890,6 +890,10 @@ export function generateGenerate3DFromImageHandler(ctx: ThreeDToolsContext): (ar
  *
  * Internally uses generate_multiview_images + generate_3d_from_image (~$0.11 total)
  * instead of MVDream (~$3/model).
+ *
+ * Source images are saved next to the model for traceability:
+ * - output_path: "models/my-model.glb"
+ * - sources: "models/my-model-sources/perspective.png"
  */
 export function generateGenerate3DFromTextHandler(ctx: ThreeDToolsContext): (args: any) => Promise<any> {
   return async (params: any) => {
@@ -897,26 +901,34 @@ export function generateGenerate3DFromTextHandler(ctx: ThreeDToolsContext): (arg
 
     const fs = await import('fs/promises');
     const pathModule = await import('path');
-    const os = await import('os');
 
     // Import image tools handlers
-    const { generateGenerateMultiviewImagesHandler, generateGenerateImageHandler } = await import('./image-tools.js');
+    const { generateGenerateMultiviewImagesHandler } = await import('./image-tools.js');
 
     const startTime = Date.now();
 
-    // Create temp directory for intermediate images
-    const tempDir = pathModule.join(os.tmpdir(), `ragforge-3d-${Date.now()}`);
-    await fs.mkdir(tempDir, { recursive: true });
+    // Resolve output path
+    const absoluteOutputPath = pathModule.isAbsolute(output_path)
+      ? output_path
+      : pathModule.join(ctx.projectRoot, output_path);
+
+    // Create sources directory next to the model (not in temp!)
+    // e.g., "models/my-model.glb" → "models/my-model-sources/"
+    const modelBaseName = pathModule.basename(absoluteOutputPath, pathModule.extname(absoluteOutputPath));
+    const modelDir = pathModule.dirname(absoluteOutputPath);
+    const sourcesDir = pathModule.join(modelDir, `${modelBaseName}-sources`);
+    await fs.mkdir(sourcesDir, { recursive: true });
 
     try {
-      console.log('🎨 Step 1/2: Generating 4 coherent view images...');
+      console.log('🎨 Step 1/2: Generating enhanced perspective image...');
 
-      // Step 1: Generate multiview images
+      // Step 1: Generate only perspective view (uses prompt enhancer for quality)
       const multiviewHandler = generateGenerateMultiviewImagesHandler({ projectRoot: ctx.projectRoot });
       const multiviewResult = await multiviewHandler({
         prompt,
-        output_dir: tempDir,
+        output_dir: sourcesDir, // Save to sources directory, not temp!
         style,
+        views: ['perspective'], // Only generate perspective for cleaner 3D reconstruction
       });
 
       if (multiviewResult.error) {
@@ -935,8 +947,8 @@ export function generateGenerate3DFromTextHandler(ctx: ThreeDToolsContext): (arg
         };
       }
 
-      console.log(`✅ Generated ${imagePaths.length} views`);
-      console.log('🔧 Step 2/2: Converting to 3D model with Trellis...');
+      console.log(`✅ Generated ${imagePaths.length} enhanced perspective image(s)`);
+      console.log('🔧 Step 2/2: Converting to 3D model with Trellis (single image mode)...');
 
       // Step 2: Generate 3D from images
       const generate3DHandler = generateGenerate3DFromImageHandler(ctx);
@@ -955,39 +967,59 @@ export function generateGenerate3DFromTextHandler(ctx: ThreeDToolsContext): (arg
 
       console.log('✅ 3D model generated successfully!');
 
-      // Ingest with the original text prompt and source images for better semantic search
-      let ingested = false;
+      // Get the enhanced prompt from the perspective view (much better than lazy user prompt)
+      const enhancedPrompt = multiviewResult.view_prompts?.perspective || prompt;
+
+      // Ingest 3D model with enhanced prompt for better semantic search
+      let modelIngested = false;
       if (ctx.onContentExtracted) {
         try {
-          const description = `3D model generated from text prompt: "${prompt}" (style: ${style})`;
           const ingestResult = await ctx.onContentExtracted({
             filePath: result3D.absolute_path,
-            description,
+            description: enhancedPrompt, // Use enhanced prompt, not original!
             extractionMethod: 'ai-generated-3d-from-text',
             generateEmbeddings: true,
-            sourceFiles: imagePaths, // The multiview images used
+            sourceFiles: imagePaths,
           });
-          ingested = ingestResult.updated;
+          modelIngested = ingestResult.updated;
         } catch (e) {
           console.warn(`[threed-tools] Failed to ingest 3D model: ${e}`);
         }
       }
 
-      // Clean up temp directory
-      try {
-        await fs.rm(tempDir, { recursive: true });
-      } catch {
-        // Ignore cleanup errors
+      // Ingest each source image with its enhanced prompt
+      const imagesIngested: string[] = [];
+      if (ctx.onContentExtracted && multiviewResult.images) {
+        for (const img of multiviewResult.images) {
+          try {
+            const viewPrompt = multiviewResult.view_prompts?.[img.view] || prompt;
+            await ctx.onContentExtracted({
+              filePath: img.absolute_path,
+              description: viewPrompt, // Use view-specific enhanced prompt
+              extractionMethod: 'ai-generated-multiview',
+              generateEmbeddings: true,
+            });
+            imagesIngested.push(img.absolute_path);
+          } catch (e) {
+            console.warn(`[threed-tools] Failed to ingest source image ${img.view}: ${e}`);
+          }
+        }
       }
 
       return {
         prompt,
+        enhanced_prompt: enhancedPrompt, // Return for debug/reference
         style,
         model_path: output_path,
         absolute_path: result3D.absolute_path,
+        source_images: imagePaths, // Return source images paths
+        sources_directory: sourcesDir,
         format: 'glb',
         processing_time_ms: Date.now() - startTime,
-        ingested,
+        ingested: {
+          model: modelIngested,
+          images: imagesIngested,
+        },
         steps: {
           multiview: {
             images_generated: imagePaths.length,
@@ -999,12 +1031,6 @@ export function generateGenerate3DFromTextHandler(ctx: ThreeDToolsContext): (arg
         },
       };
     } catch (err: any) {
-      // Clean up temp directory on error
-      try {
-        await fs.rm(tempDir, { recursive: true });
-      } catch {
-        // Ignore cleanup errors
-      }
       return { error: `Text-to-3D failed: ${err.message}` };
     }
   };

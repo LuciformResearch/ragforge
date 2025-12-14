@@ -744,11 +744,18 @@ export function generateEditImageHandler(ctx: ImageToolsContext): (args: any) =>
 
 /**
  * Generate handler for generate_multiview_images
- * Uses a prompt enhancer to generate 4 coherent view-specific prompts
+ * Uses a prompt enhancer to generate coherent view-specific prompts
+ *
+ * @param views - Optional array of views to generate. Default: all 4 views.
  */
 export function generateGenerateMultiviewImagesHandler(ctx: ImageToolsContext): (args: any) => Promise<any> {
   return async (params: any) => {
-    const { prompt, output_dir, style = '3d_render' } = params;
+    const {
+      prompt,
+      output_dir,
+      style = '3d_render',
+      views: requestedViews = ['front', 'right', 'top', 'perspective'] as ViewName[],
+    } = params;
     const fs = await import('fs/promises');
     const pathModule = await import('path');
 
@@ -768,22 +775,22 @@ export function generateGenerateMultiviewImagesHandler(ctx: ImageToolsContext): 
       // Create output directory
       await fs.mkdir(absoluteOutputDir, { recursive: true });
 
-      // 1. Use prompt enhancer to generate 4 coherent view prompts
-      console.log('🎨 Enhancing prompts for multiview generation...');
-      const viewPrompts = await generateViewPrompts(prompt, style, apiKey);
+      // 1. Use prompt enhancer to generate coherent view prompts (only for requested views)
+      console.log(`🎨 Enhancing prompts for ${requestedViews.length} view(s)...`);
+      const viewPrompts = await generateViewPrompts(prompt, style, apiKey, requestedViews);
 
       console.log('📸 Generated view prompts:');
       for (const [view, viewPrompt] of Object.entries(viewPrompts)) {
         console.log(`  - ${view}: ${(viewPrompt as string).substring(0, 80)}...`);
       }
 
-      // 2. Generate all 4 images in parallel
-      console.log('🖼️ Generating 4 images in parallel...');
+      // 2. Generate images in parallel for requested views
+      console.log(`🖼️ Generating ${requestedViews.length} image(s) in parallel...`);
       const generateImageHandler = generateGenerateImageHandler(ctx);
 
-      const views = ['front', 'right', 'top', 'perspective'] as const;
-      const imagePromises = views.map(async (view) => {
+      const imagePromises = requestedViews.map(async (view: ViewName) => {
         const viewPrompt = viewPrompts[view];
+        if (!viewPrompt) return { view, error: `No prompt generated for view: ${view}` };
         const outputPath = pathModule.join(output_dir, `${view}.png`);
 
         const result = await generateImageHandler({
@@ -898,15 +905,22 @@ AMÉLIORATIONS À AJOUTER:
   return { enhanced: basePrompt, reasoning: '' };
 }
 
+type ViewName = 'front' | 'right' | 'top' | 'perspective';
+
 /**
- * Generate 4 coherent view-specific prompts using StructuredLLMExecutor
+ * Generate coherent view-specific prompts using StructuredLLMExecutor
  * Inspired by PromptEnhancerAgent from lr-tchatagent-web
+ *
+ * @param views - Optional array of views to generate. Default: all 4 views.
+ *                The prompt enhancer always generates the full object description,
+ *                but only returns prompts for the requested views.
  */
 async function generateViewPrompts(
   basePrompt: string,
   style: string,
-  apiKey: string
-): Promise<Record<'front' | 'right' | 'top' | 'perspective', string>> {
+  apiKey: string,
+  views: ViewName[] = ['front', 'right', 'top', 'perspective']
+): Promise<Partial<Record<ViewName, string>>> {
   const styleDescriptions: Record<string, string> = {
     '3d_render': 'Clean 3D render style, studio lighting, smooth materials, white or neutral background',
     'realistic': 'Photorealistic, detailed textures, natural lighting, high quality photograph',
@@ -1052,23 +1066,38 @@ Final prompt format:
     console.log(`✨ Reasoning: ${result.reasoning || 'N/A'}`);
 
     // Concatenate: "{view_prefix} of {object_description}, {commonSuffix}"
-    return {
+    // Build all prompts, then filter to requested views
+    const allPrompts: Record<ViewName, string> = {
       front: `${result.view_prefix_front} of ${objDesc}, ${commonSuffix}`,
       right: `${result.view_prefix_right} of ${objDesc}, ${commonSuffix}`,
       top: `${result.view_prefix_top} of ${objDesc}, ${commonSuffix}`,
       perspective: `${result.view_prefix_perspective} of ${objDesc}, ${commonSuffix}`,
     };
+
+    // Return only requested views
+    const filteredPrompts: Partial<Record<ViewName, string>> = {};
+    for (const view of views) {
+      filteredPrompts[view] = allPrompts[view];
+    }
+    return filteredPrompts;
   } catch (err: any) {
     console.warn(`⚠️ StructuredLLMExecutor failed, using fallback prompts: ${err.message}`);
 
     // Fallback: simple template-based prompts
     const baseEnhanced = `${basePrompt}, ${styleDesc}`;
-    return {
+    const allFallbackPrompts: Record<ViewName, string> = {
       front: `${baseEnhanced}, front view, centered in frame, white background`,
       right: `${baseEnhanced}, right side view, profile, centered in frame, white background`,
       top: `${baseEnhanced}, top-down view, from above, centered in frame, white background`,
       perspective: `${baseEnhanced}, 3/4 perspective view, slightly elevated angle, centered in frame, white background`,
     };
+
+    // Return only requested views
+    const filteredPrompts: Partial<Record<ViewName, string>> = {};
+    for (const view of views) {
+      filteredPrompts[view] = allFallbackPrompts[view];
+    }
+    return filteredPrompts;
   }
 }
 

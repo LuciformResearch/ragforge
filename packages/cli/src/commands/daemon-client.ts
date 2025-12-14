@@ -402,13 +402,25 @@ export { DAEMON_PORT, DAEMON_URL };
 // ============================================
 
 /**
- * List of brain tools that should be routed through daemon
- * 
- * Note: File tools (read_file, write_file, create_file, edit_file, delete_path) are no longer
- * brain tools. They are regular file tools that automatically update the brain via the
- * onFileModified callback when brain is available.
+ * List of tools that should be routed through daemon
+ *
+ * All tools that interact with the brain (Neo4j) or benefit from brain integration
+ * should be routed via daemon. This ensures:
+ * - Single point of access to Neo4j (no connection conflicts)
+ * - Atomic operations (file creation + ingestion together)
+ * - Proper file watching and orphan tracking
  */
-const BRAIN_TOOL_NAMES = [
+const DAEMON_TOOL_NAMES = [
+  // File tools (for brain integration - touchFile on read, triggerReIngestion on modify)
+  'read_file',
+  'write_file',
+  'create_file',
+  'edit_file',
+  'delete_path',
+  'move_file',
+  'copy_file',
+
+  // Brain tools
   'create_project',
   'ingest_directory',
   'ingest_web_page',
@@ -426,18 +438,37 @@ const BRAIN_TOOL_NAMES = [
   'extract_dependency_hierarchy',
   'notify_user',
   'update_todos',
+
+  // Image tools
+  'read_image',
+  'describe_image',
+  'list_images',
+  'generate_image',
+  'edit_image',
+  'generate_multiview_images',
+  'analyze_visual',
+
+  // 3D tools
+  'render_3d_asset',
+  'generate_3d_from_image',
+  'generate_3d_from_text',
+  'analyze_3d_model',
+
+  // Web tools
+  'search_web',
+  'fetch_web_page',
 ] as const;
 
 /**
- * Generate brain tool handlers that call the daemon via HTTP
+ * Generate daemon tool handlers that call the daemon via HTTP
  *
- * This is used by agents to route all brain tool calls through the daemon,
+ * This is used by agents to route all daemon tool calls through the daemon,
  * ensuring single-point access to the database and proper file watching.
  */
-export function generateDaemonBrainToolHandlers(): Record<string, (params: any) => Promise<any>> {
+export function generateDaemonToolHandlers(): Record<string, (params: any) => Promise<any>> {
   const handlers: Record<string, (params: any) => Promise<any>> = {};
 
-  for (const toolName of BRAIN_TOOL_NAMES) {
+  for (const toolName of DAEMON_TOOL_NAMES) {
     handlers[toolName] = async (params: any) => {
       const result = await callToolViaDaemon(toolName, params);
       if (!result.success) {
@@ -449,3 +480,9 @@ export function generateDaemonBrainToolHandlers(): Record<string, (params: any) 
 
   return handlers;
 }
+
+// Keep backward compatibility alias
+export const generateDaemonBrainToolHandlers = generateDaemonToolHandlers;
+
+// Export the tool names for external use
+export { DAEMON_TOOL_NAMES };
