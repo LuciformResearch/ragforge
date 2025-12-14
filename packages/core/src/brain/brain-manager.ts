@@ -220,6 +220,12 @@ export interface QuickIngestOptions {
   include?: string[];
   /** File patterns to exclude */
   exclude?: string[];
+  /** Analyze images with Gemini Vision during ingestion (default: false) */
+  analyzeImages?: boolean;
+  /** Analyze 3D models by rendering and describing them (default: false) */
+  analyze3d?: boolean;
+  /** Run OCR on scanned documents during ingestion (default: false) */
+  ocrDocuments?: boolean;
   // Note: watch et embeddings sont toujours activés automatiquement
 }
 
@@ -229,6 +235,7 @@ export interface QuickIngestResult {
     filesProcessed: number;
     nodesCreated: number;
     embeddingsGenerated?: number;
+    filesAnalyzed?: number;
   };
   configPath: string;
   watching?: boolean;
@@ -2382,6 +2389,33 @@ volumes:
       skipInitialSync: false, // Do the initial ingestion
     });
 
+    // Wait for initial sync to complete (queue must be processed)
+    const watcher = this.getWatcher(absolutePath);
+    if (watcher) {
+      const queue = watcher.getQueue();
+      const maxWaitMs = 300000; // 5 minutes max
+      const startWait = Date.now();
+
+      // Wait for queue to be empty (files processed)
+      while (queue.getPendingCount() > 0 || queue.getQueuedCount() > 0) {
+        if (Date.now() - startWait > maxWaitMs) {
+          console.warn(`[QuickIngest] Timeout waiting for queue to empty after ${maxWaitMs}ms`);
+          break;
+        }
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+
+      // Also wait for ingestion lock to be released
+      const ingestionLock = this.getIngestionLock();
+      while (ingestionLock.isLocked()) {
+        if (Date.now() - startWait > maxWaitMs) {
+          console.warn(`[QuickIngest] Timeout waiting for ingestion lock after ${maxWaitMs}ms`);
+          break;
+        }
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+    }
+
     // Get stats after ingestion
     const nodeCount = await this.countProjectNodes(finalProjectId);
 
@@ -2389,6 +2423,21 @@ volumes:
     const project = this.registeredProjects.get(finalProjectId);
     if (project) {
       project.nodeCount = nodeCount;
+    }
+
+    // Post-ingestion analysis: analyze media files if requested
+    let analyzedCount = 0;
+    if (options.analyzeImages || options.analyze3d || options.ocrDocuments) {
+      analyzedCount = await this.analyzeMediaFilesForProject(
+        finalProjectId,
+        absolutePath,
+        options.analyzeImages ?? false,
+        options.analyze3d ?? false,
+        options.ocrDocuments ?? false
+      );
+      if (analyzedCount > 0) {
+        console.log(`[QuickIngest] Analyzed ${analyzedCount} media/document files`);
+      }
     }
 
     // Watcher reste toujours actif (plus d'option pour le désactiver)
@@ -2401,6 +2450,7 @@ volumes:
         filesProcessed: nodeCount,
         nodesCreated: nodeCount,
         embeddingsGenerated: 0, // Tracked by watcher
+        filesAnalyzed: analyzedCount,
       },
       configPath: absolutePath,
       watching: true, // Toujours actif
@@ -2824,6 +2874,8 @@ volumes:
       nodeProps.height = mediaInfo.dimensions.height;
     }
 
+    // Use COALESCE to preserve existing textContent, extractionMethod, and embeddings
+    // This ensures orphan files that were analyzed via read_file don't lose their data
     await this.neo4jClient!.run(
       `MERGE (n:${nodeLabel} {uuid: $uuid})
        SET n.url = $url,
@@ -2832,7 +2884,13 @@ volumes:
            n.format = $format,
            n.hash = $hash,
            n.sizeBytes = $sizeBytes,
-           n.ingestedAt = $ingestedAt
+           n.ingestedAt = $ingestedAt,
+           n.textContent = COALESCE(n.textContent, null),
+           n.extractionMethod = COALESCE(n.extractionMethod, null),
+           n.embedding_name = COALESCE(n.embedding_name, null),
+           n.embedding_description = COALESCE(n.embedding_description, null),
+           n.embedding_content = COALESCE(n.embedding_content, null),
+           n.embeddingsDirty = COALESCE(n.embeddingsDirty, null)
            ${mediaInfo.category === 'image' && 'dimensions' in mediaInfo && mediaInfo.dimensions
         ? ', n.width = $width, n.height = $height'
         : ''}`,
@@ -2849,6 +2907,204 @@ volumes:
 
     console.log(`[Brain] Ingested media file: ${url} → project ${projectId} (${nodeLabel})`);
     return { success: true, nodeId, nodeType: nodeLabel };
+  }
+
+  /**
+   * Analyze media/document files for a project that don't have textContent yet.
+   * Uses Gemini Vision for images, 3D rendering for models, and OCR for documents.
+   */
+  private async analyzeMediaFilesForProject(
+    projectId: string,
+    projectPath: string,
+    analyzeImages: boolean,
+    analyze3d: boolean,
+    ocrDocuments: boolean
+  ): Promise<number> {
+    let analyzedCount = 0;
+
+    // Extensions to identify file types
+    const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'];
+    const THREE_D_EXTENSIONS = ['.glb', '.gltf', '.obj', '.fbx'];
+
+    // Find MediaFiles (images only) without textContent
+    if (analyzeImages) {
+      const imageResult = await this.neo4jClient!.run(
+        `MATCH (n:MediaFile {projectId: $projectId})
+         WHERE n.textContent IS NULL OR n.textContent = ''
+         RETURN n.uuid AS uuid, n.file AS file`,
+        { projectId }
+      );
+
+      for (const record of imageResult.records) {
+        const uuid = record.get('uuid');
+        const file = record.get('file');
+        const filePath = path.join(projectPath, file);
+        const ext = path.extname(filePath).toLowerCase();
+
+        // Skip 3D files - they need special handling
+        if (THREE_D_EXTENSIONS.includes(ext)) continue;
+        // Skip non-image files
+        if (!IMAGE_EXTENSIONS.includes(ext)) continue;
+
+        try {
+          const { getOCRService } = await import('../runtime/index.js');
+          const ocrService = getOCRService({ primaryProvider: 'gemini' });
+
+          if (!ocrService.isAvailable()) {
+            console.warn(`[analyzeMediaFiles] Gemini Vision not available, skipping: ${file}`);
+            continue;
+          }
+
+          const imageBuffer = await fs.readFile(filePath);
+          const base64 = imageBuffer.toString('base64');
+          const mimeType = ext === '.png' ? 'image/png' :
+                           ext === '.gif' ? 'image/gif' :
+                           ext === '.webp' ? 'image/webp' : 'image/jpeg';
+
+          const result = await ocrService.extractTextFromData(base64, mimeType, {
+            prompt: 'Describe this image in detail. Include any text visible in the image.'
+          });
+          const description = result.text;
+
+          // Only update if we got a non-empty description
+          if (!description || description.trim().length === 0) {
+            console.warn(`[analyzeMediaFiles] Empty description for ${file}, skipping`);
+            continue;
+          }
+
+          await this.neo4jClient!.run(
+            `MATCH (n:MediaFile {uuid: $uuid})
+             SET n.textContent = $textContent,
+                 n.extractionMethod = 'gemini-vision',
+                 n.embeddingsDirty = true`,
+            { uuid, textContent: description }
+          );
+
+          console.log(`[analyzeMediaFiles] Analyzed image: ${file}`);
+          analyzedCount++;
+        } catch (err: any) {
+          console.warn(`[analyzeMediaFiles] Failed to analyze ${file}: ${err.message}`);
+        }
+      }
+    }
+
+    // Find ThreeDFiles without textContent
+    if (analyze3d) {
+      const threeDResult = await this.neo4jClient!.run(
+        `MATCH (n:ThreeDFile {projectId: $projectId})
+         WHERE n.textContent IS NULL OR n.textContent = ''
+         RETURN n.uuid AS uuid, n.file AS file`,
+        { projectId }
+      );
+
+      for (const record of threeDResult.records) {
+        const uuid = record.get('uuid');
+        const file = record.get('file');
+        const filePath = path.join(projectPath, file);
+
+        try {
+          // Use the 3D analysis pipeline: render + describe
+          const { generateAnalyze3DModelHandler } = await import('../tools/threed-tools.js');
+
+          // Create minimal context for analysis
+          const analyzeCtx = {
+            projectRoot: projectPath,
+            onContentExtracted: async () => ({ updated: false }),
+          };
+
+          const analyze3DHandler = generateAnalyze3DModelHandler(analyzeCtx);
+          const analysisResult = await analyze3DHandler({
+            model_path: filePath,
+            views: ['front', 'perspective'], // Multiple views for better description
+          });
+
+          if (analysisResult.error) {
+            console.warn(`[analyzeMediaFiles] 3D analysis error for ${file}: ${analysisResult.error}`);
+            continue;
+          }
+
+          const description = analysisResult.global_description || analysisResult.description;
+          if (!description || description.trim().length === 0) {
+            console.warn(`[analyzeMediaFiles] Empty 3D description for ${file}, skipping`);
+            continue;
+          }
+
+          await this.neo4jClient!.run(
+            `MATCH (n:ThreeDFile {uuid: $uuid})
+             SET n.textContent = $textContent,
+                 n.extractionMethod = '3d-render-describe',
+                 n.embeddingsDirty = true`,
+            { uuid, textContent: description }
+          );
+
+          console.log(`[analyzeMediaFiles] Analyzed 3D model: ${file}`);
+          analyzedCount++;
+        } catch (err: any) {
+          console.warn(`[analyzeMediaFiles] Failed to analyze 3D ${file}: ${err.message}`);
+        }
+      }
+    }
+
+    // Find DocumentFiles (PDFs) without textContent or with very short textContent (likely scanned)
+    if (ocrDocuments) {
+      const docResult = await this.neo4jClient!.run(
+        `MATCH (n:DocumentFile {projectId: $projectId})
+         WHERE n.textContent IS NULL OR size(n.textContent) < 50
+         RETURN n.uuid AS uuid, n.file AS file, n.format AS format`,
+        { projectId }
+      );
+
+      for (const record of docResult.records) {
+        const uuid = record.get('uuid');
+        const file = record.get('file');
+        const format = record.get('format');
+        const filePath = path.join(projectPath, file);
+
+        // Only OCR PDF files (other formats have good text extraction)
+        if (format !== 'pdf') continue;
+
+        try {
+          const { parseDocumentFile } = await import('../runtime/adapters/document-file-parser.js');
+          const docInfo = await parseDocumentFile(filePath, { useOcr: true });
+
+          if (docInfo && docInfo.textContent && docInfo.textContent.length > 50) {
+            await this.neo4jClient!.run(
+              `MATCH (n:DocumentFile {uuid: $uuid})
+               SET n.textContent = $textContent,
+                   n.extractionMethod = $extractionMethod,
+                   n.embeddingsDirty = true`,
+              {
+                uuid,
+                textContent: docInfo.textContent,
+                extractionMethod: docInfo.extractionMethod || 'ocr'
+              }
+            );
+
+            console.log(`[analyzeMediaFiles] OCR'd document: ${file}`);
+            analyzedCount++;
+          }
+        } catch (err: any) {
+          console.warn(`[analyzeMediaFiles] Failed to OCR ${file}: ${err.message}`);
+        }
+      }
+    }
+
+    // Generate embeddings for analyzed files
+    if (analyzedCount > 0 && this.embeddingService?.canGenerateEmbeddings()) {
+      console.log(`[analyzeMediaFiles] Generating embeddings for ${analyzedCount} analyzed files...`);
+      try {
+        const result = await this.embeddingService.generateMultiEmbeddings({
+          projectId,
+          incrementalOnly: true, // Only process nodes with embeddingsDirty = true
+          verbose: false,
+        });
+        console.log(`[analyzeMediaFiles] Embeddings: ${result.totalEmbedded} generated`);
+      } catch (err: any) {
+        console.warn(`[analyzeMediaFiles] Failed to generate embeddings: ${err.message}`);
+      }
+    }
+
+    return analyzedCount;
   }
 
   /**

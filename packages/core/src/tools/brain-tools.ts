@@ -286,7 +286,8 @@ After ingestion, you can search across all ingested content using brain_search.
 
 Example usage:
 - ingest_directory({ path: "/path/to/project" })
-- ingest_directory({ path: "./docs", project_name: "my-docs" })`,
+- ingest_directory({ path: "./docs", project_name: "my-docs" })
+- ingest_directory({ path: "./images", analyze_images: true })`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -308,6 +309,18 @@ Example usage:
           items: { type: 'string' },
           description: 'Glob patterns to exclude (default: node_modules, .git, dist, etc.)',
         },
+        analyze_images: {
+          type: 'boolean',
+          description: 'Analyze images with Gemini Vision to generate descriptions (default: false). Enables semantic search on images.',
+        },
+        analyze_3d: {
+          type: 'boolean',
+          description: 'Analyze 3D models (.glb, .gltf) by rendering and describing them (default: false). Slower but enables semantic search on 3D assets.',
+        },
+        ocr_documents: {
+          type: 'boolean',
+          description: 'Run OCR on scanned PDF documents (default: false). Useful for PDFs that are scanned images.',
+        },
       },
       required: ['path'],
     },
@@ -323,11 +336,17 @@ export function generateIngestDirectoryHandler(ctx: BrainToolsContext) {
     project_name?: string;
     include?: string[];
     exclude?: string[];
+    analyze_images?: boolean;
+    analyze_3d?: boolean;
+    ocr_documents?: boolean;
   }): Promise<QuickIngestResult> => {
     const options: QuickIngestOptions = {
       projectName: params.project_name,
       include: params.include,
       exclude: params.exclude,
+      analyzeImages: params.analyze_images,
+      analyze3d: params.analyze_3d,
+      ocrDocuments: params.ocr_documents,
     };
 
     return ctx.brain.quickIngest(params.path, options);
@@ -3787,6 +3806,18 @@ export function generateCleanupBrainHandler(ctx: BrainToolsContext) {
           'MATCH (p:Project {projectId: $projectId}) DETACH DELETE p',
           { projectId: project_id }
         );
+
+        // Stop watcher if active (so it can be restarted fresh on next ingest)
+        const projects = await ctx.brain.listProjects();
+        const project = projects.find(p => p.id === project_id);
+        if (project?.path) {
+          try {
+            await ctx.brain.stopWatching(project.path);
+            details.push(`Stopped watcher for: ${project.path}`);
+          } catch (err: any) {
+            // Watcher might not be active, ignore
+          }
+        }
 
         // Remove from registry
         try {

@@ -591,15 +591,35 @@ export class IncrementalIngestionManager {
         uniqueValue = 'nodeData.uuid';
       }
 
-      await this.client.run(
-        `
-        UNWIND $nodes AS nodeData
-        MERGE (n:${labels} {${uniqueField}: ${uniqueValue}})
-        SET n += nodeData.props
-        REMOVE n.schemaDirty
-        `,
-        { nodes: nodeData }
-      );
+      // For MediaFile types, preserve textContent, extractionMethod, and embeddings
+      // These are set by read_file analysis and should not be overwritten by re-ingestion
+      if (isMediaFile) {
+        await this.client.run(
+          `
+          UNWIND $nodes AS nodeData
+          MERGE (n:${labels} {${uniqueField}: ${uniqueValue}})
+          SET n += nodeData.props,
+              n.textContent = COALESCE(n.textContent, null),
+              n.extractionMethod = COALESCE(n.extractionMethod, null),
+              n.embedding_name = COALESCE(n.embedding_name, null),
+              n.embedding_description = COALESCE(n.embedding_description, null),
+              n.embedding_content = COALESCE(n.embedding_content, null),
+              n.embeddingsDirty = COALESCE(n.embeddingsDirty, null)
+          REMOVE n.schemaDirty
+          `,
+          { nodes: nodeData }
+        );
+      } else {
+        await this.client.run(
+          `
+          UNWIND $nodes AS nodeData
+          MERGE (n:${labels} {${uniqueField}: ${uniqueValue}})
+          SET n += nodeData.props
+          REMOVE n.schemaDirty
+          `,
+          { nodes: nodeData }
+        );
+      }
 
       processedNodes += nodeData.length;
       console.log(`   📦 Upserted ${nodeData.length} ${labels} nodes (${processedNodes}/${totalNodes})`);

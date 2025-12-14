@@ -392,8 +392,10 @@ export const MULTI_EMBED_CONFIGS: MultiEmbedNodeTypeConfig[] = [
   {
     label: 'MediaFile',
     query: `MATCH (m:MediaFile {projectId: $projectId})
-            WHERE m.description IS NOT NULL
-            RETURN m.uuid AS uuid, m.path AS path, m.description AS description, m.ocrText AS ocrText,
+            WHERE m.textContent IS NOT NULL OR m.description IS NOT NULL
+            RETURN m.uuid AS uuid, m.path AS path,
+                   COALESCE(m.textContent, m.description) AS description,
+                   m.extractionMethod AS extractionMethod,
                    m.embedding_name_hash AS embedding_name_hash,
                    m.embedding_content_hash AS embedding_content_hash,
                    m.embedding_description_hash AS embedding_description_hash,
@@ -405,11 +407,6 @@ export const MULTI_EMBED_CONFIGS: MultiEmbedNodeTypeConfig[] = [
         textExtractor: (r) => r.get('path') || '',
       },
       {
-        propertyName: 'embedding_content',
-        hashProperty: 'embedding_content_hash',
-        textExtractor: (r) => r.get('ocrText') || '',
-      },
-      {
         propertyName: 'embedding_description',
         hashProperty: 'embedding_description_hash',
         textExtractor: (r) => r.get('description') || '',
@@ -419,8 +416,9 @@ export const MULTI_EMBED_CONFIGS: MultiEmbedNodeTypeConfig[] = [
   {
     label: 'ThreeDFile',
     query: `MATCH (t:ThreeDFile {projectId: $projectId})
-            WHERE t.description IS NOT NULL
-            RETURN t.uuid AS uuid, t.path AS path, t.description AS description,
+            WHERE t.textContent IS NOT NULL OR t.description IS NOT NULL
+            RETURN t.uuid AS uuid, t.path AS path,
+                   COALESCE(t.textContent, t.description) AS description,
                    t.embedding_name_hash AS embedding_name_hash,
                    t.embedding_description_hash AS embedding_description_hash,
                    t.embeddingsDirty AS embeddingsDirty`,
@@ -440,8 +438,8 @@ export const MULTI_EMBED_CONFIGS: MultiEmbedNodeTypeConfig[] = [
   {
     label: 'DocumentFile',
     query: `MATCH (d:DocumentFile {projectId: $projectId})
-            WHERE d.textContent IS NOT NULL AND size(d.textContent) > 50
-            RETURN d.uuid AS uuid, d.file AS file, d.format AS format,
+            WHERE d.textContent IS NOT NULL
+            RETURN d.uuid AS uuid, d.file AS file, d.path AS path, d.format AS format,
                    d.textContent AS textContent, d.title AS title,
                    d.embedding_name_hash AS embedding_name_hash,
                    d.embedding_content_hash AS embedding_content_hash,
@@ -547,8 +545,10 @@ export const DEFAULT_EMBED_CONFIGS: EmbedNodeTypeConfig[] = [
   {
     label: 'MediaFile',
     query: `MATCH (m:MediaFile {projectId: $projectId})
-            WHERE m.description IS NOT NULL
-            RETURN m.uuid AS uuid, m.path AS path, m.description AS description, m.embedding_hash AS embedding_hash
+            WHERE m.textContent IS NOT NULL OR m.description IS NOT NULL
+            RETURN m.uuid AS uuid, m.path AS path,
+                   COALESCE(m.textContent, m.description) AS description,
+                   m.embedding_hash AS embedding_hash
             LIMIT $limit`,
     textExtractor: (r) => {
       const path = r.get('path') || '';
@@ -560,8 +560,10 @@ export const DEFAULT_EMBED_CONFIGS: EmbedNodeTypeConfig[] = [
   {
     label: 'ThreeDFile',
     query: `MATCH (t:ThreeDFile {projectId: $projectId})
-            WHERE t.description IS NOT NULL
-            RETURN t.uuid AS uuid, t.path AS path, t.description AS description, t.embedding_hash AS embedding_hash
+            WHERE t.textContent IS NOT NULL OR t.description IS NOT NULL
+            RETURN t.uuid AS uuid, t.path AS path,
+                   COALESCE(t.textContent, t.description) AS description,
+                   t.embedding_hash AS embedding_hash
             LIMIT $limit`,
     textExtractor: (r) => {
       const path = r.get('path') || '';
@@ -573,12 +575,12 @@ export const DEFAULT_EMBED_CONFIGS: EmbedNodeTypeConfig[] = [
   {
     label: 'DocumentFile',
     query: `MATCH (d:DocumentFile {projectId: $projectId})
-            WHERE d.textContent IS NOT NULL AND size(d.textContent) > 50
-            RETURN d.uuid AS uuid, d.file AS file, d.format AS format,
+            WHERE d.textContent IS NOT NULL
+            RETURN d.uuid AS uuid, d.file AS file, d.path AS path, d.format AS format,
                    d.textContent AS textContent, d.embedding_hash AS embedding_hash
             LIMIT $limit`,
     textExtractor: (r) => {
-      const file = r.get('file') || '';
+      const file = r.get('file') || r.get('path') || '';
       const format = r.get('format') || '';
       const text = r.get('textContent') || '';
       return `Document (${format}): ${file}\n\n${text}`;

@@ -570,9 +570,61 @@ class BrainDaemon {
       };
 
       this.logger.info(`${Object.keys(this.toolHandlers).length} tools ready (including ${Object.keys(debugHandlers).length} debug tools)`);
+
+      // Auto-start watchers for projects related to cwd
+      await this.autoStartWatchersForCwd();
     } catch (error: any) {
       this.logger.error('Failed to initialize BrainManager', { error: error.message });
       throw error;
+    }
+  }
+
+  /**
+   * Auto-start watchers for projects related to the current working directory.
+   * This includes:
+   * - Projects where cwd is inside the project path
+   * - Projects where the project path is inside cwd
+   * - Projects where cwd exactly matches the project path
+   */
+  private async autoStartWatchersForCwd(): Promise<void> {
+    if (!this.brain) return;
+
+    const cwd = process.cwd();
+    const projects = await this.brain.listProjects();
+
+    const matchingProjects: Array<{ id: string; path: string }> = [];
+
+    for (const project of projects) {
+      if (!project.path) continue;
+
+      // Normalize paths for comparison
+      const projectPath = path.resolve(project.path);
+      const cwdPath = path.resolve(cwd);
+
+      // Check if cwd is inside project, project is inside cwd, or exact match
+      const cwdInProject = cwdPath.startsWith(projectPath + path.sep) || cwdPath === projectPath;
+      const projectInCwd = projectPath.startsWith(cwdPath + path.sep);
+      const exactMatch = cwdPath === projectPath;
+
+      if (cwdInProject || projectInCwd || exactMatch) {
+        matchingProjects.push({ id: project.id, path: project.path });
+      }
+    }
+
+    if (matchingProjects.length === 0) {
+      this.logger.debug(`No projects match cwd: ${cwd}`);
+      return;
+    }
+
+    this.logger.info(`Auto-starting watchers for ${matchingProjects.length} project(s) related to cwd`);
+
+    for (const project of matchingProjects) {
+      try {
+        await this.brain.startWatching(project.path);
+        this.logger.info(`  ✓ Started watcher for: ${project.id}`);
+      } catch (error: any) {
+        this.logger.warn(`  ✗ Failed to start watcher for ${project.id}: ${error.message}`);
+      }
     }
   }
 
