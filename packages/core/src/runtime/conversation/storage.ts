@@ -22,7 +22,7 @@ import type {
   ConversationConfig
 } from './types.js';
 import type { GeminiEmbeddingProvider } from '../embedding/embedding-provider.js';
-import type { ConversationSummarizer, ConversationTurn, FileMention, SummaryWithFiles } from './summarizer.js';
+import type { ConversationSummarizer, ConversationTurn, FileMention, SummaryWithFiles, NodeMention, SummaryWithMentions } from './summarizer.js';
 import type { StructuredLLMExecutor } from '../llm/structured-llm-executor.js';
 import type { LLMProvider } from '../reranking/llm-provider.js';
 import type { BrainManager } from '../../brain/brain-manager.js';
@@ -822,6 +822,31 @@ export class ConversationStorage {
   }
 
   /**
+   * Create MENTIONS_NODE relationships from Summary to any node type
+   * Works for Scope, WebPage, Document, MarkdownSection, CodeBlock, etc.
+   */
+  private async createNodeRelations(
+    summaryUuid: string,
+    nodesMentioned: NodeMention[]
+  ): Promise<void> {
+    for (const node of nodesMentioned) {
+      // Use generic match by UUID - works for any node type
+      // Store reason if provided by LLM
+      await this.neo4j.run(
+        `MATCH (s:Summary {uuid: $summaryUuid})
+         MATCH (n {uuid: $nodeUuid})
+         MERGE (s)-[r:MENTIONS_NODE]->(n)
+         SET r.reason = $reason`,
+        {
+          summaryUuid,
+          nodeUuid: node.uuid,
+          reason: node.reason || null
+        }
+      );
+    }
+  }
+
+  /**
    * Create SUMMARIZES relationships from Summary to Messages (for L1 summaries)
    */
   private async createSummarizesRelations(
@@ -1001,14 +1026,22 @@ export class ConversationStorage {
       );
     }
 
+    // Create MENTIONS_NODE relationships (for scopes, webpages, documents, etc.)
+    if (summaryWithFiles.nodesMentioned && summaryWithFiles.nodesMentioned.length > 0) {
+      await this.createNodeRelations(
+        summaryWithFiles.uuid,
+        summaryWithFiles.nodesMentioned
+      );
+    }
+
     return summaryWithFiles;
   }
 
   /**
    * Generate and store L2 summary automatically if threshold is reached
    * Returns the created summary or null if no summary was created
-   * 
-   * IMPORTANT: 
+   *
+   * IMPORTANT:
    * - Summary node has label "Summary" for vector index "summary_embedding_index"
    * - L2 summaries summarize L1 summaries (not messages directly)
    */
@@ -1071,6 +1104,14 @@ export class ConversationStorage {
         summaryWithFiles.uuid,
         summaryWithFiles.filesMentioned,
         options?.projectRoot
+      );
+    }
+
+    // Create MENTIONS_NODE relationships (for scopes, webpages, documents, etc.)
+    if (summaryWithFiles.nodesMentioned && summaryWithFiles.nodesMentioned.length > 0) {
+      await this.createNodeRelations(
+        summaryWithFiles.uuid,
+        summaryWithFiles.nodesMentioned
       );
     }
 
@@ -2665,8 +2706,10 @@ export class ConversationStorage {
         
         // Include full scope content with clear line range for editing
         // Show file size to help agent decide read strategy (full file vs line range)
+        // Include scopeId (UUID) so agent can use explore_scope() to navigate relationships
         const fileSizeInfo = code.fileLineCount ? `, File: ${code.fileLineCount} lines` : '';
-        sections.push(`${pathPrefix}[${displayPath}:${code.startLine}-${code.endLine}] ${code.name} (Relevance: ${(code.score * 100).toFixed(0)}%${fileSizeInfo})`);
+        const scopeRef = code.scopeId ? ` [scope:${code.scopeId}]` : '';
+        sections.push(`${pathPrefix}[${displayPath}:${code.startLine}-${code.endLine}] ${code.name}${scopeRef} (Relevance: ${(code.score * 100).toFixed(0)}%${fileSizeInfo})`);
         // Full scope content (no truncation - agent needs complete context for accurate edits)
         sections.push(code.content);
         sections.push('');

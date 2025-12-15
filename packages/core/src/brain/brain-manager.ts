@@ -3886,10 +3886,17 @@ volumes:
     // Apply glob filter if specified
     if (options.glob) {
       const globPattern = options.glob;
+      const beforeCount = results.length;
       results = results.filter(r => {
-        const filePath = r.node.file || r.node.path || '';
-        return matchesGlob(filePath, globPattern, true);
+        // Prefer absolutePath for glob matching (supports absolute glob patterns)
+        const filePath = r.node.absolutePath || r.node.file || r.node.path || '';
+        const matches = matchesGlob(filePath, globPattern, true);
+        if (!matches && beforeCount <= 20) {
+          console.log(`[Brain.glob] REJECT: "${filePath}" vs pattern "${globPattern}"`);
+        }
+        return matches;
       });
+      console.log(`[Brain.glob] Filter: ${beforeCount} -> ${results.length} (pattern: ${globPattern})`);
     }
 
     // Apply minScore filter if specified (for text search or post-filtering)

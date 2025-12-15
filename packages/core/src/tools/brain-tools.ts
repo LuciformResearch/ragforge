@@ -462,6 +462,19 @@ The actual boost is proportional to Levenshtein similarity:
 - Fuzzy match (0.8 similarity) → 80% of boost_weight added
 - No match (< 0.6 similarity) → no boost`,
         },
+        explore_depth: {
+          type: 'number',
+          optional: true,
+          description: `Auto-discover and explore relationships for each result (0=disabled, 1-3=depth).
+When enabled, each result will include a 'relationships' object showing what the node:
+- CONSUMES (dependencies)
+- CONSUMED_BY (consumers)
+- INHERITS_FROM (inheritance)
+- And any other relationships discovered automatically
+
+This helps understand how search results connect to other parts of the codebase.
+Default: 0 (disabled). Use 1 for direct relationships, 2-3 for deeper exploration.`,
+        },
       },
       required: ['query'],
     },
@@ -485,7 +498,30 @@ export function generateBrainSearchHandler(ctx: BrainToolsContext) {
     min_score?: number;
     boost_keywords?: string[];
     boost_weight?: number;
-  }): Promise<UnifiedSearchResult & { waited_for_edits?: boolean; watchers_started?: string[]; flushed_projects?: string[]; reranked?: boolean; keyword_boosted?: boolean }> => {
+    explore_depth?: number;
+  }): Promise<UnifiedSearchResult & {
+    waited_for_edits?: boolean;
+    watchers_started?: string[];
+    flushed_projects?: string[];
+    reranked?: boolean;
+    keyword_boosted?: boolean;
+    relationships_explored?: boolean;
+    graph?: {
+      nodes: Array<{
+        uuid: string;
+        name: string;
+        type: string;
+        file?: string;
+        score: number | null;
+        isSearchResult: boolean;
+      }>;
+      edges: Array<{
+        from: string;
+        to: string;
+        type: string;
+      }>;
+    };
+  }> => {
     const { createLogger } = await import('../runtime/utils/logger.js');
     const log = createLogger('brain_search');
     
@@ -1019,8 +1055,178 @@ export function generateBrainSearchHandler(ctx: BrainToolsContext) {
         });
       }
 
+      // Explore relationships if explore_depth > 0
+      let relationshipsExplored = false;
+      let graph: {
+        nodes: Array<{
+          uuid: string;
+          name: string;
+          type: string;
+          file?: string;
+          score: number | null;
+          isSearchResult: boolean;
+        }>;
+        edges: Array<{
+          from: string;
+          to: string;
+          type: string;
+        }>;
+      } | undefined = undefined;
+
+      if (params.explore_depth && params.explore_depth > 0 && result.results.length > 0) {
+        log.info('Exploring relationships for results', { explore_depth: params.explore_depth, resultCount: result.results.length });
+        const exploreStart = Date.now();
+        const clampedDepth = Math.min(Math.max(params.explore_depth, 1), 3);
+
+        const neo4j = ctx.brain.getNeo4jClient();
+        if (neo4j) {
+          // Deduplicated graph structure
+          const graphNodes = new Map<string, {
+            uuid: string;
+            name: string;
+            type: string;
+            file?: string;
+            score: number | null;
+            isSearchResult: boolean;
+          }>();
+          const graphEdges = new Map<string, { from: string; to: string; type: string }>();
+
+          // Add search results as nodes first (they have scores)
+          const maxToExplore = Math.min(result.results.length, 10);
+          for (let i = 0; i < maxToExplore; i++) {
+            const r = result.results[i];
+            const nodeUuid = r.node?.uuid;
+            if (!nodeUuid) continue;
+
+            // Add this result to graph nodes
+            graphNodes.set(nodeUuid, {
+              uuid: nodeUuid,
+              name: r.node?.name || r.node?.signature || 'unnamed',
+              type: r.node?.type || 'unknown',
+              file: r.node?.file || r.node?.absolutePath,
+              score: r.score,
+              isSearchResult: true,
+            });
+          }
+
+          // Explore relationships for each search result
+          const nodesToExplore: Array<{ uuid: string; currentDepth: number }> = [];
+          for (const [uuid] of graphNodes) {
+            nodesToExplore.push({ uuid, currentDepth: 0 });
+          }
+          const exploredUuids = new Set<string>();
+
+          while (nodesToExplore.length > 0) {
+            const { uuid: nodeUuid, currentDepth } = nodesToExplore.shift()!;
+
+            if (exploredUuids.has(nodeUuid) || currentDepth >= clampedDepth) continue;
+            exploredUuids.add(nodeUuid);
+
+            try {
+              // Query outgoing and incoming relationships
+              const queries = [
+                {
+                  query: `
+                    MATCH (n {uuid: $uuid})-[rel]->(related)
+                    RETURN type(rel) as relationType,
+                           related.uuid as relatedUuid,
+                           coalesce(related.name, related.title, related.signature) as relatedName,
+                           labels(related)[0] as relatedType,
+                           coalesce(related.file, related.absolutePath) as relatedFile
+                    LIMIT 15
+                  `,
+                  isOutgoing: true,
+                },
+                {
+                  query: `
+                    MATCH (n {uuid: $uuid})<-[rel]-(related)
+                    RETURN type(rel) as relationType,
+                           related.uuid as relatedUuid,
+                           coalesce(related.name, related.title, related.signature) as relatedName,
+                           labels(related)[0] as relatedType,
+                           coalesce(related.file, related.absolutePath) as relatedFile
+                    LIMIT 15
+                  `,
+                  isOutgoing: false,
+                },
+              ];
+
+              for (const { query, isOutgoing } of queries) {
+                const relResult = await neo4j.run(query, { uuid: nodeUuid });
+                for (const record of relResult.records) {
+                  const relationType = record.get('relationType') as string;
+                  const relatedUuid = record.get('relatedUuid') as string;
+                  const relatedName = (record.get('relatedName') as string) || 'unnamed';
+                  const relatedType = (record.get('relatedType') as string) || 'unknown';
+                  const relatedFile = record.get('relatedFile') as string | undefined;
+
+                  // Add related node if not already present (don't overwrite search results with scores)
+                  if (!graphNodes.has(relatedUuid)) {
+                    graphNodes.set(relatedUuid, {
+                      uuid: relatedUuid,
+                      name: relatedName,
+                      type: relatedType,
+                      file: relatedFile,
+                      score: null,
+                      isSearchResult: false,
+                    });
+                  }
+
+                  // Add edge (deduplicated by from+to+type)
+                  const fromUuid = isOutgoing ? nodeUuid : relatedUuid;
+                  const toUuid = isOutgoing ? relatedUuid : nodeUuid;
+                  const edgeKey = `${fromUuid}|${toUuid}|${relationType}`;
+                  if (!graphEdges.has(edgeKey)) {
+                    graphEdges.set(edgeKey, {
+                      from: fromUuid,
+                      to: toUuid,
+                      type: relationType,
+                    });
+                  }
+
+                  // Queue for deeper exploration if needed
+                  if (currentDepth + 1 < clampedDepth && !exploredUuids.has(relatedUuid)) {
+                    nodesToExplore.push({ uuid: relatedUuid, currentDepth: currentDepth + 1 });
+                  }
+                }
+              }
+              relationshipsExplored = true;
+            } catch (exploreErr: any) {
+              log.warn('Failed to explore relationships for node', { uuid: nodeUuid, error: exploreErr.message });
+            }
+          }
+
+          // Build final graph structure
+          // Sort nodes: search results first (by score desc), then discovered nodes
+          const sortedNodes = Array.from(graphNodes.values()).sort((a, b) => {
+            if (a.isSearchResult && !b.isSearchResult) return -1;
+            if (!a.isSearchResult && b.isSearchResult) return 1;
+            if (a.score !== null && b.score !== null) return b.score - a.score;
+            return 0;
+          });
+
+          // Remove undefined file fields
+          for (const node of sortedNodes) {
+            if (node.file === undefined) delete (node as any).file;
+          }
+
+          graph = {
+            nodes: sortedNodes,
+            edges: Array.from(graphEdges.values()),
+          };
+        }
+
+        const exploreDuration = Date.now() - exploreStart;
+        log.info('Relationship exploration complete', {
+          duration: exploreDuration,
+          explored: relationshipsExplored,
+          graphNodes: graph?.nodes.length,
+          graphEdges: graph?.edges.length
+        });
+      }
+
       const totalDuration = Date.now() - startTime;
-      log.info('COMPLETE', { totalDuration, reranked, keywordBoosted });
+      log.info('COMPLETE', { totalDuration, reranked, keywordBoosted, relationshipsExplored });
 
       return {
         ...result,
@@ -1029,6 +1235,8 @@ export function generateBrainSearchHandler(ctx: BrainToolsContext) {
         flushed_projects: flushedProjects.length > 0 ? flushedProjects : undefined,
         reranked: reranked || undefined,
         keyword_boosted: keywordBoosted || undefined,
+        relationships_explored: relationshipsExplored || undefined,
+        graph,
       };
     } catch (error: any) {
       const totalDuration = Date.now() - startTime;
@@ -2895,6 +3103,98 @@ export function generateBrainReadFileHandler(ctx: BrainToolsContext) {
 }
 
 /**
+ * Generate read_files tool definition (batch read multiple files)
+ */
+export function generateBrainReadFilesTool(): GeneratedToolDefinition {
+  return {
+    name: 'read_files',
+    description: `Read multiple files at once (batch operation).
+
+More efficient than calling read_file multiple times.
+Reads all files in parallel and returns results for each.
+
+Parameters:
+- paths: Array of file paths (absolute or relative)
+- limit: Max lines to read per file (default: 500 - lower than single read_file for batch)
+
+Returns an array of results, one for each file.
+Failed reads return an error object instead of content.
+
+Example: read_files({ paths: ["src/index.ts", "src/utils.ts", "README.md"] })
+Example: read_files({ paths: ["config.json", "package.json"], limit: 100 })`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        paths: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Array of file paths to read (absolute or relative to project root)',
+        },
+        limit: {
+          type: 'number',
+          description: 'Max lines to read per file (default: 500)',
+        },
+      },
+      required: ['paths'],
+    },
+  };
+}
+
+/**
+ * Generate handler for read_files (batch read, uses existing read_file handler)
+ */
+export function generateBrainReadFilesHandler(ctx: BrainToolsContext) {
+  // Get the single file read handler
+  const readFileHandler = generateBrainReadFileHandler(ctx);
+
+  return async (params: { paths: string[]; limit?: number }): Promise<any> => {
+    const { paths, limit = 500 } = params;
+
+    if (!Array.isArray(paths) || paths.length === 0) {
+      return { error: 'paths must be a non-empty array of file paths' };
+    }
+
+    // Limit batch size to prevent overwhelming the system
+    const MAX_BATCH_SIZE = 20;
+    if (paths.length > MAX_BATCH_SIZE) {
+      return {
+        error: `Too many files requested (${paths.length}). Maximum batch size is ${MAX_BATCH_SIZE}.`,
+        suggestion: 'Split into multiple read_files calls',
+      };
+    }
+
+    // Read all files in parallel
+    const results = await Promise.all(
+      paths.map(async (filePath) => {
+        try {
+          const result = await readFileHandler({ path: filePath, limit });
+          return {
+            path: filePath,
+            ...result,
+          };
+        } catch (err: any) {
+          return {
+            path: filePath,
+            error: err.message || String(err),
+          };
+        }
+      })
+    );
+
+    // Summary stats
+    const successful = results.filter((r) => !r.error).length;
+    const failed = results.filter((r) => r.error).length;
+
+    return {
+      total: paths.length,
+      successful,
+      failed,
+      results,
+    };
+  };
+}
+
+/**
  * Generate handler for write_file (brain-aware)
  */
 export function generateBrainWriteFileHandler(ctx: BrainToolsContext) {
@@ -3492,6 +3792,7 @@ export function generateBrainTools(): GeneratedToolDefinition[] {
     // Brain-aware file tools - handle touchFile for orphan files
     // and triggerReIngestion for file modifications
     generateBrainReadFileTool(),
+    generateBrainReadFilesTool(), // Batch read multiple files
     generateBrainWriteFileTool(),
     generateBrainCreateFileTool(),
     generateBrainEditFileTool(),
@@ -3503,6 +3804,8 @@ export function generateBrainTools(): GeneratedToolDefinition[] {
     generateRunCypherTool(),
     // Dependency analysis
     generateExtractDependencyHierarchyTool(),
+    // Node exploration (dynamic relationship discovery)
+    generateExploreNodeTool(),
     // User communication
     generateNotifyUserTool(),
     generateUpdateTodosTool(),
@@ -3533,6 +3836,7 @@ export function generateBrainToolHandlers(ctx: BrainToolsContext): Record<string
     // Brain-aware file tools - these handle touchFile for orphan files
     // and trigger re-ingestion on file modifications
     read_file: generateBrainReadFileHandler(ctx),
+    read_files: generateBrainReadFilesHandler(ctx), // Batch read multiple files
     write_file: generateBrainWriteFileHandler(ctx),
     create_file: generateBrainCreateFileHandler(ctx),
     edit_file: generateBrainEditFileHandler(ctx),
@@ -3544,6 +3848,8 @@ export function generateBrainToolHandlers(ctx: BrainToolsContext): Record<string
     run_cypher: generateRunCypherHandler(ctx),
     // Dependency analysis
     extract_dependency_hierarchy: generateExtractDependencyHierarchyHandler(ctx),
+    // Node exploration (dynamic relationship discovery)
+    explore_node: generateExploreNodeHandler(ctx),
     // User communication
     notify_user: generateNotifyUserHandler(),
     update_todos: generateUpdateTodosHandler(),
@@ -4821,6 +5127,359 @@ async function processBatchResults(
       successful: successfulHierarchies.length,
       failed: hierarchies.length - successfulHierarchies.length,
     },
+  };
+}
+
+// ============================================
+// Explore Node Tool (Dynamic Relationship Discovery)
+// ============================================
+
+/**
+ * Generate explore_node tool definition
+ */
+export function generateExploreNodeTool(): GeneratedToolDefinition {
+  return {
+    name: 'explore_node',
+    section: 'rag_ops',
+    description: `Explore all relationships of any node by UUID - automatically discovers relationship types.
+
+This tool dynamically discovers what relationships a node has and explores them.
+Works for any node type: Scope (functions, classes), WebPage, Document, MarkdownSection, CodeBlock, File, etc.
+
+**Key Features:**
+- Dynamic discovery: No need to specify relationship types - the tool finds them automatically
+- Universal: Works with any node type in the knowledge graph
+- Directional: Can explore outgoing, incoming, or both directions
+- Depth control: Recursively explore related nodes up to specified depth
+
+**Common Relationship Types (discovered automatically):**
+- CONSUMES / CONSUMED_BY: Code dependencies
+- INHERITS_FROM: Class/interface inheritance
+- DEFINED_IN: Scope defined in file
+- LINKS_TO: WebPage links
+- IN_DOCUMENT / IN_SECTION: Document structure
+- MENTIONS_FILE / MENTIONS_NODE: Summary references
+
+Parameters:
+- uuid: UUID of the node to explore (required)
+- depth: How deep to explore relationships (default: 1, max: 3)
+- direction: 'outgoing', 'incoming', or 'both' (default: 'both')
+- include_content: Include source code or text content (default: false)
+- max_nodes: Maximum related nodes to return per relationship type (default: 20)
+
+Example: explore_node({ uuid: "scope:abc-123", depth: 2 })
+Example: explore_node({ uuid: "webpage:xyz-456", direction: "outgoing" })`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        uuid: {
+          type: 'string',
+          description: 'UUID of the node to explore',
+        },
+        depth: {
+          type: 'number',
+          description: 'How deep to explore relationships (default: 1, max: 3)',
+          default: 1,
+        },
+        direction: {
+          type: 'string',
+          enum: ['outgoing', 'incoming', 'both'],
+          description: "Direction to explore: 'outgoing', 'incoming', or 'both' (default: 'both')",
+          default: 'both',
+        },
+        include_content: {
+          type: 'boolean',
+          description: 'Include source code or text content for each node (default: false)',
+          default: false,
+        },
+        max_nodes: {
+          type: 'number',
+          description: 'Maximum related nodes to return per relationship type (default: 20)',
+          default: 20,
+        },
+      },
+      required: ['uuid'],
+    },
+  };
+}
+
+/**
+ * Generate handler for explore_node
+ */
+export function generateExploreNodeHandler(ctx: BrainToolsContext) {
+  return async (params: {
+    uuid: string;
+    depth?: number;
+    direction?: 'outgoing' | 'incoming' | 'both';
+    include_content?: boolean;
+    max_nodes?: number;
+  }) => {
+    const {
+      uuid,
+      depth = 1,
+      direction = 'both',
+      include_content = false,
+      max_nodes = 20,
+    } = params;
+
+    if (!uuid || typeof uuid !== 'string' || uuid.trim().length === 0) {
+      return {
+        error: 'UUID is required',
+        node: null,
+        relationships: {},
+      };
+    }
+
+    const neo4j = ctx.brain.getNeo4jClient();
+    if (!neo4j) {
+      return {
+        error: 'Neo4j client not available',
+        node: null,
+        relationships: {},
+      };
+    }
+
+    const clampedDepth = Math.min(Math.max(depth, 1), 3);
+
+    try {
+      // First, get the node itself
+      const nodeResult = await neo4j.run(
+        `MATCH (n {uuid: $uuid})
+         RETURN n, labels(n) as labels`,
+        { uuid: uuid.trim() }
+      );
+
+      if (nodeResult.records.length === 0) {
+        return {
+          error: `Node with UUID "${uuid}" not found`,
+          node: null,
+          relationships: {},
+        };
+      }
+
+      const nodeRecord = nodeResult.records[0];
+      const nodeProps = nodeRecord.get('n').properties;
+      const nodeLabels = nodeRecord.get('labels') as string[];
+
+      // Extract basic node info
+      const nodeInfo = {
+        uuid: nodeProps.uuid,
+        name: nodeProps.name || nodeProps.title || nodeProps.signature || 'unnamed',
+        type: nodeLabels[0] || 'unknown',
+        labels: nodeLabels,
+        file: nodeProps.file || nodeProps.absolutePath,
+        url: nodeProps.url,
+        startLine: nodeProps.startLine ? toNumber(nodeProps.startLine) : undefined,
+        endLine: nodeProps.endLine ? toNumber(nodeProps.endLine) : undefined,
+        ...(include_content && nodeProps.source ? { content: nodeProps.source.substring(0, 500) } : {}),
+        ...(include_content && nodeProps.rawText ? { content: nodeProps.rawText.substring(0, 500) } : {}),
+      };
+
+      // Helper to convert Neo4j numbers
+      function toNumber(value: any): number {
+        if (typeof value === 'number') return value;
+        if (value?.toNumber) return value.toNumber();
+        if (value?.low !== undefined) return value.low;
+        return 0;
+      }
+
+      // Discover and explore relationships
+      const relationships: Record<string, Array<{
+        uuid: string;
+        name: string;
+        type: string;
+        file?: string;
+        url?: string;
+        startLine?: number;
+        endLine?: number;
+        depth: number;
+        content?: string;
+      }>> = {};
+
+      // Build query based on direction
+      const queries: Array<{ query: string; directionLabel: string }> = [];
+
+      if (direction === 'both' || direction === 'outgoing') {
+        queries.push({
+          query: `
+            MATCH (n {uuid: $uuid})-[r]->(related)
+            RETURN type(r) as relationType, 'outgoing' as direction,
+                   related.uuid as relatedUuid,
+                   coalesce(related.name, related.title, related.signature) as relatedName,
+                   labels(related)[0] as relatedType,
+                   related.file as relatedFile,
+                   related.absolutePath as relatedAbsolutePath,
+                   related.url as relatedUrl,
+                   related.startLine as startLine,
+                   related.endLine as endLine,
+                   related.source as source,
+                   related.rawText as rawText
+            LIMIT $limit
+          `,
+          directionLabel: 'outgoing',
+        });
+      }
+
+      if (direction === 'both' || direction === 'incoming') {
+        queries.push({
+          query: `
+            MATCH (n {uuid: $uuid})<-[r]-(related)
+            RETURN type(r) as relationType, 'incoming' as direction,
+                   related.uuid as relatedUuid,
+                   coalesce(related.name, related.title, related.signature) as relatedName,
+                   labels(related)[0] as relatedType,
+                   related.file as relatedFile,
+                   related.absolutePath as relatedAbsolutePath,
+                   related.url as relatedUrl,
+                   related.startLine as startLine,
+                   related.endLine as endLine,
+                   related.source as source,
+                   related.rawText as rawText
+            LIMIT $limit
+          `,
+          directionLabel: 'incoming',
+        });
+      }
+
+      // Execute queries and collect results
+      for (const { query, directionLabel } of queries) {
+        const result = await neo4j.run(query, { uuid: uuid.trim(), limit: max_nodes });
+
+        for (const record of result.records) {
+          const relationType = record.get('relationType') as string;
+          const dir = record.get('direction') as string;
+
+          // Create key with direction suffix for clarity
+          const key = dir === 'incoming' ? `${relationType}_BY` : relationType;
+
+          if (!relationships[key]) {
+            relationships[key] = [];
+          }
+
+          const relatedNode: any = {
+            uuid: record.get('relatedUuid'),
+            name: record.get('relatedName') || 'unnamed',
+            type: record.get('relatedType') || 'unknown',
+            file: record.get('relatedFile') || record.get('relatedAbsolutePath'),
+            url: record.get('relatedUrl'),
+            startLine: record.get('startLine') ? toNumber(record.get('startLine')) : undefined,
+            endLine: record.get('endLine') ? toNumber(record.get('endLine')) : undefined,
+            depth: 1,
+          };
+
+          if (include_content) {
+            const source = record.get('source');
+            const rawText = record.get('rawText');
+            if (source) {
+              relatedNode.content = source.substring(0, 300);
+            } else if (rawText) {
+              relatedNode.content = rawText.substring(0, 300);
+            }
+          }
+
+          // Remove undefined fields
+          Object.keys(relatedNode).forEach(k => {
+            if (relatedNode[k] === undefined || relatedNode[k] === null) {
+              delete relatedNode[k];
+            }
+          });
+
+          relationships[key].push(relatedNode);
+        }
+      }
+
+      // If depth > 1, recursively explore related nodes
+      if (clampedDepth > 1) {
+        const seenUuids = new Set<string>([uuid.trim()]);
+        const nodesToExplore: Array<{ uuid: string; currentDepth: number }> = [];
+
+        // Collect all UUIDs from depth 1
+        for (const relType of Object.keys(relationships)) {
+          for (const node of relationships[relType]) {
+            if (node.uuid && !seenUuids.has(node.uuid)) {
+              seenUuids.add(node.uuid);
+              nodesToExplore.push({ uuid: node.uuid, currentDepth: 1 });
+            }
+          }
+        }
+
+        // Explore deeper levels
+        for (const { uuid: nodeUuid, currentDepth } of nodesToExplore) {
+          if (currentDepth >= clampedDepth) continue;
+
+          // Query for this node's relationships
+          for (const { query } of queries) {
+            const result = await neo4j.run(query, { uuid: nodeUuid, limit: Math.floor(max_nodes / 2) });
+
+            for (const record of result.records) {
+              const relationType = record.get('relationType') as string;
+              const dir = record.get('direction') as string;
+              const relatedUuid = record.get('relatedUuid') as string;
+
+              if (seenUuids.has(relatedUuid)) continue;
+              seenUuids.add(relatedUuid);
+
+              const key = dir === 'incoming' ? `${relationType}_BY` : relationType;
+
+              if (!relationships[key]) {
+                relationships[key] = [];
+              }
+
+              const relatedNode: any = {
+                uuid: relatedUuid,
+                name: record.get('relatedName') || 'unnamed',
+                type: record.get('relatedType') || 'unknown',
+                file: record.get('relatedFile') || record.get('relatedAbsolutePath'),
+                url: record.get('relatedUrl'),
+                startLine: record.get('startLine') ? toNumber(record.get('startLine')) : undefined,
+                endLine: record.get('endLine') ? toNumber(record.get('endLine')) : undefined,
+                depth: currentDepth + 1,
+              };
+
+              // Remove undefined fields
+              Object.keys(relatedNode).forEach(k => {
+                if (relatedNode[k] === undefined || relatedNode[k] === null) {
+                  delete relatedNode[k];
+                }
+              });
+
+              relationships[key].push(relatedNode);
+
+              // Add to explore queue if we can go deeper
+              if (currentDepth + 1 < clampedDepth) {
+                nodesToExplore.push({ uuid: relatedUuid, currentDepth: currentDepth + 1 });
+              }
+            }
+          }
+        }
+      }
+
+      // Sort relationships by depth
+      for (const key of Object.keys(relationships)) {
+        relationships[key].sort((a, b) => a.depth - b.depth);
+      }
+
+      // Calculate stats
+      const totalRelated = Object.values(relationships).reduce((sum, arr) => sum + arr.length, 0);
+      const relationshipTypes = Object.keys(relationships);
+
+      return {
+        node: nodeInfo,
+        relationships,
+        stats: {
+          relationship_types: relationshipTypes.length,
+          total_related_nodes: totalRelated,
+          max_depth_explored: clampedDepth,
+          types_found: relationshipTypes,
+        },
+      };
+    } catch (error: any) {
+      return {
+        error: error.message,
+        node: null,
+        relationships: {},
+      };
+    }
   };
 }
 

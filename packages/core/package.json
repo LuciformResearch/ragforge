@@ -66,7 +66,7 @@
   "dependencies": {
     "@google/genai": "^1.28.0",
     "@google/generative-ai": "^0.24.1",
-    "@luciformresearch/codeparsers": "^0.2.0",
+    "@luciformresearch/codeparsers": "^0.2.2",
     "@luciformresearch/xmlparser": "^0.2.4",
     "@nisyaban/tika-server": "^1.3.11",
     "@types/three": "^0.181.0",

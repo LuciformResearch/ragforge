@@ -10,6 +10,7 @@ import type { LLMProvider } from '../reranking/llm-provider.js';
 import type { GeminiEmbeddingProvider } from '../embedding/embedding-provider.js';
 import type { Summary, SummaryContent, Message } from './types.js';
 import { UniqueIDHelper } from '../utils/UniqueIDHelper.js';
+import { extractMentionsFromToolCalls, mergeMentions, type ToolResult } from './tool-mention-extractor.js';
 import * as path from 'path';
 
 export interface ConversationTurn {
@@ -32,6 +33,37 @@ export interface FileMention {
 
 export interface SummaryWithFiles extends Summary {
   filesMentioned: FileMention[]; // Files mentioned in this summary (for creating MENTIONS_FILE relationships)
+}
+
+/**
+ * A node mentioned in conversation - can be any type of node in the knowledge graph
+ * (scope, webpage, document, markdown section, etc.)
+ */
+export interface NodeMention {
+  uuid: string;                    // UUID of the node in Neo4j
+  name: string;                    // Name of the node (function name, page title, etc.)
+  type: 'scope' | 'file' | 'webpage' | 'document' | 'markdown_section' | 'codeblock';
+  subtype?: string;                // For scope: function, method, class, interface
+  file?: string;                   // File path if applicable
+  url?: string;                    // URL if WebPage
+  reason?: string;                 // Why the LLM judged this node pertinent (optional)
+  startLine?: number;
+  endLine?: number;
+}
+
+/**
+ * Result of extracting mentions from tool calls programmatically
+ */
+export interface ExtractedMentions {
+  files: FileMention[];            // Legacy: file paths
+  nodes: NodeMention[];            // NEW: all types of nodes with UUID
+}
+
+/**
+ * Summary with both files and nodes mentioned - extends SummaryWithFiles for compatibility
+ */
+export interface SummaryWithMentions extends SummaryWithFiles {
+  nodesMentioned: NodeMention[];   // NEW: nodes mentioned with UUIDs
 }
 
 export interface SummarizerOptions {
@@ -71,7 +103,7 @@ export class ConversationSummarizer {
 
   /**
    * Summarize conversation turns into L1 summary
-   * Returns Summary format compatible with types.ts, plus filesMentioned array
+   * Returns Summary format compatible with types.ts, plus filesMentioned and nodesMentioned arrays
    */
   async summarizeTurns(
     turns: ConversationTurn[],
@@ -80,7 +112,7 @@ export class ConversationSummarizer {
     endTurnIndex: number,
     charRangeStart: number,
     charRangeEnd: number
-  ): Promise<SummaryWithFiles> {
+  ): Promise<SummaryWithMentions> {
     if (turns.length === 0) {
       throw new Error('Cannot summarize empty turns array');
     }
@@ -101,6 +133,17 @@ export class ConversationSummarizer {
 User: ${turn.userMessage}
 Assistant: ${turn.assistantMessage}${toolsInfo}`;
     }).join('\n\n');
+
+    // PRE-EXTRACTION: Extract mentions programmatically from tool calls
+    const allToolResults: ToolResult[] = turns.flatMap(t =>
+      t.toolResults.map(tr => ({
+        toolName: tr.toolName,
+        toolArgs: tr.toolArgs,
+        toolResult: tr.toolResult,
+        success: tr.success
+      }))
+    );
+    const programmaticMentions = extractMentionsFromToolCalls(allToolResults);
 
     // Generate structured summary with LLM
     const result = await this.executor.executeLLMBatch(
@@ -127,12 +170,16 @@ Extract structured information and create two distinct summaries:
    - From tool results (e.g., file paths returned by grep_files, list_directory, etc.)
    - From user messages (e.g., "can you check src/index.ts")
    - From assistant messages (e.g., "I modified packages/core/src/file.ts")
-   
+
    For each file path, indicate if it is:
    - **Absolute path**: starts with "/" (e.g., "/home/user/project/src/index.ts")
    - **Relative path**: does not start with "/" (e.g., "src/index.ts", "./src/index.ts")
-   
-   Be thorough - extract every file path you see, even if mentioned multiple times (you can deduplicate later).
+
+4. **Nodes Mentioned** (Important!):
+   Look for UUIDs in tool results formatted as [scope:UUID], [node:UUID], [webpage:UUID], etc.
+   Extract nodes that are CENTRAL to this conversation - functions/classes that were discussed, modified, or are key to understanding the context.
+   For each node, briefly explain WHY it's important (1 sentence).
+   Only include 3-5 most important nodes, not every single one mentioned.
 
 Be factual and preserve critical details.`,
         outputSchema: {
@@ -167,6 +214,38 @@ Be factual and preserve critical details.`,
             },
             required: true,
           },
+          nodesMentioned: {
+            type: 'array',
+            description: 'The 3-5 most important nodes (code scopes, webpages, documents) discussed in this conversation. Look for UUIDs in format [scope:UUID] or [node:UUID] in tool results.',
+            items: {
+              type: 'object',
+              description: 'A node mention with UUID and context',
+              properties: {
+                uuid: {
+                  type: 'string',
+                  description: 'The UUID extracted from [type:UUID] format in tool results',
+                  required: true,
+                },
+                name: {
+                  type: 'string',
+                  description: 'Name of the node (function name, class name, page title, etc.)',
+                  required: true,
+                },
+                type: {
+                  type: 'string',
+                  enum: ['scope', 'file', 'webpage', 'document', 'markdown_section', 'codeblock'],
+                  description: 'Type of node',
+                  required: true,
+                },
+                reason: {
+                  type: 'string',
+                  description: 'Why this node is important to the conversation (1 sentence)',
+                  required: true,
+                },
+              },
+            },
+            required: false,
+          },
         },
         llmProvider: this.llmProvider,
         batchSize: 1,
@@ -198,14 +277,14 @@ Be factual and preserve critical details.`,
       // embedding will be generated separately if embeddingProvider is available
     };
 
-    // Extract files mentioned
-    const filesMentioned: FileMention[] = Array.isArray(rawResult.filesMentioned)
+    // Extract files mentioned from LLM result
+    const llmFilesMentioned: FileMention[] = Array.isArray(rawResult.filesMentioned)
       ? rawResult.filesMentioned
           .filter((f: any) => f && typeof f === 'object' && typeof f.path === 'string' && f.path.trim().length > 0)
           .map((f: any) => {
             const filePath = String(f.path).trim();
-            const isAbsolute = typeof f.isAbsolute === 'boolean' 
-              ? f.isAbsolute 
+            const isAbsolute = typeof f.isAbsolute === 'boolean'
+              ? f.isAbsolute
               : path.isAbsolute(filePath);
             return {
               path: filePath,
@@ -214,41 +293,80 @@ Be factual and preserve critical details.`,
           })
       : [];
 
+    // Extract nodes mentioned from LLM result
+    const llmNodesMentioned: NodeMention[] = Array.isArray(rawResult.nodesMentioned)
+      ? rawResult.nodesMentioned
+          .filter((n: any) => n && typeof n === 'object' && typeof n.uuid === 'string' && n.uuid.trim().length > 0)
+          .map((n: any) => ({
+            uuid: String(n.uuid).trim(),
+            name: String(n.name || 'unnamed'),
+            type: n.type || 'scope',
+            reason: n.reason ? String(n.reason) : undefined
+          } as NodeMention))
+      : [];
+
+    // MERGE: Combine programmatic extraction with LLM extraction
+    const mergedMentions = mergeMentions(programmaticMentions, {
+      files: llmFilesMentioned,
+      nodes: llmNodesMentioned
+    });
+
     // Generate embedding if provider is available
     if (this.embeddingProvider) {
       const embeddingText = generateSummaryEmbeddingText(summary);
       summary.embedding = await this.embeddingProvider.embedSingle(embeddingText);
     }
 
-    // Return SummaryWithFiles format
+    // Return SummaryWithMentions format
     return {
       ...summary,
-      filesMentioned: filesMentioned
+      filesMentioned: mergedMentions.files,
+      nodesMentioned: mergedMentions.nodes
     };
   }
 
   /**
    * Summarize summaries (create L2+ summary from L1 summaries)
-   * Returns Summary format compatible with types.ts, plus filesMentioned array
+   * Returns Summary format compatible with types.ts, plus filesMentioned and nodesMentioned arrays
+   *
+   * Note: Input summaries can be Summary[] or SummaryWithMentions[] - nodesMentioned is optional
+   * and will be merged if present on input summaries
    */
   async summarizeSummaries(
-    summaries: Summary[],
+    summaries: (Summary & Partial<Pick<SummaryWithMentions, 'filesMentioned' | 'nodesMentioned'>>)[],
     conversationId: string,
     startTurnIndex: number,
     endTurnIndex: number,
     charRangeStart: number,
     charRangeEnd: number,
     targetLevel: number
-  ): Promise<SummaryWithFiles> {
+  ): Promise<SummaryWithMentions> {
     if (summaries.length === 0) {
       throw new Error('Cannot summarize empty summaries array');
     }
 
+    // PRE-EXTRACTION: Collect all nodes from input summaries
+    const collectedNodes: NodeMention[] = [];
+    const seenNodeUuids = new Set<string>();
+    for (const s of summaries) {
+      if (s.nodesMentioned) {
+        for (const node of s.nodesMentioned) {
+          if (!seenNodeUuids.has(node.uuid)) {
+            seenNodeUuids.add(node.uuid);
+            collectedNodes.push(node);
+          }
+        }
+      }
+    }
+
     // Format summaries for LLM
     const formattedSummaries = summaries.map((s, i) => {
+      const nodesInfo = s.nodesMentioned && s.nodesMentioned.length > 0
+        ? `\nNodes: ${s.nodesMentioned.map(n => `[${n.type}:${n.uuid}] ${n.name}`).join(', ')}`
+        : '';
       return `Summary ${i + 1} (Level ${s.level}, ${s.summary_char_count} chars):
 Conversation: ${s.content.conversation_summary}
-Actions: ${s.content.actions_summary}`;
+Actions: ${s.content.actions_summary}${nodesInfo}`;
     }).join('\n\n');
 
     // Generate structured summary of summaries
@@ -263,7 +381,7 @@ Synthesize the information, merge duplicate information, and create a coherent o
 1. **Conversation Summary** (4-5 lines max):
    Synthesize what users asked and what was answered across all summaries.
    Focus on main themes and patterns.
-   
+
 2. **Actions Summary** (4-5 lines max):
    Synthesize the tools used and results across all summaries.
    Focus on key actions and their outcomes.
@@ -274,6 +392,11 @@ Synthesize the information, merge duplicate information, and create a coherent o
    For each file path, indicate if it is:
    - **Absolute path**: starts with "/" (e.g., "/home/user/project/src/index.ts")
    - **Relative path**: does not start with "/" (e.g., "src/index.ts", "./src/index.ts")
+
+4. **Nodes Mentioned** (Important!):
+   Merge nodes from all input summaries - look for [type:UUID] patterns.
+   Select the 5-7 MOST IMPORTANT nodes across all summaries.
+   For each node, explain why it's important to the overall conversation.
 
 Be thorough in synthesizing information while keeping it concise.`,
         outputSchema: {
@@ -308,6 +431,38 @@ Be thorough in synthesizing information while keeping it concise.`,
             },
             required: true,
           },
+          nodesMentioned: {
+            type: 'array',
+            description: 'The 5-7 most important nodes (code scopes, webpages, documents) across all summaries. Look for UUIDs in format [scope:UUID] or [node:UUID]. Merge and prioritize nodes from all input summaries.',
+            items: {
+              type: 'object',
+              description: 'A node mention with UUID and context',
+              properties: {
+                uuid: {
+                  type: 'string',
+                  description: 'The UUID extracted from [type:UUID] format',
+                  required: true,
+                },
+                name: {
+                  type: 'string',
+                  description: 'Name of the node (function name, class name, page title, etc.)',
+                  required: true,
+                },
+                type: {
+                  type: 'string',
+                  enum: ['scope', 'file', 'webpage', 'document', 'markdown_section', 'codeblock'],
+                  description: 'Type of node',
+                  required: true,
+                },
+                reason: {
+                  type: 'string',
+                  description: 'Why this node is important to the overall conversation (1 sentence)',
+                  required: true,
+                },
+              },
+            },
+            required: false,
+          },
         },
         llmProvider: this.llmProvider,
         batchSize: 1,
@@ -321,17 +476,17 @@ Be thorough in synthesizing information while keeping it concise.`,
       actions_summary: String(rawResult.actions_summary || '')
     };
 
-    // Extract files mentioned (merge from all input summaries)
+    // Extract files mentioned from LLM result
     // Validate and normalize isAbsolute using path.isAbsolute() to handle Windows/Unix/Mac correctly
-    const filesMentioned: FileMention[] = Array.isArray(rawResult.filesMentioned)
+    const llmFilesMentioned: FileMention[] = Array.isArray(rawResult.filesMentioned)
       ? rawResult.filesMentioned
           .filter((f: any) => f && typeof f === 'object' && typeof f.path === 'string' && f.path.trim().length > 0)
           .map((f: any) => {
             const filePath = String(f.path).trim();
             // Use path.isAbsolute() to correctly detect absolute paths on Windows/Unix/Mac
             // This handles: "/path" (Unix/Mac), "C:\\path" (Windows), "C:/path" (Windows)
-            const isAbsolute = typeof f.isAbsolute === 'boolean' 
-              ? f.isAbsolute 
+            const isAbsolute = typeof f.isAbsolute === 'boolean'
+              ? f.isAbsolute
               : path.isAbsolute(filePath);
             return {
               path: filePath,
@@ -339,6 +494,45 @@ Be thorough in synthesizing information while keeping it concise.`,
             };
           })
       : [];
+
+    // Extract nodes mentioned from LLM result
+    const llmNodesMentioned: NodeMention[] = Array.isArray(rawResult.nodesMentioned)
+      ? rawResult.nodesMentioned
+          .filter((n: any) => n && typeof n === 'object' && typeof n.uuid === 'string' && n.uuid.trim().length > 0)
+          .map((n: any) => ({
+            uuid: String(n.uuid).trim(),
+            name: String(n.name || 'unnamed'),
+            type: n.type || 'scope',
+            reason: n.reason ? String(n.reason) : undefined
+          } as NodeMention))
+      : [];
+
+    // MERGE: Combine collected nodes with LLM extraction
+    // collectedNodes already contains deduplicated nodes from all input summaries
+    const mergedMentions = mergeMentions(
+      { files: [], nodes: collectedNodes },
+      { files: llmFilesMentioned, nodes: llmNodesMentioned }
+    );
+
+    // Also collect files from input summaries for completeness
+    const collectedFiles: FileMention[] = [];
+    const seenFilePaths = new Set<string>();
+    for (const s of summaries) {
+      if (s.filesMentioned) {
+        for (const file of s.filesMentioned) {
+          if (!seenFilePaths.has(file.path)) {
+            seenFilePaths.add(file.path);
+            collectedFiles.push(file);
+          }
+        }
+      }
+    }
+
+    // Merge collected files with LLM extracted files
+    const allFiles = mergeMentions(
+      { files: collectedFiles, nodes: [] },
+      { files: llmFilesMentioned, nodes: [] }
+    );
 
     // Calculate summary char count
     const summaryCharCount =
@@ -368,10 +562,11 @@ Be thorough in synthesizing information while keeping it concise.`,
       summary.embedding = await this.embeddingProvider.embedSingle(embeddingText);
     }
 
-    // Return SummaryWithFiles format
+    // Return SummaryWithMentions format
     return {
       ...summary,
-      filesMentioned: filesMentioned
+      filesMentioned: allFiles.files,
+      nodesMentioned: mergedMentions.nodes
     };
   }
 

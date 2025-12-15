@@ -18,6 +18,7 @@
 import { StructuredLLMExecutor, BaseToolExecutor, type ToolCallRequest, type ProgressiveOutputConfig } from '../llm/structured-llm-executor.js';
 import { GeminiAPIProvider } from '../reranking/gemini-api-provider.js';
 import { type ToolDefinition } from '../llm/native-tool-calling/index.js';
+import { AgentLogger } from './rag-agent.js';
 import {
   generateFileTools,
   type FileToolsContext,
@@ -31,6 +32,10 @@ import {
   generateBrainSearchHandler,
   generateIngestDirectoryTool,
   generateIngestDirectoryHandler,
+  generateExploreNodeTool,
+  generateExploreNodeHandler,
+  generateBrainReadFilesTool,
+  generateBrainReadFilesHandler,
   type BrainToolsContext,
 } from '../../tools/brain-tools.js';
 import type { GeneratedToolDefinition } from '../../tools/types/index.js';
@@ -39,6 +44,16 @@ import type { ConversationSummarizer, ConversationTurn } from '../conversation/s
 import type { Summary } from '../conversation/types.js';
 import type { BrainManager } from '../../brain/brain-manager.js';
 import type { GeminiEmbeddingProvider } from '../embedding/embedding-provider.js';
+
+// Report editing tools
+import { ReportEditor } from '../utils/report-editor.js';
+import {
+  REPORT_TOOL_DEFINITIONS,
+  createReportToolHandlers,
+  isReportTool,
+  isFinalizeTool,
+  type ReportToolHandlers,
+} from '../utils/report-tools.js';
 
 // ============================================
 // Types
@@ -83,6 +98,9 @@ export interface ResearchAgentOptions {
 
   /** Enable verbose logging */
   verbose?: boolean;
+
+  /** Path to write detailed JSON logs (uses AgentLogger) */
+  logPath?: string;
 
   /** Include web tools (fetch_web_page) for web research */
   includeWebTools?: boolean;
@@ -152,9 +170,30 @@ const RESEARCH_SYSTEM_PROMPT = `You are a **Research Assistant** focused on gath
 - Simple explanations → explain without searching
 
 **Use tools when needed:**
-- Questions about specific files/code → use read_file, brain_search
+- Questions about specific files → use read_file, brain_search
 - Finding files or patterns → use glob_files, grep_files
-- Understanding code structure → use list_directory, brain_search
+- Understanding project structure → use list_directory, brain_search
+
+## Example Queries (not just code!)
+
+**Code projects:**
+- "What does the auth module do?" → brain_search + read_file
+- "Find all API endpoints" → grep_files for route patterns
+
+**Documents & Research:**
+- "Summarize this PDF report" → read_file on the PDF
+- "What's in the project documentation?" → glob_files for *.md, *.pdf, then read_file
+- "Compare these two documents" → read_file both, then synthesize
+
+**Images & Media:**
+- "Describe this screenshot" → read_file on the image
+- "What UI elements are in these mockups?" → read_file on each image
+- "Analyze this 3D model" → read_file on .glb/.gltf file
+
+**Data & Spreadsheets:**
+- "What data is in this Excel file?" → read_file on .xlsx
+- "Summarize the CSV data" → read_file on .csv
+- "Find all JSON config files" → glob_files for *.json
 
 ## Your Capabilities
 
@@ -169,6 +208,13 @@ Use \`read_file\` to read ANY file type:
 - Reading important files makes them searchable later
 - You don't need to run \`ingest_directory\` for individual files
 
+### read_files - Batch read multiple files
+When you need to read several files at once (e.g., after finding relevant files with \`brain_search\` or \`glob_files\`), use \`read_files\` for efficiency:
+\`\`\`
+read_files({ paths: ["src/auth.ts", "src/utils.ts", "src/config.ts"] })
+\`\`\`
+This reads all files in parallel and returns results for each. Much faster than multiple \`read_file\` calls.
+
 ### brain_search - Semantic search
 Search across all previously indexed content. Use this first to find relevant files before reading them.
 
@@ -181,6 +227,18 @@ Search across all previously indexed content. Use this first to find relevant fi
 
 For individual files, just use \`read_file\` - it will index them automatically.
 
+### explore_node - Explore relationships by UUID
+When you get search results from \`brain_search\`, each result includes a **uuid**. Use \`explore_node\` to discover what a node is connected to:
+- **Code relationships**: What functions call this one? What does it depend on?
+- **Document links**: What pages link to this web page?
+- **File structure**: What directory contains this file?
+
+This is powerful for understanding how code/content is interconnected. The tool automatically discovers all relationship types.
+
+**Example workflow:**
+1. \`brain_search({ query: "authentication" })\` → get results with UUIDs
+2. \`explore_node({ uuid: "scope:abc-123", depth: 2 })\` → see what calls/uses this function
+
 ### Exploration tools
 - \`list_directory\`: See what's in a folder
 - \`glob_files\`: Find files by pattern (e.g., "**/*.ts")
@@ -189,9 +247,10 @@ For individual files, just use \`read_file\` - it will index them automatically.
 
 ## Research Workflow
 1. **Search first**: Use \`brain_search\` to find relevant indexed content
-2. **Explore if needed**: Use \`list_directory\`/\`glob_files\` to discover files
-3. **Read files**: Use \`read_file\` to examine specific files (this also indexes them)
-4. **Synthesize**: Combine findings into a coherent answer
+2. **Explore relationships**: Use \`explore_node\` to understand how results connect to other code/content
+3. **Explore filesystem if needed**: Use \`list_directory\`/\`glob_files\` to discover files not yet indexed
+4. **Read files**: Use \`read_file\` to examine specific files (this also indexes them)
+5. **Synthesize**: Combine findings into a coherent answer
 
 ## Guidelines
 - Be thorough but focused - gather all relevant information
@@ -200,12 +259,36 @@ For individual files, just use \`read_file\` - it will index them automatically.
 - When uncertain, say so - don't make up information
 - Prefer \`read_file\` over \`ingest_directory\` for individual files
 
-## Output Format
-When you have gathered enough information, produce a clear markdown response:
-- Use headers to organize information
-- Include code blocks with syntax highlighting
-- List sources at the end
-- Be concise but comprehensive
+## Report Building
+
+Build your report incrementally using report tools:
+
+### Starting a report
+Use \`set_report\` to create an initial draft with your structure:
+\`\`\`
+set_report({ content: "# Report Title\\n\\n## Summary\\n\\nInitial findings..." })
+\`\`\`
+
+### Editing the report
+Use these tools for incremental updates:
+- \`edit_report\`: Replace specific text (search/replace)
+- \`append_to_report\`: Add new sections at the end
+- \`insert_after_heading\`: Insert content after a specific heading
+- \`replace_section\`: Replace an entire section's content
+- \`delete_section\`: Remove a section
+
+### Finalizing
+When confident in your findings, call \`finalize_report\`:
+\`\`\`
+finalize_report({ confidence: "high" })
+\`\`\`
+
+Confidence levels:
+- **high**: All information gathered, no missing pieces
+- **medium**: Most information found, minor gaps remain
+- **low**: Partial information, significant gaps
+
+**Important**: Call \`finalize_report\` when done. The report content comes from your editing tools, not from regular text output.
 
 ## Working Directory
 {CWD_PLACEHOLDER}`;
@@ -225,24 +308,50 @@ class ResearchToolExecutor extends BaseToolExecutor {
     duration_ms: number;
   }> = [];
 
+  // Report editing state
+  public readonly reportEditor: ReportEditor;
+  private reportToolHandlers: ReportToolHandlers;
+  public isReportFinalized = false;
+  public reportConfidence: 'high' | 'medium' | 'low' = 'low';
+
   private onToolCall?: (toolName: string, args: Record<string, any>) => void;
   private onToolResult?: (toolName: string, result: any, success: boolean, durationMs: number) => void;
+  private onReportUpdate?: (content: string) => void;
+  private logger?: AgentLogger;
 
   constructor(
     private handlers: Record<string, (args: Record<string, any>) => Promise<any>>,
     callbacks?: {
       onToolCall?: (toolName: string, args: Record<string, any>) => void;
       onToolResult?: (toolName: string, result: any, success: boolean, durationMs: number) => void;
-    }
+      onReportUpdate?: (content: string) => void;
+    },
+    logger?: AgentLogger
   ) {
     super();
     this.onToolCall = callbacks?.onToolCall;
     this.onToolResult = callbacks?.onToolResult;
+    this.onReportUpdate = callbacks?.onReportUpdate;
+    this.logger = logger;
+
+    // Initialize report editor and handlers
+    this.reportEditor = new ReportEditor();
+    this.reportToolHandlers = createReportToolHandlers(this.reportEditor);
+  }
+
+  /**
+   * Get current report content
+   */
+  getReportContent(): string {
+    return this.reportEditor.getContent();
   }
 
   async execute(request: ToolCallRequest): Promise<any> {
     const { tool_name, arguments: args } = request;
     const startTime = Date.now();
+
+    // Log tool call
+    this.logger?.logToolCall(tool_name, args);
 
     // Notify callback
     if (this.onToolCall) {
@@ -259,6 +368,11 @@ class ResearchToolExecutor extends BaseToolExecutor {
       this.sourcesUsed.add(`[search: ${args.query}]`);
     }
 
+    // Check if this is a report tool - handle internally
+    if (isReportTool(tool_name)) {
+      return this.executeReportTool(tool_name, args, startTime);
+    }
+
     const handler = this.handlers[tool_name];
     if (!handler) {
       const error = `Unknown tool: ${tool_name}`;
@@ -272,6 +386,8 @@ class ResearchToolExecutor extends BaseToolExecutor {
         duration_ms: durationMs,
       });
 
+      this.logger?.logToolError(tool_name, error, durationMs);
+
       if (this.onToolResult) {
         this.onToolResult(tool_name, error, false, durationMs);
       }
@@ -281,6 +397,9 @@ class ResearchToolExecutor extends BaseToolExecutor {
     try {
       const result = await handler(args);
       const durationMs = Date.now() - startTime;
+
+      // Log successful result
+      this.logger?.logToolResult(tool_name, result, durationMs);
 
       // Track files from search results
       if (tool_name === 'brain_search' && result?.results) {
@@ -314,10 +433,77 @@ class ResearchToolExecutor extends BaseToolExecutor {
         duration_ms: durationMs,
       });
 
+      this.logger?.logToolError(tool_name, errorMsg, durationMs);
+
       if (this.onToolResult) {
         this.onToolResult(tool_name, errorMsg, false, durationMs);
       }
       throw error;
+    }
+  }
+
+  /**
+   * Execute a report editing tool
+   */
+  private executeReportTool(tool_name: string, args: Record<string, any>, startTime: number): any {
+    try {
+      // Get the handler for this report tool
+      const handler = this.reportToolHandlers[tool_name as keyof ReportToolHandlers];
+      if (!handler) {
+        throw new Error(`Unknown report tool: ${tool_name}`);
+      }
+
+      // Execute the tool
+      const result = handler(args as any);
+      const durationMs = Date.now() - startTime;
+
+      // Handle finalize_report specially
+      if (isFinalizeTool(tool_name)) {
+        this.isReportFinalized = true;
+        this.reportConfidence = args.confidence || 'medium';
+      }
+
+      // Log successful result
+      this.logger?.logToolResult(tool_name, result, durationMs);
+
+      this.toolCallDetails.push({
+        tool_name,
+        arguments: args,
+        result,
+        success: true,
+        duration_ms: durationMs,
+      });
+
+      if (this.onToolResult) {
+        this.onToolResult(tool_name, result, true, durationMs);
+      }
+
+      // Notify report update callback (for UI streaming)
+      if (this.onReportUpdate && !this.reportEditor.isEmpty()) {
+        this.onReportUpdate(this.reportEditor.getContent());
+      }
+
+      return result;
+    } catch (error: any) {
+      const durationMs = Date.now() - startTime;
+      const errorMsg = error.message || String(error);
+
+      this.toolCallDetails.push({
+        tool_name,
+        arguments: args,
+        result: errorMsg,
+        success: false,
+        duration_ms: durationMs,
+      });
+
+      this.logger?.logToolError(tool_name, errorMsg, durationMs);
+
+      if (this.onToolResult) {
+        this.onToolResult(tool_name, errorMsg, false, durationMs);
+      }
+
+      // Return error result instead of throwing (more forgiving for report tools)
+      return { success: false, error: errorMsg, content: this.reportEditor.getContent() };
     }
   }
 }
@@ -334,6 +520,7 @@ export class ResearchAgent {
   private maxIterations: number;
   private maxResearchRounds: number;
   private verbose: boolean;
+  private logger?: AgentLogger;
 
   // Conversation memory
   private conversationStorage?: ConversationStorage;
@@ -359,6 +546,7 @@ export class ResearchAgent {
       maxIterations?: number;
       maxResearchRounds?: number;
       verbose?: boolean;
+      logPath?: string;
       conversationStorage?: ConversationStorage;
       conversationSummarizer?: ConversationSummarizer;
       embeddingProvider?: GeminiEmbeddingProvider;
@@ -379,6 +567,11 @@ export class ResearchAgent {
     this.maxIterations = options.maxIterations ?? 10;
     this.maxResearchRounds = options.maxResearchRounds ?? 5;
     this.verbose = options.verbose ?? false;
+
+    // Create logger if logPath provided
+    if (options.logPath) {
+      this.logger = new AgentLogger(options.logPath);
+    }
 
     // Memory
     this.conversationStorage = options.conversationStorage;
@@ -415,7 +608,8 @@ export class ResearchAgent {
    * Convert tools to ToolDefinition format (OpenAI function calling format)
    */
   private getToolDefinitions(): ToolDefinition[] {
-    return this.tools.map((tool) => ({
+    // Convert research tools to ToolDefinition format
+    const researchTools = this.tools.map((tool) => ({
       type: 'function' as const,
       function: {
         name: tool.name,
@@ -423,6 +617,9 @@ export class ResearchAgent {
         parameters: tool.inputSchema,
       },
     }));
+
+    // Add report editing tools
+    return [...researchTools, ...REPORT_TOOL_DEFINITIONS];
   }
 
   /**
@@ -750,14 +947,29 @@ Examples:
       console.log(`\n[ResearchAgent] Research: "${question}"`);
     }
 
+    // Step 0: Fast-path for obvious greetings (no LLM call needed)
+    const greetingPatterns = /^(hi|hello|hey|salut|bonjour|coucou|merci|thanks|thank you|ok|okay|d'accord|super|cool|nice|great|bye|goodbye|au revoir|à\+|a\+)[\s!?.,]*$/i;
+    const isSimpleGreeting = greetingPatterns.test(question.trim());
+
+    if (isSimpleGreeting) {
+      console.log(`[ResearchAgent] Fast-path: detected greeting, skipping context decision`);
+    }
+
     // Step 1: Get recent context (fast, no search) - includes tool calls and L1 summaries
     const recentContext = await this.getRecentContext();
 
-    // Step 2: Decide what context is needed (fast LLM call)
-    const contextNeeds = await this.decideContextNeeds(question, recentContext);
+    // Step 2: Decide what context is needed (fast LLM call OR fast-path)
+    let contextNeeds: { needsCodeSearch: boolean; needsDeepHistory: boolean; canAnswerDirectly: boolean };
+
+    if (isSimpleGreeting) {
+      // Fast-path: skip LLM decision for greetings
+      contextNeeds = { needsCodeSearch: false, needsDeepHistory: false, canAnswerDirectly: true };
+    } else {
+      contextNeeds = await this.decideContextNeeds(question, recentContext);
+    }
 
     if (this.verbose) {
-      console.log(`[ResearchAgent] Context decision:`, contextNeeds);
+      console.log(`[ResearchAgent] Context decision:`, contextNeeds, isSimpleGreeting ? '(fast-path)' : '');
       console.log(`[ResearchAgent] Recent context: ${recentContext.recentTurns.length} turns, ${recentContext.recentL1Summaries.length} L1 summaries`);
     }
 
@@ -767,11 +979,27 @@ Examples:
     // Store user message
     await this.storeMessage('user', question);
 
-    // Create tool executor with callbacks
-    const toolExecutor = new ResearchToolExecutor(this.handlers, {
-      onToolCall: this.onToolCall,
-      onToolResult: this.onToolResult,
-    });
+    // Start logging session
+    this.logger?.startSession(question, 'structured', this.tools.map(t => t.name));
+
+    // Create tool executor with callbacks and logger
+    // Wrap onReportUpdate to receive report content from tool executor
+    const wrappedReportUpdate = this.onReportUpdate
+      ? (content: string) => {
+          // Get current confidence from executor (may be updated by finalize_report)
+          this.onReportUpdate!(content, 'low', []);
+        }
+      : undefined;
+
+    const toolExecutor = new ResearchToolExecutor(
+      this.handlers,
+      {
+        onToolCall: this.onToolCall,
+        onToolResult: this.onToolResult,
+        onReportUpdate: wrappedReportUpdate,
+      },
+      this.logger
+    );
 
     // Build system prompt with CWD info
     const cwdInfo = await this.buildCwdInfo();
@@ -822,45 +1050,23 @@ Examples:
       systemPrompt = `${systemPrompt}\n\n**Note:** This appears to be a simple message that you can likely answer directly without using tools.`;
     }
 
-    // Output schema fields - simple key-value for executeSingle
+    // Output schema - minimal since report is built via tools
+    // The LLM can use 'reasoning' to explain what it's doing
     const outputSchema = {
-      report: {
+      reasoning: {
         type: 'string' as const,
-        description: 'The markdown report with findings',
-      },
-      confidence: {
-        type: 'string' as const,
-        enum: ['high', 'medium', 'low'],
-        description: 'Confidence in the completeness of findings',
+        description: 'Brief explanation of what you are doing or what you found',
       },
     };
 
     let actualIterations = 0;
 
-    // Build progressive output config if callback is provided
-    const progressiveOutput: ProgressiveOutputConfig<{ report: string; confidence: string }> | undefined =
-      this.onReportUpdate
-        ? {
-            completionField: 'confidence',
-            completionValues: ['high'],
-            onProgress: (output, iteration, isComplete) => {
-              if (output.report && this.onReportUpdate) {
-                this.onReportUpdate(
-                  output.report,
-                  (output.confidence as 'high' | 'medium' | 'low') || 'low',
-                  [] // No missing info tracking yet
-                );
-              }
-            },
-          }
-        : undefined;
-
     try {
-      const result = await this.executor.executeSingle<{ report: string; confidence: string }>({
+      await this.executor.executeSingle<{ reasoning?: string }>({
         input: { question },
         inputFields: [{ name: 'question', prompt: 'The research question to investigate' }],
         systemPrompt,
-        userTask: 'Research the question thoroughly and produce a markdown report.',
+        userTask: 'Research the question thoroughly. Use set_report to create a report, then finalize_report when done.',
         outputSchema,
         tools: this.getToolDefinitions(),
         maxIterations: this.maxIterations,
@@ -868,9 +1074,17 @@ Examples:
         llmProvider: this.llmProvider,
         logPrompts: this.verbose,
         logResponses: this.verbose,
-        progressiveOutput,
         onLLMResponse: (response) => {
           actualIterations = response.iteration;
+
+          // Log iteration to AgentLogger (including current report state from editor)
+          this.logger?.logIteration(response.iteration, {
+            reasoning: response.reasoning,
+            toolCalls: response.toolCalls?.map(tc => tc.tool_name),
+            report: toolExecutor.getReportContent(),
+            confidence: toolExecutor.reportConfidence,
+          });
+
           if (this.verbose) {
             console.log(`   [Iteration ${response.iteration}]`);
           }
@@ -881,8 +1095,32 @@ Examples:
         },
       });
 
-      const report = result.report || 'No report generated';
-      const confidence = (result.confidence as 'high' | 'medium' | 'low') || 'low';
+      // Get report from tool executor (built via report tools)
+      const report = toolExecutor.getReportContent() || 'No report generated';
+      const confidence = toolExecutor.reportConfidence;
+      const isFinalized = toolExecutor.isReportFinalized;
+
+      // Log result for debugging
+      console.log(`[ResearchAgent] executeSingle completed:`, {
+        hasReport: report.length > 0,
+        reportLength: report.length,
+        reportPreview: report.substring(0, 100) || '(empty)',
+        confidence,
+        isFinalized,
+        iterations: actualIterations,
+      });
+
+      // Warn if report is empty
+      if (!report || report.trim() === '') {
+        console.warn(`[ResearchAgent] WARNING: No report built after ${actualIterations} iterations`);
+      } else if (!isFinalized) {
+        console.warn(`[ResearchAgent] WARNING: Report not finalized (confidence: ${confidence})`);
+      }
+
+      // Send final report update with correct confidence
+      if (this.onReportUpdate && report) {
+        this.onReportUpdate(report, confidence, []);
+      }
 
       // Store assistant response with tool calls
       await this.storeMessage('assistant', report, {
@@ -892,17 +1130,39 @@ Examples:
       // Trigger auto-summarization
       await this.triggerAutoSummarization();
 
-      return {
+      const result_final = {
         report,
         confidence,
         sourcesUsed: Array.from(toolExecutor.sourcesUsed),
         toolsUsed: toolExecutor.toolsUsed,
         iterations: actualIterations,
       };
+
+      // Log final answer to AgentLogger
+      this.logger?.logFinalAnswer(report, confidence);
+
+      console.log(`[ResearchAgent] Research complete:`, {
+        reportLength: report.length,
+        confidence,
+        toolsUsed: result_final.toolsUsed.length,
+        sourcesUsed: result_final.sourcesUsed.length,
+        iterations: actualIterations,
+      });
+
+      return result_final;
     } catch (error: any) {
-      if (this.verbose) {
-        console.error(`   [Error] Research failed: ${error.message}`);
-      }
+      console.error(`[ResearchAgent] Research failed:`, {
+        message: error.message,
+        name: error.name,
+        stack: error.stack?.split('\n').slice(0, 3).join('\n'),
+      });
+
+      // Log error to AgentLogger
+      this.logger?.logError(error.message, {
+        toolsUsed: toolExecutor.toolsUsed,
+        sourcesUsed: Array.from(toolExecutor.sourcesUsed),
+        iterations: actualIterations,
+      });
 
       const errorReport = `Research failed: ${error.message}`;
 
@@ -923,12 +1183,23 @@ Examples:
    * Simple chat method for conversational interaction
    */
   async chat(message: string, history?: ChatMessage[]): Promise<ChatResponse> {
+    console.log(`[ResearchAgent] chat() called with message: "${message.substring(0, 50)}..."`);
+
     const result = await this.research(message, history);
-    return {
+
+    const response = {
       message: result.report,
       toolsUsed: result.toolsUsed,
       sourcesUsed: result.sourcesUsed,
     };
+
+    console.log(`[ResearchAgent] chat() returning:`, {
+      messageLength: response.message?.length || 0,
+      isEmpty: !response.message || response.message.trim() === '',
+      toolsUsed: response.toolsUsed?.length || 0,
+    });
+
+    return response;
   }
 
   /**
@@ -1033,14 +1304,13 @@ export async function createResearchAgent(options: ResearchAgentOptions): Promis
     tools.push(brainSearchTool);
     const brainSearchHandler = generateBrainSearchHandler(brainCtx);
 
-    // Wrap handler to auto-add glob filter for cwd
+    // Wrap handler to auto-add base_path filter for cwd (filtered in Cypher, more efficient than glob)
     const cwd = options.cwd;
     handlers['brain_search'] = async (args) => {
-      // If cwd is set and no glob is specified, add a glob filter
-      if (cwd && !args.glob) {
-        // Normalize: ensure cwd ends without slash, then add /**/*
-        const normalizedCwd = cwd.endsWith('/') ? cwd.slice(0, -1) : cwd;
-        args.glob = `${normalizedCwd}/**/*`;
+      // If cwd is set and no base_path is specified, add base_path filter
+      if (cwd && !args.base_path) {
+        // Normalize: ensure cwd ends without slash
+        args.base_path = cwd.endsWith('/') ? cwd.slice(0, -1) : cwd;
       }
       return brainSearchHandler(args as any);
     };
@@ -1050,6 +1320,18 @@ export async function createResearchAgent(options: ResearchAgentOptions): Promis
     tools.push(ingestTool);
     const ingestHandler = generateIngestDirectoryHandler(brainCtx);
     handlers['ingest_directory'] = (args) => ingestHandler(args as any);
+
+    // explore_node - explore relationships of any node by UUID
+    const exploreNodeTool = generateExploreNodeTool();
+    tools.push(exploreNodeTool);
+    const exploreNodeHandler = generateExploreNodeHandler(brainCtx);
+    handlers['explore_node'] = (args) => exploreNodeHandler(args as any);
+
+    // read_files - batch read multiple files at once
+    const readFilesTool = generateBrainReadFilesTool();
+    tools.push(readFilesTool);
+    const readFilesHandler = generateBrainReadFilesHandler(brainCtx);
+    handlers['read_files'] = (args) => readFilesHandler(args as any);
   }
 
   // 4. Web tools (optional)
@@ -1063,6 +1345,7 @@ export async function createResearchAgent(options: ResearchAgentOptions): Promis
   return new ResearchAgent(executor, llmProvider, tools, handlers, {
     maxIterations: options.maxIterations ?? 15,
     verbose: options.verbose ?? false,
+    logPath: options.logPath,
     conversationStorage: options.conversationStorage,
     conversationSummarizer: options.conversationSummarizer,
     embeddingProvider: options.embeddingProvider,

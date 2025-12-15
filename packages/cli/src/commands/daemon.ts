@@ -26,6 +26,7 @@ import {
   generateAllDebugHandlers,
   createWebToolHandlers,
   getLocalTimestamp,
+  getFilenameTimestamp,
   createRagAgent,
   createResearchAgent,
   createClient,
@@ -336,6 +337,25 @@ class BrainDaemon {
   }
 
   /**
+   * Write brain_search results as raw JSON - exact output the agent receives
+   */
+  private async writeBrainSearchDetails(query: string, args: any, result: any): Promise<string> {
+    const timestamp = getFilenameTimestamp();
+    const filename = `brain_search_${timestamp}.json`;
+    const filepath = path.join(LOG_DIR, filename);
+
+    // Write exact raw JSON output - what the agent sees
+    const output = {
+      timestamp: getLocalTimestamp(),
+      args,
+      result,
+    };
+
+    await fs.writeFile(filepath, JSON.stringify(output, null, 2), 'utf-8');
+    return filepath;
+  }
+
+  /**
    * Create a readable summary of tool results for logging
    */
   private summarizeResult(toolName: string, result: any): Record<string, any> {
@@ -343,18 +363,24 @@ class BrainDaemon {
       return { result_preview: result };
     }
 
-    // brain_search specific summary
+    // brain_search specific summary - now just a quick overview
+    // Full details are in separate log file
     if (toolName === 'brain_search' && result.results) {
-      const topResults = result.results.slice(0, 3).map((r: any) => {
-        const name = r.node?.name || r.node?.title || 'unnamed';
-        const type = r.node?.type || 'unknown';
-        const file = r.filePath ? r.filePath.split('/').slice(-2).join('/') : '';
-        return `${name} (${type}) ${file}`;
+      const summaryList = result.results.slice(0, 5).map((r: any, i: number) => {
+        const node = r.node || {};
+        const name = node.name || node.title || '?';
+        const type = node.type || (node.level !== undefined ? 'sec' : node.code !== undefined ? 'code' : 'file');
+        const score = r.score?.toFixed(2) ?? '?';
+        const hasContent = !!(node.content || node.code || node.text);
+        return `${i + 1}.[${score}] ${name} (${type})${hasContent ? ' ✓' : ' ✗'}`;
       });
+      if (result.results.length > 5) {
+        summaryList.push(`... +${result.results.length - 5} more`);
+      }
       return {
         count: result.totalCount || result.results.length,
-        top_results: topResults,
-        projects: result.searchedProjects?.length || 0,
+        results: summaryList,
+        detail_log: '(see brain_search_*.log)',
       };
     }
 
@@ -851,6 +877,13 @@ class BrainDaemon {
         const result = await handler(args);
         const duration = Date.now() - startTime;
 
+        // Write detailed brain_search log (fire-and-forget)
+        if (toolName === 'brain_search' && result?.results) {
+          this.writeBrainSearchDetails(args.query, args, result)
+            .then(filepath => this.logger.debug(`brain_search details: ${filepath}`))
+            .catch(err => this.logger.warn(`Failed to write brain_search details: ${err.message}`));
+        }
+
         // Log completion with result summary
         const resultSummary = this.summarizeResult(toolName, result);
         this.logger.info(`Tool ${toolName} completed in ${duration}ms`, {
@@ -1182,6 +1215,11 @@ class BrainDaemon {
             return;
           }
 
+          // Generate log path for agent session
+          const agentLogDir = path.join(LOG_DIR, 'agent-sessions');
+          await fs.mkdir(agentLogDir, { recursive: true });
+          const agentLogPath = path.join(agentLogDir, `session-${getFilenameTimestamp()}.json`);
+
           this.researchAgent = await createResearchAgent({
             apiKey,
             model: 'gemini-2.0-flash',
@@ -1189,6 +1227,7 @@ class BrainDaemon {
             brainManager: brain,
             cwd: workingDir,
             verbose: !!process.env.RAGFORGE_DAEMON_VERBOSE,
+            logPath: agentLogPath,
             onToolCall: (name, args) => {
               this.logger.debug(`Agent tool call: ${name}`);
               try {
@@ -1221,7 +1260,30 @@ class BrainDaemon {
         }
 
         // Send message to agent
+        const chatStartTime = Date.now();
+        this.logger.info(`[Agent] Starting chat...`);
+
         const response = await this.researchAgent.chat(message);
+
+        const chatDuration = Date.now() - chatStartTime;
+        const responseLength = response.message?.length || 0;
+        const isEmpty = !response.message || response.message.trim() === '' || response.message === 'No report generated';
+
+        this.logger.info(`[Agent] Chat completed`, {
+          duration: `${chatDuration}ms`,
+          responseLength,
+          isEmpty,
+          toolsUsed: response.toolsUsed?.length || 0,
+          sourcesUsed: response.sourcesUsed?.length || 0,
+          preview: response.message?.substring(0, 100) || '(empty)',
+        });
+
+        // Warn if response is empty
+        if (isEmpty) {
+          this.logger.warn(`[Agent] Empty or default response received`, {
+            fullMessage: response.message,
+          });
+        }
 
         // Send final response
         reply.raw.write(`data: ${JSON.stringify({
@@ -1236,12 +1298,20 @@ class BrainDaemon {
         reply.raw.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
         reply.raw.end();
 
+        this.logger.info(`[Agent] Response sent to client`);
+
       } catch (error: any) {
-        this.logger.error(`Agent chat error: ${error.message}`, { stack: error.stack });
+        this.logger.error(`[Agent] Chat error: ${error.message}`, {
+          stack: error.stack,
+          errorName: error.name,
+          errorCode: error.code,
+        });
         try {
           reply.raw.write(`data: ${JSON.stringify({ type: 'error', error: error.message })}\n\n`);
           reply.raw.end();
-        } catch {}
+        } catch (writeError: any) {
+          this.logger.error(`[Agent] Failed to send error to client: ${writeError.message}`);
+        }
       }
     });
 
@@ -1273,6 +1343,123 @@ class BrainDaemon {
       } catch (err: any) {
         this.logger.warn(`Failed to list conversations: ${err.message}`);
         return { conversations: [] };
+      }
+    });
+
+    // Get current research report (for debugging - shows report being built)
+    this.server.get('/agent/report', async () => {
+      if (!this.researchAgent) {
+        return {
+          hasAgent: false,
+          report: null,
+          conversationId: null,
+        };
+      }
+
+      // Get the report content from the agent's internal state
+      // Note: This requires the agent to expose report state, which we'll need to add
+      return {
+        hasAgent: true,
+        conversationId: this.researchAgentConversationId,
+        // The ResearchAgent uses a ReportEditor internally via ResearchToolExecutor
+        // We need to expose this - for now return what we know
+        message: 'Use /agent/chat SSE stream for real-time report updates',
+      };
+    });
+
+    // Start a research task in background (returns immediately, check logs for progress)
+    this.server.post<{
+      Body: { message: string; conversationId?: string; cwd?: string };
+    }>('/agent/research', async (request, reply) => {
+      const { message, conversationId, cwd } = request.body || {};
+
+      if (!message) {
+        reply.status(400);
+        return { success: false, error: 'Missing message' };
+      }
+
+      // Use provided cwd or fallback to process.cwd()
+      const workingDir = cwd || process.cwd();
+
+      this.logger.info(`Agent research (background): ${message.substring(0, 100)}...`, {
+        conversationId: conversationId || 'new',
+        cwd: workingDir,
+      });
+
+      try {
+        // Ensure brain is initialized
+        const brain = await this.ensureBrain();
+
+        // Get API key
+        const brainConfig = brain.getConfig();
+        const apiKey = process.env.GEMINI_API_KEY || brainConfig.apiKeys.gemini;
+
+        if (!apiKey) {
+          reply.status(500);
+          return { success: false, error: 'GEMINI_API_KEY not configured' };
+        }
+
+        // Generate log path for agent session
+        const agentLogDir = path.join(LOG_DIR, 'agent-sessions');
+        await fs.mkdir(agentLogDir, { recursive: true });
+        const timestamp = getFilenameTimestamp();
+        const agentLogPath = path.join(agentLogDir, `session-${timestamp}.json`);
+        const reportPath = path.join(agentLogDir, `report-${timestamp}.md`);
+
+        // Create agent
+        const agent = await createResearchAgent({
+          apiKey,
+          model: 'gemini-2.0-flash',
+          conversationId: conversationId || undefined,
+          brainManager: brain,
+          cwd: workingDir,
+          verbose: true,
+          logPath: agentLogPath,
+          onReportUpdate: async (report, confidence, missingInfo) => {
+            // Write report to file for progressive checking
+            try {
+              await fs.writeFile(reportPath, report, 'utf-8');
+              this.logger.debug(`Report updated: ${report.length} chars, confidence: ${confidence}`);
+            } catch (err: any) {
+              this.logger.warn(`Failed to write report: ${err.message}`);
+            }
+          },
+        });
+
+        const agentConversationId = agent.getConversationId();
+
+        // Run research in background (fire and forget)
+        (async () => {
+          try {
+            this.logger.info(`[Background Research] Starting...`);
+            const result = await agent.research(message);
+            this.logger.info(`[Background Research] Complete`, {
+              confidence: result.confidence,
+              reportLength: result.report.length,
+              iterations: result.iterations,
+            });
+            // Write final report
+            await fs.writeFile(reportPath, result.report, 'utf-8');
+          } catch (err: any) {
+            this.logger.error(`[Background Research] Failed: ${err.message}`);
+          }
+        })();
+
+        // Return immediately with paths to check
+        return {
+          success: true,
+          message: 'Research started in background',
+          conversationId: agentConversationId,
+          logPath: agentLogPath,
+          reportPath: reportPath,
+          checkWith: `cat ${reportPath}`,
+          streamLogsWith: `tail -f ${agentLogPath}`,
+        };
+
+      } catch (error: any) {
+        this.logger.error(`Agent research error: ${error.message}`);
+        reply.status(500);
+        return { success: false, error: error.message };
       }
     });
 
