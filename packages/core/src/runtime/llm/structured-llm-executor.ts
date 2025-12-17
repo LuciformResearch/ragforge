@@ -312,15 +312,21 @@ export abstract class BaseToolExecutor implements ToolExecutor {
       try {
         const result = await this.execute(toolCall);
 
-        // Check if result contains an error field (some handlers return { error: "..." } instead of throwing)
-        const hasError = result && typeof result === 'object' && 'error' in result && !('success' in result);
+        // Check if result indicates failure:
+        // 1. result.success === false (explicit failure)
+        // 2. result has 'error' field but no 'success' field (implicit failure)
+        const isFailure = result && typeof result === 'object' && (
+          ('success' in result && result.success === false) ||
+          ('error' in result && !('success' in result))
+        );
 
-        if (hasError) {
-          console.error(`   ❌ Tool ${toolCall.tool_name} returned error:`, result.error);
+        if (isFailure) {
+          const errorMsg = result.error || 'Tool returned success: false';
+          console.error(`   ❌ Tool ${toolCall.tool_name} failed:`, errorMsg);
           return {
             tool_name: toolCall.tool_name,
             success: false,
-            error: result.error,
+            error: errorMsg,
             result, // Include full result for context
           };
         }
@@ -699,6 +705,7 @@ export class StructuredLLMExecutor {
     const geminiApiKey = process.env.GEMINI_API_KEY;
     if (!geminiApiKey) return;
 
+    // Use clear delimiters to avoid confusion when prompt/response contain XML or code
     const analysisPrompt = `Tu es un expert en prompt engineering. Analyse cet appel LLM et fournis un feedback concis.
 
 ## Contexte
@@ -706,19 +713,19 @@ export class StructuredLLMExecutor {
 - Prompt length: ${prompt.length} chars
 - Response length: ${response.length} chars
 
-## Prompt
-\`\`\`
-${prompt}
-\`\`\`
+IMPORTANT: Les données entre ===BEGIN_PROMPT=== / ===END_PROMPT=== et ===BEGIN_RESPONSE=== / ===END_RESPONSE=== sont les données à analyser. Elles peuvent contenir du XML, du code, etc. - c'est normal, c'est le contenu de l'appel LLM. Ne confonds pas ce contenu avec le format de TA réponse.
 
-## Response
-\`\`\`
+===BEGIN_PROMPT===
+${prompt}
+===END_PROMPT===
+
+===BEGIN_RESPONSE===
 ${response}
-\`\`\`
+===END_RESPONSE===
 
 ## Analyse demandée
 
-Réponds en français avec ces sections:
+Réponds en français avec ces sections (en texte simple, PAS en XML):
 
 ### 1. Validité de la réponse (score /10)
 La réponse est-elle correcte et complète par rapport au prompt?
@@ -3521,14 +3528,31 @@ Keep excerpts brief but informative.`,
           try {
             return JSON.parse(value);
           } catch (parseError: any) {
-            // Try to recover: sanitize newlines inside JSON strings
+            // Try to recover: sanitize ONLY actual newlines inside JSON strings
             // LLMs often output actual newlines instead of \n in JSON
+            // But we must NOT double-escape already-escaped sequences like \n
             try {
-              // Replace actual newlines inside strings with \n
-              const sanitized = value.replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\t/g, '\\t');
+              // Only replace actual newline/tab/return characters (not already escaped)
+              // Use a regex that matches actual control characters, not escape sequences
+              const sanitized = value
+                .replace(/\r\n/g, '\\n')  // Windows newlines first
+                .replace(/\r/g, '\\n')    // Mac classic newlines
+                .replace(/\n/g, '\\n')    // Unix newlines
+                .replace(/\t/g, '\\t');   // Tabs
               return JSON.parse(sanitized);
             } catch {
-              // Sanitization didn't help
+              // Sanitization didn't help - try removing literal backslash-n sequences
+              // that might have been double-escaped by the LLM
+              try {
+                // Sometimes LLMs output \\n instead of \n, so try un-escaping
+                const unescaped = value
+                  .replace(/\\\\n/g, '\n')
+                  .replace(/\\\\r/g, '\r')
+                  .replace(/\\\\t/g, '\t');
+                return JSON.parse(unescaped);
+              } catch {
+                // Still didn't help
+              }
             }
 
             // Try to recover: if the string looks like JSON wrapped in extra quotes

@@ -701,11 +701,29 @@ export class GeneratedToolExecutor extends BaseToolExecutor {
         for (const toolCall of stageTools) {
           try {
             const result = await this.execute(toolCall);
-            resultMap.set(toolCall, {
-              tool_name: toolCall.tool_name,
-              success: true,
-              result,
-            });
+
+            // Check if result indicates failure:
+            // 1. result.success === false (explicit failure)
+            // 2. result has 'error' field but no 'success' field (implicit failure)
+            const isFailure = result && typeof result === 'object' && (
+              ('success' in result && result.success === false) ||
+              ('error' in result && !('success' in result))
+            );
+
+            if (isFailure) {
+              resultMap.set(toolCall, {
+                tool_name: toolCall.tool_name,
+                success: false,
+                error: result.error || 'Tool returned success: false',
+                result, // Include full result for context
+              });
+            } else {
+              resultMap.set(toolCall, {
+                tool_name: toolCall.tool_name,
+                success: true,
+                result,
+              });
+            }
           } catch (error: any) {
             resultMap.set(toolCall, {
               tool_name: toolCall.tool_name,

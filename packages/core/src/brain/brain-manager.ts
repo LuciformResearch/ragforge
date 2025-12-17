@@ -4003,156 +4003,131 @@ volumes:
       labelEmbeddingMap.set('EmbeddingChunk', new Set(['embedding_content']));
     }
 
+    // Build list of all (label, embeddingProp) combinations to search
+    const searchTasks: Array<{ label: string; embeddingProp: string; indexName: string }> = [];
     for (const embeddingProp of embeddingProps) {
       for (const [label, labelProps] of labelEmbeddingMap.entries()) {
         // Only search if this label has this embedding property
         if (!labelProps.has(embeddingProp)) continue;
-
         const indexName = `${label.toLowerCase()}_${embeddingProp}_vector`;
+        searchTasks.push({ label, embeddingProp, indexName });
+      }
+    }
 
-        try {
-          // Try using vector index first (fast)
-          // Request more results to account for filters (projectFilter, nodeTypeFilter)
-          const requestTopK = Math.min(limit * 3, 100);
-          
-          const cypher = `
-            CALL db.index.vector.queryNodes($indexName, $requestTopK, $queryEmbedding)
-            YIELD node AS n, score
-            WHERE score >= $minScore ${projectFilter} ${nodeTypeFilter} ${basePathFilter}
-            RETURN n, score
-            ORDER BY score DESC
-            LIMIT $limit
-          `;
+    // Run all vector index queries in PARALLEL for massive speedup
+    // Previously sequential: 30-40 queries × 0.5-1s each = 15-40s
+    // Now parallel: ~1-2s total
+    const requestTopK = Math.min(limit * 3, 100);
+    const searchPromises = searchTasks.map(async ({ label, embeddingProp, indexName }) => {
+      const results: Array<{ rawNode: any; score: number; label: string }> = [];
 
-          const result = await this.neo4jClient!.run(cypher, {
-            indexName,
-            requestTopK: neo4j.int(requestTopK),
-            queryEmbedding,
-            minScore,
-            ...params,
-            limit: neo4j.int(limit),
+      try {
+        const cypher = `
+          CALL db.index.vector.queryNodes($indexName, $requestTopK, $queryEmbedding)
+          YIELD node AS n, score
+          WHERE score >= $minScore ${projectFilter} ${nodeTypeFilter} ${basePathFilter}
+          RETURN n, score
+          ORDER BY score DESC
+          LIMIT $limit
+        `;
+
+        const result = await this.neo4jClient!.run(cypher, {
+          indexName,
+          requestTopK: neo4j.int(requestTopK),
+          queryEmbedding,
+          minScore,
+          ...params,
+          limit: neo4j.int(limit),
+        });
+
+        for (const record of result.records) {
+          results.push({
+            rawNode: record.get('n').properties,
+            score: record.get('score'),
+            label,
           });
+        }
+      } catch (err: any) {
+        // Vector index might not exist yet, fall back to manual search
+        if (err.message?.includes('does not exist') || err.message?.includes('no such vector')) {
+          try {
+            const fallbackCypher = `
+              MATCH (n:\`${label}\`)
+              WHERE n.\`${embeddingProp}\` IS NOT NULL ${projectFilter} ${nodeTypeFilter}
+              RETURN n
+              LIMIT 500
+            `;
 
-          for (const record of result.records) {
-            const rawNode = record.get('n').properties;
-            const uuid = rawNode.uuid;
-            const score = record.get('score');
+            const fallbackResult = await this.neo4jClient!.run(fallbackCypher, params);
 
-            // Handle EmbeddingChunk: collect for later normalization to parent
-            if (label === 'EmbeddingChunk') {
-              const parentUuid = rawNode.parentUuid;
-              const parentLabel = rawNode.parentLabel;
+            for (const record of fallbackResult.records) {
+              const rawNode = record.get('n').properties;
+              const nodeEmbedding = rawNode[embeddingProp];
+              if (!nodeEmbedding || !Array.isArray(nodeEmbedding)) continue;
 
-              // Keep only the best match per parent
-              const existing = chunkMatches.get(parentUuid);
-              if (!existing || score > existing.score) {
-                chunkMatches.set(parentUuid, {
-                  chunk: rawNode,
-                  score,
-                  parentLabel,
-                });
-              }
-              continue; // Don't add chunk directly to results
+              const score = this.cosineSimilarity(queryEmbedding, nodeEmbedding);
+              if (score < minScore) continue;
+
+              results.push({ rawNode, score, label });
             }
+          } catch (fallbackErr: any) {
+            console.debug(`[BrainManager] Fallback search failed for ${label}.${embeddingProp}: ${fallbackErr.message}`);
+          }
+        } else {
+          console.debug(`[BrainManager] Vector search failed for ${indexName}: ${err.message}`);
+        }
+      }
 
-            // Skip duplicates for regular nodes
-            if (seenUuids.has(uuid)) continue;
-            seenUuids.add(uuid);
+      return results;
+    });
 
-            const projectId = rawNode.projectId || 'unknown';
-            const project = this.registeredProjects.get(projectId);
-            const projectPath = project?.path || 'unknown';
+    // Wait for all parallel queries to complete
+    const allQueryResults = await Promise.all(searchPromises);
 
-            // Build absolute file path: projectPath + "/" + node.file
-            const nodeFile = rawNode.file || rawNode.path || '';
-            const filePath = projectPath !== 'unknown' && nodeFile
-              ? path.join(projectPath, nodeFile)
-              : nodeFile || 'unknown';
+    // Merge results from all queries (deduplicate and handle chunks)
+    for (const queryResults of allQueryResults) {
+      for (const { rawNode, score, label } of queryResults) {
+        const uuid = rawNode.uuid;
 
-            allResults.push({
-              node: this.stripEmbeddingFields(rawNode),
+        // Handle EmbeddingChunk: collect for later normalization to parent
+        if (label === 'EmbeddingChunk') {
+          const parentUuid = rawNode.parentUuid;
+          const parentLabel = rawNode.parentLabel;
+
+          // Keep only the best match per parent
+          const existing = chunkMatches.get(parentUuid);
+          if (!existing || score > existing.score) {
+            chunkMatches.set(parentUuid, {
+              chunk: rawNode,
               score,
-              projectId,
-              projectPath,
-              projectType: project?.type || 'unknown',
-              filePath, // Absolute path to the file
+              parentLabel,
             });
           }
-        } catch (err: any) {
-          // Vector index might not exist yet, fall back to manual search
-          // This happens on first run before indexes are created
-          if (err.message?.includes('does not exist') || err.message?.includes('no such vector')) {
-            // Fallback: use MATCH with manual similarity (slower but works)
-            try {
-              const fallbackCypher = `
-                MATCH (n:\`${label}\`)
-                WHERE n.\`${embeddingProp}\` IS NOT NULL ${projectFilter} ${nodeTypeFilter}
-                RETURN n
-                LIMIT 500
-              `;
-
-              const fallbackResult = await this.neo4jClient!.run(fallbackCypher, params);
-
-              for (const record of fallbackResult.records) {
-                const rawNode = record.get('n').properties;
-                const uuid = rawNode.uuid;
-
-                const nodeEmbedding = rawNode[embeddingProp];
-                if (!nodeEmbedding || !Array.isArray(nodeEmbedding)) continue;
-
-                // Compute cosine similarity manually
-                const score = this.cosineSimilarity(queryEmbedding, nodeEmbedding);
-                if (score < minScore) continue;
-
-                // Handle EmbeddingChunk: collect for later normalization to parent
-                if (label === 'EmbeddingChunk') {
-                  const parentUuid = rawNode.parentUuid;
-                  const parentLabel = rawNode.parentLabel;
-
-                  // Keep only the best match per parent
-                  const existing = chunkMatches.get(parentUuid);
-                  if (!existing || score > existing.score) {
-                    chunkMatches.set(parentUuid, {
-                      chunk: rawNode,
-                      score,
-                      parentLabel,
-                    });
-                  }
-                  continue; // Don't add chunk directly to results
-                }
-
-                // Skip duplicates for regular nodes
-                if (seenUuids.has(uuid)) continue;
-                seenUuids.add(uuid);
-
-                const projectId = rawNode.projectId || 'unknown';
-                const project = this.registeredProjects.get(projectId);
-                const projectPath = project?.path || 'unknown';
-
-                // Build absolute file path: projectPath + "/" + node.file
-                const nodeFile = rawNode.file || rawNode.path || '';
-                const filePath = projectPath !== 'unknown' && nodeFile
-                  ? path.join(projectPath, nodeFile)
-                  : nodeFile || 'unknown';
-
-                allResults.push({
-                  node: this.stripEmbeddingFields(rawNode),
-                  score,
-                  projectId,
-                  projectPath,
-                  projectType: project?.type || 'unknown',
-                  filePath, // Absolute path to the file
-                });
-              }
-            } catch (fallbackErr: any) {
-              // Ignore fallback errors - continue with next label/property
-              console.debug(`[BrainManager] Fallback search failed for ${label}.${embeddingProp}: ${fallbackErr.message}`);
-            }
-          } else {
-            // Other errors (e.g., Neo4j version doesn't support vector indexes)
-            console.debug(`[BrainManager] Vector search failed for ${indexName}: ${err.message}`);
-          }
+          continue; // Don't add chunk directly to results
         }
+
+        // Skip duplicates for regular nodes
+        if (seenUuids.has(uuid)) continue;
+        seenUuids.add(uuid);
+
+        const projectId = rawNode.projectId || 'unknown';
+        const project = this.registeredProjects.get(projectId);
+        const projectPath = project?.path || 'unknown';
+
+        // Build absolute file path: projectPath + "/" + node.file
+        const nodeFile = rawNode.file || rawNode.path || '';
+        const filePath = projectPath !== 'unknown' && nodeFile
+          ? path.join(projectPath, nodeFile)
+          : nodeFile || 'unknown';
+
+        allResults.push({
+          node: this.stripEmbeddingFields(rawNode),
+          score,
+          projectId,
+          projectPath,
+          projectType: project?.type || 'unknown',
+          filePath, // Absolute path to the file
+        });
       }
     }
 

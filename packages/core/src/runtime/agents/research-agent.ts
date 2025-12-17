@@ -1347,7 +1347,7 @@ Examples:
       // Auto-analyze session if promptsDir is set
       if (this.promptsDir) {
         // Run analysis in background (don't block return)
-        runSessionAnalysis(this.promptsDir, question, this.maxIterations)
+        runSessionAnalysis(this.promptsDir, question)
           .then(analysis => {
             if (analysis) {
               logger.info('Auto-analysis completed', {

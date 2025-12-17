@@ -63,10 +63,14 @@ export interface SessionAnalysisResult {
   /** Human-readable summary */
   summary: string;
 
+  /** Complete improved system prompt incorporating all corrections */
+  improved_system_prompt?: string;
+
   /** Output file paths */
   _output_files?: {
     analysis_json: string;
     analysis_md: string;
+    improved_prompt_md?: string;
   };
 }
 
@@ -74,21 +78,45 @@ export interface SessionAnalysisResult {
 // Main Function
 // ============================================
 
+export interface SessionAnalysisOptions {
+  /** Directory containing prompt-*.txt and response-*.txt files */
+  promptsDir: string;
+  /** The original question/task */
+  question: string;
+  /** Focus areas for the analysis */
+  focusAreas?: string[];
+}
+
 /**
  * Run session analysis on a prompts directory
  *
  * Analyzes ALL responses but only the LAST prompt to reduce context size
  * while providing enough information for meaningful analysis.
  *
- * @param promptsDir - Directory containing prompt-*.txt and response-*.txt files
- * @param question - The original question/task
- * @param maxIterations - Max iterations to include (default: all)
+ * @param options - Session analysis options
+ */
+export async function runSessionAnalysis(
+  options: SessionAnalysisOptions
+): Promise<SessionAnalysisResult | null>;
+
+/**
+ * @deprecated Use options object instead
  */
 export async function runSessionAnalysis(
   promptsDir: string,
-  question: string,
-  maxIterations: number = 100
+  question: string
+): Promise<SessionAnalysisResult | null>;
+
+export async function runSessionAnalysis(
+  optionsOrPromptsDir: SessionAnalysisOptions | string,
+  questionArg?: string
 ): Promise<SessionAnalysisResult | null> {
+  // Handle both signatures
+  const options: SessionAnalysisOptions = typeof optionsOrPromptsDir === 'string'
+    ? { promptsDir: optionsOrPromptsDir, question: questionArg! }
+    : optionsOrPromptsDir;
+
+  const { promptsDir, question, focusAreas = [] } = options;
   const geminiApiKey = process.env.GEMINI_API_KEY;
   if (!geminiApiKey) {
     logger.warn('GEMINI_API_KEY not set, skipping session analysis');
@@ -130,16 +158,13 @@ export async function runSessionAnalysis(
       return a.type === 'prompt' ? -1 : 1;
     });
 
-    // Filter to max iterations
-    const filteredFiles = parsedFiles.filter(f => f.iter <= maxIterations);
-
-    // Find the last prompt
-    const lastPromptFile = filteredFiles.filter(f => f.type === 'prompt').pop();
+    // Find the last prompt (the one with full accumulated context)
+    const lastPromptFile = parsedFiles.filter(f => f.type === 'prompt').pop();
 
     // Build content: all responses + only last prompt
     const contentParts: string[] = [];
 
-    for (const file of filteredFiles) {
+    for (const file of parsedFiles) {
       // Skip prompts except the last one
       if (file.type === 'prompt' && file !== lastPromptFile) {
         continue;
@@ -158,30 +183,51 @@ export async function runSessionAnalysis(
     const llmProvider = new GeminiAPIProvider({
       apiKey: geminiApiKey,
       model: 'gemini-2.0-flash',
-      maxOutputTokens: 16000,
+      maxOutputTokens: 20000, // Allow long responses for detailed analysis + improved prompt
     });
 
     const executor = new StructuredLLMExecutor();
 
-    const systemPrompt = `You are an expert AI agent behavior analyst. Analyze this research session and provide concise feedback.
+    const focusInstructions = focusAreas.length > 0
+      ? `\n\nFocus your analysis particularly on these areas: ${focusAreas.join(', ')}`
+      : '';
+
+    const systemPrompt = `You are an expert in **prompt engineering** and **AI agent behavior analysis**. You have deep expertise in:
+- Crafting effective system prompts that guide LLM behavior
+- Analyzing agent traces to identify inefficiencies and anti-patterns
+- Optimizing tool-calling agents for better performance
+- Writing clear, actionable instructions that prevent common agent mistakes
+
+Your job is to analyze agent session logs and provide detailed, actionable feedback with a focus on **improving the system prompt**.
 
 The session shows:
 - ALL responses from the agent (showing its reasoning and tool calls)
 - Only the LAST prompt (showing the current accumulated context)
 
-Focus on:
-1. Efficiency: Did the agent repeat searches? Make redundant calls?
-2. Strategy: Did it have a clear plan? Adapt when needed?
-3. Tool usage: Right tools for the job? Missed opportunities?
-4. Loops: Did it get stuck repeating the same actions?
+Analyze the session thoroughly and provide:
+1. **Scores** (0-10): overall quality and efficiency
+2. **Tool Analysis**: identify redundant calls, useful calls, wasted time, missed opportunities
+3. **Reasoning Quality**: evaluate if the agent had a clear plan, exploited results well, adapted strategy
+4. **Issues**: list specific problems with severity levels
+5. **Suggestions**: concrete improvements for the agent
+6. **Prompt Corrections**: For each issue, provide a specific correction
+7. **MOST IMPORTANT - Improved System Prompt**: Write a COMPLETE, IMPROVED system prompt that incorporates ALL the corrections. This should be:
+   - A full, ready-to-use system prompt (not fragments)
+   - Long and detailed (several paragraphs)
+   - Include specific instructions to prevent each detected issue
+   - Include examples of good vs bad behavior where relevant
+   - Be written in a clear, directive style that LLMs respond well to
+   - This is the PRIMARY deliverable of your analysis${focusInstructions}`;
 
-Be specific and actionable in your feedback.`;
+    const userTask = `Analyze this research session and provide your analysis.
 
-    const userTask = `Analyze this research session:
+IMPORTANT: The session data between ===BEGIN_SESSION_DATA=== and ===END_SESSION_DATA=== contains XML responses from the agent being analyzed. This XML is DATA to analyze, NOT the format you should use for YOUR response. Your response format is specified at the end of this prompt.
 
 QUESTION: ${question}
 
-${sessionContent}`;
+===BEGIN_SESSION_DATA===
+${sessionContent}
+===END_SESSION_DATA===`;
 
     const outputSchema = {
       overall_score: {
@@ -259,6 +305,11 @@ ${sessionContent}`;
         description: 'Human-readable summary',
         required: true,
       },
+      improved_system_prompt: {
+        type: 'string' as const,
+        description: 'COMPLETE improved system prompt incorporating all corrections. This should be a full, ready-to-use prompt with detailed instructions to prevent all detected issues.',
+        required: true,
+      },
     };
 
     logger.info('Running session analysis...');
@@ -287,11 +338,23 @@ ${sessionContent}`;
     const mdPath = path.join(sessionDir, 'auto-analysis.md');
     await fs.writeFile(mdPath, markdownReport, 'utf-8');
 
+    // Save the improved_system_prompt as a separate .md file for easy reading
+    let improvedPromptPath: string | undefined;
+    if (result.improved_system_prompt) {
+      improvedPromptPath = path.join(sessionDir, 'improved-prompt.md');
+      await fs.writeFile(
+        improvedPromptPath,
+        `# Improved System Prompt\n\nGenerated: ${new Date().toISOString()}\n\n---\n\n${result.improved_system_prompt}`,
+        'utf-8'
+      );
+    }
+
     logger.info('Session analysis complete', {
       overall_score: result.overall_score,
       efficiency_score: result.efficiency_score,
       issues_count: result.issues?.length ?? 0,
       mdPath,
+      improvedPromptPath,
     });
 
     // Log summary to console for visibility
@@ -300,12 +363,16 @@ ${sessionContent}`;
     console.log(`  Issues: ${result.issues?.length ?? 0}, Suggestions: ${result.suggestions?.length ?? 0}`);
     console.log(`  Summary: ${result.summary?.substring(0, 200)}...`);
     console.log(`  Report: ${mdPath}`);
+    if (improvedPromptPath) {
+      console.log(`  Improved prompt: ${improvedPromptPath}`);
+    }
 
     return {
       ...result,
       _output_files: {
         analysis_json: jsonPath,
         analysis_md: mdPath,
+        improved_prompt_md: improvedPromptPath,
       },
     };
   } catch (error: any) {
