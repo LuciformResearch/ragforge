@@ -4102,6 +4102,10 @@ Example: call_research_agent({ question: "...", summarize_tool_context: false })
           type: 'number',
           description: 'Character threshold to trigger tool context summarization (default: 40000, ~10k tokens)',
         },
+        use_native_tool_calling: {
+          type: 'boolean',
+          description: 'Use native Gemini API tool calling instead of XML parsing (default: false). Useful for debugging agent behavior.',
+        },
       },
       required: ['question'],
     },
@@ -4119,8 +4123,9 @@ export function generateCallResearchAgentHandler(ctx: BrainToolsContext) {
     max_iterations?: number;
     summarize_tool_context?: boolean;
     tool_context_summarization_threshold?: number;
+    use_native_tool_calling?: boolean;
   }): Promise<any> => {
-    const { question, cwd, max_iterations, summarize_tool_context, tool_context_summarization_threshold } = params;
+    const { question, cwd, max_iterations, summarize_tool_context, tool_context_summarization_threshold, use_native_tool_calling } = params;
     const os = await import('os');
     const fsPromises = await import('fs/promises');
     const pathModule = await import('path');
@@ -4149,6 +4154,8 @@ export function generateCallResearchAgentHandler(ctx: BrainToolsContext) {
       // Tool context summarization options (exposed via MCP)
       summarizeToolContext: summarize_tool_context,
       toolContextSummarizationThreshold: tool_context_summarization_threshold,
+      // Native tool calling (uses Gemini API directly instead of XML parsing)
+      useNativeToolCalling: use_native_tool_calling,
       onReportUpdate: async (report: string) => {
         try {
           await fsPromises.writeFile(reportPath, report, 'utf-8');

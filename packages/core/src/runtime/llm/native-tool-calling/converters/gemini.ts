@@ -74,18 +74,30 @@ export function convertToolsToGenAI(
 }
 
 /**
- * Remove additionalProperties from JSON schema (Gemini doesn't support it)
+ * Remove non-standard properties from JSON schema (Gemini only supports standard JSON Schema fields)
+ * Gemini doesn't support: additionalProperties, optional, and other custom extensions
  */
 function removeAdditionalProperties(schema: Record<string, any>): Record<string, any> {
   if (typeof schema !== 'object' || schema === null) {
     return schema;
   }
 
+  // Properties that Gemini doesn't support
+  const unsupportedProps = new Set([
+    'additionalProperties',
+    'optional',  // Custom extension - use 'required' array instead
+    '$schema',
+    'definitions',
+    '$defs',
+    'examples',
+    'default',  // Gemini may not support default values
+  ]);
+
   const result: Record<string, any> = {};
 
   for (const [key, value] of Object.entries(schema)) {
-    if (key === 'additionalProperties') {
-      continue; // Skip this property
+    if (unsupportedProps.has(key)) {
+      continue; // Skip unsupported properties
     }
 
     if (typeof value === 'object' && value !== null) {

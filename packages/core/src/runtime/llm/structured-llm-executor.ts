@@ -483,6 +483,10 @@ export interface SingleLLMCallConfig<TOutput = any> {
   maxToolCallRounds?: number;
   /** Callback to get current report content (displayed in prompt if report exists) */
   getCurrentReport?: () => string | null;
+  /** Use native tool calling (Gemini API) instead of XML parsing (default: false for backwards compat) */
+  useNativeToolCalling?: boolean;
+  /** Native tool calling provider (required if useNativeToolCalling is true) */
+  nativeToolProvider?: NativeToolCallingProvider;
 
   // === TOOL CONTEXT SUMMARIZATION ===
   /**
@@ -501,6 +505,20 @@ export interface SingleLLMCallConfig<TOutput = any> {
     toolCalls?: ToolCallRequest[];
     output?: TOutput;
   }) => void;
+
+  /**
+   * Required tools that MUST be called at least once.
+   * If not called after `afterRounds` rounds, a warning is injected into tool context.
+   * Example: { tools: ['set_report', 'append_to_report'], afterRounds: 1, warning: 'You MUST call a report tool!' }
+   */
+  requiredTools?: {
+    /** Tool names (any of these must be called) */
+    tools: string[];
+    /** Inject warning after this many rounds without calling any of these tools */
+    afterRounds: number;
+    /** Warning message to inject */
+    warning: string;
+  };
 
   // === DEBUGGING ===
   logPrompts?: boolean | string;
@@ -905,52 +923,131 @@ Sois concis et actionnable.`;
           }
         }
 
-        // Build prompt (pass progressiveOutput for progressive mode)
-        const prompt = this.buildSinglePrompt(config, toolContextForPrompt, progressiveOutput);
-
         // Generate request ID for this iteration/round
-        requestId = iteration === 1 && toolCallRound === 1 
-          ? baseRequestId 
+        requestId = iteration === 1 && toolCallRound === 1
+          ? baseRequestId
           : `${baseRequestId}-iter${iteration}${toolCallRound > 1 ? `-round${toolCallRound}` : ''}`;
 
-        // Log prompt if requested
-        if (config.logPrompts) {
-          await this.logContent(`PROMPT [${requestId}] [iter ${iteration}, round ${toolCallRound}]`, prompt, config.logPrompts);
+        // Variables for LLM response
+        let response: string = '';
+        let validToolCalls: ToolCallRequest[] = [];
+        let llmTextContent: string = '';
+
+        // === NATIVE TOOL CALLING MODE ===
+        if (config.useNativeToolCalling && config.nativeToolProvider) {
+          // Build messages for native tool calling
+          const messages = this.buildMessagesForNativeToolCalling(
+            config,
+            toolContext,
+            [], // No previous messages tracking for now (could be added)
+            progressiveOutput
+          );
+
+          // Log prompt if requested
+          if (config.logPrompts) {
+            const messagesStr = messages.map(m => `[${m.role}]: ${m.content?.substring(0, 500)}...`).join('\n');
+            await this.logContent(`PROMPT [${requestId}] [iter ${iteration}, round ${toolCallRound}] (native)`, messagesStr, config.logPrompts);
+          }
+
+          // Call native tool provider
+          const nativeResponse = await config.nativeToolProvider.generateWithTools(
+            messages,
+            config.tools || [],
+            { toolChoice: 'auto' }
+          );
+
+          // Extract response data
+          llmTextContent = nativeResponse.content || '';
+          response = llmTextContent; // For logging compatibility
+
+          // Convert native tool calls to our format
+          validToolCalls = this.convertNativeToolCallsToRequests(nativeResponse.toolCalls);
+
+          // Log response if requested
+          if (config.logResponses) {
+            const responseStr = `Text: ${llmTextContent}\nTool calls: ${JSON.stringify(validToolCalls, null, 2)}`;
+            await this.logContent(`RESPONSE [iter ${iteration}, round ${toolCallRound}] (native)`, responseStr, config.logResponses);
+          }
+
+          // Build parsed output from text content and tool calls
+          // For native mode, we trust the LLM to have called tools, no XML parsing needed
+          parsed = {
+            answer: llmTextContent,
+            reasoning: llmTextContent,
+            tool_calls: validToolCalls.length > 0 ? validToolCalls : undefined,
+          } as TOutput;
+
+          // Log for debugging
+          if (requestId.includes('fuzzy-search-decision')) {
+            console.log(`[executeSingle] [${requestId}] Native response [iter ${iteration}, round ${toolCallRound}]:`, {
+              text: llmTextContent.substring(0, 500),
+              toolCalls: validToolCalls,
+            });
+          }
         }
+        // === TEXT-BASED TOOL CALLING MODE (XML/JSON parsing) ===
+        else {
+          // Build prompt (pass progressiveOutput for progressive mode)
+          const prompt = this.buildSinglePrompt(config, toolContextForPrompt, progressiveOutput);
 
-        // Call LLM with request ID
-        const response = await config.llmProvider.generateContent(prompt, requestId);
+          // Log prompt if requested
+          if (config.logPrompts) {
+            await this.logContent(`PROMPT [${requestId}] [iter ${iteration}, round ${toolCallRound}]`, prompt, config.logPrompts);
+          }
 
-        // Global LLM call logging (if enabled)
-        await this.logLLMCall(config.caller, prompt, response, requestId, {
-          method: 'executeSingle',
-          iteration,
-          toolCallRound,
-        });
+          // Call LLM with request ID
+          response = await config.llmProvider.generateContent(prompt, requestId);
 
-        // Log raw response for fuzzy search decision debugging
-        if (requestId.includes('fuzzy-search-decision')) {
-          console.log(`[executeSingle] [${requestId}] Raw LLM response [iter ${iteration}, round ${toolCallRound}]:`, response.substring(0, 500));
+          // Global LLM call logging (if enabled)
+          await this.logLLMCall(config.caller, prompt, response, requestId, {
+            method: 'executeSingle',
+            iteration,
+            toolCallRound,
+          });
+
+          // Log raw response for fuzzy search decision debugging
+          if (requestId.includes('fuzzy-search-decision')) {
+            console.log(`[executeSingle] [${requestId}] Raw LLM response [iter ${iteration}, round ${toolCallRound}]:`, response.substring(0, 500));
+          }
+
+          // Log response if requested
+          if (config.logResponses) {
+            await this.logContent(`RESPONSE [iter ${iteration}, round ${toolCallRound}]`, response, config.logResponses);
+          }
+
+          // Parse response with error recovery
+          const format = config.outputFormat || 'xml';
+          let parseError: string | null = null;
+
+          try {
+            const parsedOrPromise = this.parseSingleResponse<TOutput>(response, config.outputSchema, format);
+            parsed = parsedOrPromise instanceof Promise ? await parsedOrPromise : parsedOrPromise;
+          } catch (error: any) {
+            // Analyze the error programmatically
+            parseError = this.analyzeParseError(response, config.outputSchema, format, error);
+            console.error(`[executeSingle] Parse error at iter ${iteration}, round ${toolCallRound}: ${parseError}`);
+
+            // Add parse error to tool context so LLM sees it in next iteration
+            toolContext.push({
+              tool_name: '_parse_error',
+              success: false,
+              error: parseError,
+              result: null,
+            });
+
+            // Continue to next iteration (don't crash!)
+            break; // Break from inner while loop, continue outer for loop
+          }
+
+          // Log parsed response for fuzzy search decision debugging
+          if (requestId.includes('fuzzy-search-decision')) {
+            console.log(`[executeSingle] [${requestId}] Parsed response [iter ${iteration}, round ${toolCallRound}]:`, JSON.stringify(parsed, null, 2));
+          }
+
+          // Extract tool_calls if present
+          const toolCalls = (parsed as any).tool_calls as ToolCallRequest[] | undefined;
+          validToolCalls = this.filterValidToolCalls(toolCalls);
         }
-
-        // Log response if requested
-        if (config.logResponses) {
-          await this.logContent(`RESPONSE [iter ${iteration}, round ${toolCallRound}]`, response, config.logResponses);
-        }
-
-        // Parse response
-        const format = config.outputFormat || 'xml';
-        const parsedOrPromise = this.parseSingleResponse<TOutput>(response, config.outputSchema, format);
-        parsed = parsedOrPromise instanceof Promise ? await parsedOrPromise : parsedOrPromise;
-        
-        // Log parsed response for fuzzy search decision debugging
-        if (requestId.includes('fuzzy-search-decision')) {
-          console.log(`[executeSingle] [${requestId}] Parsed response [iter ${iteration}, round ${toolCallRound}]:`, JSON.stringify(parsed, null, 2));
-        }
-
-        // Extract tool_calls if present
-        const toolCalls = (parsed as any).tool_calls as ToolCallRequest[] | undefined;
-        const validToolCalls = this.filterValidToolCalls(toolCalls);
 
         // Call callback
         if (config.onLLMResponse) {
@@ -1001,7 +1098,23 @@ Sois concis et actionnable.`;
               toolsUsed.push(r.tool_name);
             }
           });
-          
+
+          // Check for required tools warning
+          if (config.requiredTools && toolCallRound >= config.requiredTools.afterRounds) {
+            const hasRequiredTool = config.requiredTools.tools.some(t => toolsUsed.includes(t));
+            if (!hasRequiredTool) {
+              // Inject warning into tool context
+              toolContext.push({
+                tool_name: '_system_warning',
+                success: false,
+                error: `⚠️ ATTENTION: ${config.requiredTools.warning}\n` +
+                  `You have completed ${toolCallRound} round(s) without calling any of: ${config.requiredTools.tools.join(', ')}.\n` +
+                  `Your next response MUST include one of these tools!`,
+                result: null,
+              });
+            }
+          }
+
           // Special case: if maxIterations === 1 and maxToolCallRounds === 1,
           // return immediately after executing tools (no need for final LLM response)
           if (maxIterations === 1 && maxToolCallRounds === 1 && toolContext.length > 0) {
@@ -1317,6 +1430,137 @@ Sois concis et actionnable.`;
     return null;
   }
 
+  // ===== NATIVE TOOL CALLING HELPERS =====
+
+  /**
+   * Build messages array for native tool calling mode
+   * Converts the prompt sections into a structured message array
+   */
+  private buildMessagesForNativeToolCalling<TOutput>(
+    config: SingleLLMCallConfig<TOutput>,
+    toolContext: ToolExecutionResult[],
+    previousMessages: NativeMessage[],
+    previousOutput?: Partial<TOutput>
+  ): NativeMessage[] {
+    const messages: NativeMessage[] = [];
+
+    // System message (combines system prompt, current report, and instructions)
+    const systemParts: string[] = [];
+    if (config.systemPrompt) {
+      systemParts.push(config.systemPrompt);
+    }
+
+    // Add current report if available
+    if (config.getCurrentReport) {
+      const currentReport = config.getCurrentReport();
+      if (currentReport && currentReport.trim().length > 0) {
+        systemParts.push('\n## Current Report (READ CAREFULLY)\n');
+        systemParts.push('**IMPORTANT RULES:**');
+        systemParts.push('- DO NOT add content that already exists in the report below');
+        systemParts.push('- DO NOT repeat sections, code blocks, or explanations already present');
+        systemParts.push('- ONLY append NEW information not already covered');
+        systemParts.push('- When the report is COMPLETE and answers the question fully, call `finalize_report` immediately');
+        systemParts.push('\nYour report in progress:');
+        systemParts.push('```markdown');
+        systemParts.push(currentReport);
+        systemParts.push('```\n');
+      }
+    }
+
+    if (config.instructions) {
+      systemParts.push(`\n## Additional Instructions\n${config.instructions}`);
+    }
+
+    if (systemParts.length > 0) {
+      messages.push({
+        role: 'system',
+        content: systemParts.join('\n'),
+      });
+    }
+
+    // User message (combines task, context, input fields)
+    const userParts: string[] = [];
+
+    if (config.userTask) {
+      userParts.push(`## Task\n${config.userTask}`);
+    }
+
+    if (config.contextData) {
+      userParts.push(`## Context\n${JSON.stringify(config.contextData, null, 2)}`);
+    }
+
+    // Input fields
+    if (config.inputFields && config.inputFields.length > 0) {
+      userParts.push('## Input');
+      for (const fieldConfig of config.inputFields) {
+        const fieldName = typeof fieldConfig === 'string' ? fieldConfig : fieldConfig.name;
+        let value = config.input[fieldName];
+
+        if (typeof fieldConfig !== 'string') {
+          if (fieldConfig.transform) {
+            value = fieldConfig.transform(value);
+          }
+          if (fieldConfig.maxLength && typeof value === 'string') {
+            value = this.truncate(value, fieldConfig.maxLength);
+          }
+          if (fieldConfig.prompt) {
+            userParts.push(`${fieldName} (${fieldConfig.prompt}):`);
+          } else {
+            userParts.push(`${fieldName}:`);
+          }
+        } else {
+          userParts.push(`${fieldName}:`);
+        }
+        userParts.push(this.formatValue(value));
+      }
+    }
+
+    // Previous output (for progressive mode)
+    if (previousOutput && config.progressiveOutput) {
+      userParts.push('\n## Your Previous Output');
+      userParts.push('Refine and improve based on new tool results:');
+      userParts.push(JSON.stringify(previousOutput, null, 2));
+    }
+
+    if (userParts.length > 0) {
+      messages.push({
+        role: 'user',
+        content: userParts.join('\n'),
+      });
+    }
+
+    // Add previous conversation (agent responses and tool results)
+    messages.push(...previousMessages);
+
+    // Add latest tool results as tool messages
+    for (const result of toolContext) {
+      // Skip system warnings and parse errors
+      if (result.tool_name.startsWith('_')) continue;
+
+      messages.push({
+        role: 'tool',
+        name: result.tool_name,
+        content: result.success
+          ? JSON.stringify(result.result, null, 2)
+          : `Error: ${result.error}`,
+      });
+    }
+
+    return messages;
+  }
+
+  /**
+   * Convert native ToolCall[] to ToolCallRequest[] format
+   */
+  private convertNativeToolCallsToRequests(toolCalls: ToolCall[] | undefined): ToolCallRequest[] {
+    if (!toolCalls || toolCalls.length === 0) return [];
+
+    return toolCalls.map(tc => ({
+      tool_name: tc.function.name,
+      arguments: JSON.parse(tc.function.arguments),
+    }));
+  }
+
   private buildPreviousOutputSection<TOutput>(
     config: SingleLLMCallConfig<TOutput>,
     previousOutput?: Partial<TOutput>
@@ -1557,18 +1801,22 @@ Keep excerpts brief but informative.`,
       // Add tool_calls if tools are available
       if (hasTools) {
         instructions.push('  <tool_calls>');
-        instructions.push('    <!-- If you need to call tools, include them here -->');
+        instructions.push('    <!-- ALWAYS include tool_calls when calling tools -->');
         instructions.push('    <tool_call>');
         instructions.push('      <tool_name>name_of_tool</tool_name>');
         instructions.push('      <arguments>');
         instructions.push('        <param>value</param>');
-        instructions.push('        <!-- For long text with special chars, use CDATA: <content><![CDATA[text...]]></content> -->');
         instructions.push('      </arguments>');
         instructions.push('    </tool_call>');
         instructions.push('  </tool_calls>');
       }
 
       instructions.push('</response>');
+      instructions.push('');
+      instructions.push('**CRITICAL FORMAT RULES:**');
+      instructions.push('1. ALWAYS wrap your response in <response>...</response>');
+      instructions.push('2. ALWAYS include ALL required fields (marked REQUIRED above)');
+      instructions.push('3. Put <tool_calls> INSIDE <response>, NOT at root level');
     } else if (format === 'yaml') {
       instructions.push('You MUST respond with structured YAML in the following format:');
       instructions.push('');
@@ -1673,34 +1921,65 @@ Keep excerpts brief but informative.`,
         },
       };
 
-      // Extract fields from root element
-      for (const [fieldName, fieldSchema] of Object.entries(extendedSchema) as [string, OutputFieldSchema][]) {
-        // Try child element
-        if (root.children) {
-          const childEl = root.children.find((c: any) => c.type === 'element' && c.name === fieldName);
-          if (childEl) {
-            // Handle arrays of objects recursively
-            if (fieldSchema.type === 'array' && fieldSchema.items) {
-              output[fieldName] = this.parseArrayFromElement(childEl, fieldSchema.items);
-            }
-            // Handle nested objects recursively
-            else if (fieldSchema.type === 'object' && fieldSchema.properties) {
-              output[fieldName] = this.parseObjectFromElement(childEl, fieldSchema.properties);
-            }
-            // Simple types: extract text
-            else {
-              const value = this.getTextContentFromElement(childEl);
-              if (value) {
-                output[fieldName] = this.convertValue(value, fieldSchema);
+      // Check for required fields in schema
+      const requiredFields = Object.entries(schema)
+        .filter(([_, fieldSchema]) => (fieldSchema as any).required)
+        .map(([name]) => name);
+
+      // Special case: if root IS tool_calls, parse it directly BUT check for missing required fields
+      if (root.name === 'tool_calls') {
+        // If there are required fields (like reasoning), reject this format
+        if (requiredFields.length > 0) {
+          throw new LLMParseError(
+            `Invalid response format: <tool_calls> at root level but missing required fields: ${requiredFields.join(', ')}. ` +
+            `Wrap your response in <response> and include <${requiredFields[0]}> before <tool_calls>.`,
+            xmlText
+          );
+        }
+        const toolCallsSchema = extendedSchema.tool_calls as OutputFieldSchema;
+        if (toolCallsSchema?.type === 'array' && toolCallsSchema.items) {
+          output.tool_calls = this.parseArrayFromElement(root, toolCallsSchema.items);
+        }
+      } else {
+        // Extract fields from root element's children
+        for (const [fieldName, fieldSchema] of Object.entries(extendedSchema) as [string, OutputFieldSchema][]) {
+          // Try child element
+          if (root.children) {
+            const childEl = root.children.find((c: any) => c.type === 'element' && c.name === fieldName);
+            if (childEl) {
+              // Handle arrays of objects recursively
+              if (fieldSchema.type === 'array' && fieldSchema.items) {
+                output[fieldName] = this.parseArrayFromElement(childEl, fieldSchema.items);
+              }
+              // Handle nested objects recursively
+              else if (fieldSchema.type === 'object' && fieldSchema.properties) {
+                output[fieldName] = this.parseObjectFromElement(childEl, fieldSchema.properties);
+              }
+              // Simple types: extract text
+              else {
+                const value = this.getTextContentFromElement(childEl);
+                if (value) {
+                  output[fieldName] = this.convertValue(value, fieldSchema);
+                }
               }
             }
           }
-        }
 
-        // Apply defaults
-        if (output[fieldName] === undefined && fieldSchema.default !== undefined) {
-          output[fieldName] = fieldSchema.default;
+          // Apply defaults
+          if (output[fieldName] === undefined && fieldSchema.default !== undefined) {
+            output[fieldName] = fieldSchema.default;
+          }
         }
+      }
+
+      // Check for missing required fields (even if we have tool_calls)
+      const missingRequired = requiredFields.filter(f => !output[f] || output[f] === '');
+      if (missingRequired.length > 0) {
+        throw new LLMParseError(
+          `Missing required field(s): ${missingRequired.join(', ')}. ` +
+          `Your response MUST include <${missingRequired[0]}> with content.`,
+          xmlText
+        );
       }
 
       // Check if we got any meaningful output
@@ -1724,6 +2003,74 @@ Keep excerpts brief but informative.`,
     }
 
     return output as TOutput;
+  }
+
+  /**
+   * Analyze a parse error and return a human-readable explanation
+   * This helps the LLM understand what went wrong so it can fix its response
+   */
+  private analyzeParseError<TOutput>(
+    response: string,
+    schema: OutputSchema<TOutput>,
+    format: 'xml' | 'json' | 'yaml',
+    error: any
+  ): string {
+    const issues: string[] = [];
+
+    if (format === 'xml') {
+      // Check for common XML issues
+      const trimmed = response.trim();
+
+      // Check if response is empty or too short
+      if (trimmed.length < 10) {
+        issues.push('Response is empty or too short');
+      }
+
+      // Check for wrong root element
+      const rootMatch = trimmed.match(/^<(\w+)/);
+      if (rootMatch) {
+        const rootName = rootMatch[1];
+        if (rootName !== 'response') {
+          issues.push(`Wrong root element: <${rootName}> instead of <response>`);
+        }
+      } else if (!trimmed.startsWith('<')) {
+        issues.push('Response does not start with XML - expected <response>');
+      }
+
+      // Check for missing required fields
+      const requiredFields = Object.entries(schema)
+        .filter(([_, fieldSchema]) => (fieldSchema as any).required)
+        .map(([name]) => name);
+
+      for (const field of requiredFields) {
+        if (!response.includes(`<${field}>`)) {
+          issues.push(`Missing required field: <${field}>`);
+        }
+      }
+
+      // Check for unclosed tags (basic check)
+      const openTags = response.match(/<(\w+)(?:\s[^>]*)?>/g) || [];
+      const closeTags = response.match(/<\/(\w+)>/g) || [];
+      if (openTags.length > closeTags.length + 5) {
+        issues.push('Possible unclosed XML tags detected');
+      }
+
+      // Check if tool_calls is at root level without response wrapper
+      if (trimmed.startsWith('<tool_calls>') && !trimmed.includes('<response>')) {
+        issues.push('<tool_calls> should be wrapped inside <response>, not at root level');
+      }
+    }
+
+    // Add the original error message
+    if (error?.message && !issues.some(i => i.includes(error.message))) {
+      issues.push(`Parser error: ${error.message}`);
+    }
+
+    if (issues.length === 0) {
+      issues.push('Unknown parse error - please ensure your response follows the required XML format');
+    }
+
+    return `⚠️ YOUR PREVIOUS RESPONSE COULD NOT BE PARSED:\n${issues.map(i => `  - ${i}`).join('\n')}\n\nPlease fix these issues and respond again with valid XML format.`;
   }
 
   /**

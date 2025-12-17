@@ -17,7 +17,7 @@
 
 import { StructuredLLMExecutor, BaseToolExecutor, LLMParseError, type ToolCallRequest, type ProgressiveOutputConfig } from '../llm/structured-llm-executor.js';
 import { GeminiAPIProvider } from '../reranking/gemini-api-provider.js';
-import { type ToolDefinition } from '../llm/native-tool-calling/index.js';
+import { type ToolDefinition, type NativeToolCallingProvider, GeminiNativeToolProvider } from '../llm/native-tool-calling/index.js';
 import { AgentLogger } from './rag-agent.js';
 import { createLogger } from '../utils/logger.js';
 
@@ -136,6 +136,13 @@ export interface ResearchAgentOptions {
 
   /** Threshold in chars to trigger tool context summarization (default: 40000) */
   toolContextSummarizationThreshold?: number;
+
+  /**
+   * Use native tool calling (Gemini API) instead of XML parsing (default: false).
+   * When enabled, tool calls are handled natively by the Gemini API,
+   * which can improve reliability but may have issues with code content in JSON format.
+   */
+  useNativeToolCalling?: boolean;
 }
 
 export interface ToolCallDetail {
@@ -343,17 +350,28 @@ export function validateToken(token: string): boolean {
 
 ### CRITICAL RULES
 
-**1. NEVER duplicate content in your report:**
+**1. ALWAYS include \`<reasoning>\` in your response:**
+- Every response MUST have a \`<reasoning>\` element explaining what you're doing
+- Example: \`<reasoning>I found the main auth file, now reading it to understand the token flow.</reasoning>\`
+- This helps track your thought process and avoid redundant work
+
+**2. NEVER duplicate content in your report:**
 - Before appending, READ the \`## Current Report (READ CAREFULLY)\` section at the end of the prompt
 - DO NOT add sections, code blocks, or explanations that already exist in that report
 - If content is already there, move on to NEW findings only
 
-**2. NEVER repeat the same tool call with the same arguments:**
+**3. NEVER repeat the same tool call with the same arguments:**
 - Check \`## Tool Results\` to see what you already searched/read
 - Check \`#### Your Previous Reasoning\` to remember your thought process
 - Examples: don't call \`brain_search\` with the same query twice, don't call \`read_file\` on the same file with the same offset/limit, etc.
 
-**3. Make MULTIPLE tool calls per turn (parallel execution):**
+**4. EVERY turn MUST include a report tool (set_report, append_to_report, or finalize_report):**
+- Your FIRST turn: call \`set_report\` to create the initial report structure
+- Subsequent turns: call \`append_to_report\` or \`edit_report\` with new findings
+- Final turn: call \`finalize_report\` when the report is complete
+- **If you don't call a report tool, your findings will be LOST!**
+
+**5. Make MULTIPLE tool calls per turn (parallel execution):**
 \`\`\`
 // GOOD - multiple searches + report update in ONE turn:
 brain_search({ query: "authentication" })
@@ -368,10 +386,7 @@ brain_search({ query: "authentication" })
 // ... wait for next turn ...
 \`\`\`
 
-**4. Always include a report tool with your search tools:**
-Every turn should update the report with your findings so far.
-
-**5. Call \`finalize_report\` when done:**
+**6. Call \`finalize_report\` when done:**
 When the report fully answers the question, call \`finalize_report\` immediately. Don't keep searching unnecessarily.
 
 ### Workflow
@@ -671,6 +686,10 @@ export class ResearchAgent {
   private summarizeToolContext: boolean;
   private toolContextSummarizationThreshold: number;
 
+  // Native tool calling
+  private useNativeToolCalling: boolean;
+  private nativeToolProvider?: NativeToolCallingProvider;
+
   constructor(
     executor: StructuredLLMExecutor,
     llmProvider: GeminiAPIProvider,
@@ -695,6 +714,7 @@ export class ResearchAgent {
       onReportUpdate?: (report: string, confidence: 'high' | 'medium' | 'low', missingInfo: string[]) => void;
       summarizeToolContext?: boolean;
       toolContextSummarizationThreshold?: number;
+      useNativeToolCalling?: boolean;
     }
   ) {
     this.executor = executor;
@@ -744,6 +764,22 @@ export class ResearchAgent {
     // Tool context summarization (disabled by default for full observability)
     this.summarizeToolContext = options.summarizeToolContext ?? false;
     this.toolContextSummarizationThreshold = options.toolContextSummarizationThreshold ?? 40000;
+
+    // Native tool calling (disabled by default for backwards compatibility with XML parsing)
+    this.useNativeToolCalling = options.useNativeToolCalling ?? false;
+    if (this.useNativeToolCalling) {
+      // Create native tool provider using same API key as llmProvider
+      const apiKey = (llmProvider as any).apiKey || process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+        throw new Error('useNativeToolCalling requires GEMINI_API_KEY');
+      }
+      this.nativeToolProvider = new GeminiNativeToolProvider({
+        apiKey,
+        model: (llmProvider as any).model || 'gemini-2.0-flash',
+        temperature: (llmProvider as any).temperature ?? 0.2,
+      });
+      console.log('[ResearchAgent] Native tool calling enabled');
+    }
   }
 
   /**
@@ -1245,11 +1281,12 @@ Examples:
     }
 
     // Output schema - minimal since report is built via tools
-    // The LLM can use 'reasoning' to explain what it's doing
+    // The LLM MUST provide reasoning with every response
     const outputSchema = {
       reasoning: {
         type: 'string' as const,
-        description: 'Brief explanation of what you are doing or what you found',
+        required: true as const,
+        description: 'REQUIRED: Brief explanation of what you are doing, what you found, or why you are calling these tools',
       },
     };
 
@@ -1262,6 +1299,12 @@ Examples:
         inputFields: [{ name: 'question', prompt: 'The research question to investigate' }],
         systemPrompt,
         userTask: 'Research the question thoroughly. Use set_report to create a report, then finalize_report when done.',
+        // Require report tools to be called
+        requiredTools: {
+          tools: ['set_report', 'append_to_report', 'edit_report', 'finalize_report'],
+          afterRounds: 1,
+          warning: 'You MUST call a report tool (set_report, append_to_report, edit_report, or finalize_report) EVERY turn! Your findings will be LOST if you don\'t update the report.',
+        },
         outputSchema,
         tools: this.getToolDefinitions(),
         maxIterations: this.maxIterations,
@@ -1272,6 +1315,9 @@ Examples:
         // Enable tool context summarization when context gets too large (prevents repetition)
         summarizeToolContext: this.summarizeToolContext,
         toolContextSummarizationThreshold: this.toolContextSummarizationThreshold,
+        // Native tool calling (uses Gemini API directly instead of XML parsing)
+        useNativeToolCalling: this.useNativeToolCalling,
+        nativeToolProvider: this.nativeToolProvider,
         caller: 'ResearchAgent.iterate',
         // Log to promptsDir if set (for full observability), otherwise use verbose flag
         logPrompts: this.promptsDir ? this.promptsDir + '/' : this.verbose,
@@ -1604,5 +1650,8 @@ export async function createResearchAgent(options: ResearchAgentOptions): Promis
     onToolResult: options.onToolResult,
     onThinking: options.onThinking,
     onReportUpdate: options.onReportUpdate,
+    summarizeToolContext: options.summarizeToolContext,
+    toolContextSummarizationThreshold: options.toolContextSummarizationThreshold,
+    useNativeToolCalling: options.useNativeToolCalling,
   });
 }
