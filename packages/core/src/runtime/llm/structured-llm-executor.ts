@@ -1553,7 +1553,10 @@ Keep excerpts brief but informative.`,
         instructions.push('    <!-- If you need to call tools, include them here -->');
         instructions.push('    <tool_call>');
         instructions.push('      <tool_name>name_of_tool</tool_name>');
-        instructions.push('      <arguments>{"param": "value"}</arguments>');
+        instructions.push('      <arguments>');
+        instructions.push('        <param>value</param>');
+        instructions.push('        <!-- For long text with special chars, use CDATA: <content><![CDATA[text...]]></content> -->');
+        instructions.push('      </arguments>');
         instructions.push('    </tool_call>');
         instructions.push('  </tool_calls>');
       }
@@ -3236,21 +3239,101 @@ Keep excerpts brief but informative.`,
   }
 
   /**
-   * Extract text content from XML element
+   * Extract text content from XML element.
+   * Handles both regular text nodes and CDATA sections.
    */
   private getTextContentFromElement(element: any): string {
     if (!element) return '';
 
     // If element has direct text children, concatenate them
+    // Include both 'text' and 'cdata' node types (LuciformXMLParser creates separate nodes for CDATA)
     if (element.children) {
       return element.children
-        .filter((c: any) => c.type === 'text')
+        .filter((c: any) => c.type === 'text' || c.type === 'cdata')
         .map((c: any) => c.content || '')
         .join('')
         .trim();
     }
 
     return '';
+  }
+
+  /**
+   * Parse a dynamic object from XML element (no schema required).
+   * Extracts ALL child elements as properties.
+   * Used for tool arguments which have varying schemas per tool.
+   *
+   * Example input:
+   * <arguments>
+   *   <content>Some text content</content>
+   *   <path>/some/path</path>
+   *   <recursive>true</recursive>
+   * </arguments>
+   *
+   * Returns: { content: "Some text content", path: "/some/path", recursive: true }
+   */
+  private parseDynamicObjectFromElement(element: any): Record<string, any> {
+    const obj: Record<string, any> = {};
+
+    if (!element || !element.children) {
+      return obj;
+    }
+
+    // Extract all child elements as properties
+    for (const child of element.children) {
+      if (child.type !== 'element' || !child.name) continue;
+
+      const propName = child.name;
+      const textContent = this.getTextContentFromElement(child);
+
+      // Check if it has nested elements (nested object or array)
+      const nestedElements = child.children?.filter((c: any) => c.type === 'element') || [];
+
+      if (nestedElements.length > 0 && !textContent) {
+        // Has nested elements and no direct text content
+        // Check if all nested elements have the same name (array) or different names (object)
+        const names = new Set(nestedElements.map((e: any) => e.name));
+        if (names.size === 1 && nestedElements.length > 1) {
+          // Array of items with the same tag name
+          obj[propName] = nestedElements.map((e: any) => {
+            // Check if the array items themselves have nested elements
+            const itemNestedElements = e.children?.filter((c: any) => c.type === 'element') || [];
+            if (itemNestedElements.length > 0) {
+              return this.parseDynamicObjectFromElement(e);
+            }
+            return this.inferPrimitiveType(this.getTextContentFromElement(e));
+          });
+        } else {
+          // Nested object with different property names
+          obj[propName] = this.parseDynamicObjectFromElement(child);
+        }
+      } else {
+        // Primitive value (text content, possibly from CDATA)
+        obj[propName] = this.inferPrimitiveType(textContent);
+      }
+    }
+
+    return obj;
+  }
+
+  /**
+   * Infer the type of a value from its string representation.
+   * Returns the appropriately typed value (boolean, number, or string).
+   */
+  private inferPrimitiveType(value: string): boolean | number | string {
+    if (value === '') return '';
+
+    // Boolean
+    const lowerValue = value.toLowerCase();
+    if (lowerValue === 'true') return true;
+    if (lowerValue === 'false') return false;
+
+    // Number (integer or float)
+    if (/^-?\d+$/.test(value)) return parseInt(value, 10);
+    if (/^-?\d+\.\d+$/.test(value)) return parseFloat(value);
+
+    // Default: string
+    return value;
   }
 
   /**
@@ -3330,6 +3413,10 @@ Keep excerpts brief but informative.`,
             value = this.parseArrayFromElement(childEl, propSchema.items);
           } else if (propSchema.type === 'object' && propSchema.properties) {
             value = this.parseObjectFromElement(childEl, propSchema.properties);
+          } else if (propSchema.type === 'object') {
+            // Object type without predefined properties - parse dynamically
+            // This is used for tool arguments which have varying schemas per tool
+            value = this.parseDynamicObjectFromElement(childEl);
           } else {
             value = this.getTextContentFromElement(childEl);
           }
@@ -4004,37 +4091,51 @@ ${toolsDesc}
 
 ## How to Call Tools
 
-When you need to use tools, include them in the \`tool_calls\` array. Each tool call must have:
-- \`tool_name\`: The exact name of the tool
-- \`arguments\`: An object with the required parameters
+When you need to use tools, include them in the \`<tool_calls>\` section. Each tool call must have:
+- \`<tool_name>\`: The exact name of the tool
+- \`<arguments>\`: XML elements for each parameter (use CDATA for long text with special characters)
 
 ### Single Tool Call Example:
-\`\`\`json
-{
-  "tool_calls": [
-    {
-      "tool_name": "${exampleTool1}",
-      "arguments": { "param1": "value1" }
-    }
-  ]
-}
+\`\`\`xml
+<tool_calls>
+  <tool_call>
+    <tool_name>${exampleTool1}</tool_name>
+    <arguments>
+      <param1>value1</param1>
+    </arguments>
+  </tool_call>
+</tool_calls>
 \`\`\`
 
 ### Multiple Parallel Tool Calls Example:
 When tools don't depend on each other's results, call them all at once:
-\`\`\`json
-{
-  "tool_calls": [
-    {
-      "tool_name": "${exampleTool1}",
-      "arguments": { "param1": "value1" }
-    },
-    {
-      "tool_name": "${exampleTool2}",
-      "arguments": { "param2": "value2" }
-    }
-  ]
-}
+\`\`\`xml
+<tool_calls>
+  <tool_call>
+    <tool_name>${exampleTool1}</tool_name>
+    <arguments>
+      <param1>value1</param1>
+    </arguments>
+  </tool_call>
+  <tool_call>
+    <tool_name>${exampleTool2}</tool_name>
+    <arguments>
+      <param2>value2</param2>
+    </arguments>
+  </tool_call>
+</tool_calls>
+\`\`\`
+
+### Using CDATA for Long Text:
+For content with special characters (\`<\`, \`>\`, \`&\`) or multi-line text, wrap in CDATA:
+\`\`\`xml
+<arguments>
+  <content><![CDATA[
+## My Report
+
+This content has **markdown**, \`code\`, and special chars: < > &
+  ]]></content>
+</arguments>
 \`\`\`
 
 ## Important Guidelines
@@ -4046,11 +4147,25 @@ When tools don't depend on each other's results, call them all at once:
 5. **Return empty tool_calls ONLY** when you have completed the task and no more action is needed
 6. **Sequential calls**: If tool B needs the result of tool A, call A first, wait for results, then call B
 
-WRONG (just explaining):
-{ "answer": "I will create the file...", "tool_calls": [] }
+WRONG (just explaining without action):
+<response>
+  <reasoning>I will create the file...</reasoning>
+  <tool_calls></tool_calls>
+</response>
 
 CORRECT (action + explanation):
-{ "answer": "Creating the file now.", "tool_calls": [{"tool_name": "write_file", "arguments": {...}}] }`;
+<response>
+  <reasoning>Creating the file now.</reasoning>
+  <tool_calls>
+    <tool_call>
+      <tool_name>write_file</tool_name>
+      <arguments>
+        <path>/path/to/file</path>
+        <content>file content</content>
+      </arguments>
+    </tool_call>
+  </tool_calls>
+</response>`;
   }
 
   /**
