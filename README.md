@@ -111,14 +111,11 @@ Compatible with local models and cloud APIs:
 
 ### ResearchAgent
 
-The **ResearchAgent** is an autonomous agent optimized for codebase exploration and documentation:
+The **ResearchAgent** is an autonomous agent optimized for codebase exploration and documentation.
 
-```bash
-# Via CLI
-ragforge agent --ask "How does authentication work in this project?"
-
-# Via MCP (from Claude or other clients)
-call_research_agent({ question: "Explain the database schema" })
+**Usage via MCP** (from Claude or other clients):
+```
+call_research_agent({ question: "How does authentication work?" })
 ```
 
 **What it does:**
@@ -194,20 +191,14 @@ GEMINI_API_KEY=your-gemini-key        # Required for embeddings & search
 REPLICATE_API_TOKEN=your-token        # Optional, for 3D generation
 ```
 
-### 4. Talk to the agent
+### 4. Use with Claude (MCP)
 
-```bash
-# Ask a question about your codebase
-ragforge agent --ask "What functions handle authentication?"
+Add RagForge to your Claude configuration (see [MCP Server](#mcp-server) section), then ask Claude:
 
-# Create a new project
-ragforge agent --ask "Create a TypeScript project called my-api"
-
-# Ingest and search web content
-ragforge agent --ask "Fetch the React docs and explain hooks"
-
-# Generate media
-ragforge agent --ask "Generate a 3D model of a rubber duck"
+```
+"Use brain_search to find authentication code"
+"Ingest the ./src directory"
+"Call the research agent to explain the database layer"
 ```
 
 ---
