@@ -8,6 +8,7 @@
 import * as path from 'path';
 import * as fs from 'fs/promises';
 import type { Neo4jClient } from '../runtime/client/neo4j-client.js';
+import { isLocalPath } from '../utils/path-utils.js';
 
 // ============================================
 // Types
@@ -549,7 +550,7 @@ function extractVueSvelteReferences(content: string): ExtractedReference[] {
  * Check if an import source is local (vs npm package)
  */
 function isLocalImport(source: string): boolean {
-  return source.startsWith('.') || source.startsWith('/');
+  return isLocalPath(source);
 }
 
 /**

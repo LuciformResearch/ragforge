@@ -18,6 +18,7 @@ import * as path from 'path';
 import * as fs from 'fs/promises';
 import pLimit from 'p-limit';
 import { formatLocalDate } from '../utils/timestamp.js';
+import { getLastSegment, getPathDepth, splitPath, isLocalPath, isAbsolutePath } from '../../utils/path-utils.js';
 import {
   ParserRegistry,
   TypeScriptLanguageParser,
@@ -767,7 +768,7 @@ export class CodeSourceAdapter extends SourceAdapter {
               imported: imp.imported,
               alias: imp.alias,
               kind: imp.kind as any,
-              isLocal: imp.source.startsWith('.') || imp.source.startsWith('/')
+              isLocal: isLocalPath(imp.source)
             })),
             totalLines: universalAnalysis.linesOfCode,
             astValid: true,
@@ -824,10 +825,10 @@ export class CodeSourceAdapter extends SourceAdapter {
     if (gitRemote) {
       // Extract from git remote: git@github.com:user/repo.git -> repo
       const match = gitRemote.match(/[\/:]([^\/]+?)(?:\.git)?$/);
-      name = match ? match[1] : gitRemote.split('/').pop() || 'unknown';
+      name = match ? match[1] : getLastSegment(gitRemote);
     } else {
       // Use directory name
-      name = rootPath.split('/').pop() || 'unknown';
+      name = getLastSegment(rootPath);
     }
 
     return { name, gitRemote, rootPath };
@@ -1036,7 +1037,7 @@ export class CodeSourceAdapter extends SourceAdapter {
       }
 
       // Create File node with full metadata (using relative paths)
-      const fileName = relPath.split('/').pop() || relPath;
+      const fileName = getLastSegment(relPath);
       const directory = relPath.includes('/') ? relPath.substring(0, relPath.lastIndexOf('/')) : '.';
       const extension = fileName.includes('.') ? fileName.substring(fileName.lastIndexOf('.')) : '';
 
@@ -1111,7 +1112,7 @@ export class CodeSourceAdapter extends SourceAdapter {
 
     // Create Directory nodes
     for (const dir of directories) {
-      const depth = dir.split('/').filter(p => p.length > 0).length;
+      const depth = getPathDepth(dir);
       const absDirPath = path.join(projectRoot, dir);
       const dirUuid = UniqueIDHelper.GenerateDirectoryUUID(absDirPath);
       nodes.push({
@@ -1341,7 +1342,7 @@ export class CodeSourceAdapter extends SourceAdapter {
       });
 
       // Create File node for HTML file
-      const fileName = relPath.split('/').pop() || relPath;
+      const fileName = getLastSegment(relPath);
       const directory = relPath.includes('/') ? relPath.substring(0, relPath.lastIndexOf('/')) : '.';
       const extension = fileName.includes('.') ? fileName.substring(fileName.lastIndexOf('.')) : '';
       const { rawContentHash, mtime } = await this.computeFileMetadata(filePath);
@@ -1405,7 +1406,7 @@ export class CodeSourceAdapter extends SourceAdapter {
 
         if (!directories.has(dir)) {
           directories.add(dir);
-          const depth = dir.split('/').filter(p => p.length > 0).length;
+          const depth = getPathDepth(dir);
           const absDirPath = path.join(projectRoot, dir);
           const dirUuid = UniqueIDHelper.GenerateDirectoryUUID(absDirPath);
           nodes.push({
@@ -1523,7 +1524,7 @@ export class CodeSourceAdapter extends SourceAdapter {
       });
 
       // Create File node for CSS file
-      const fileName = relPath.split('/').pop() || relPath;
+      const fileName = getLastSegment(relPath);
       const directory = relPath.includes('/') ? relPath.substring(0, relPath.lastIndexOf('/')) : '.';
       const extension = fileName.includes('.') ? fileName.substring(fileName.lastIndexOf('.')) : '';
       const fileUuid = UniqueIDHelper.GenerateFileUUID(filePath);
@@ -1602,7 +1603,7 @@ export class CodeSourceAdapter extends SourceAdapter {
           directories.add(dir);
           const absDirPath = path.join(projectRoot, dir);
           const dirUuid = UniqueIDHelper.GenerateDirectoryUUID(absDirPath);
-          const depth = dir.split('/').filter(p => p.length > 0).length;
+          const depth = getPathDepth(dir);
           nodes.push({
             labels: ['Directory'],
             id: dirUuid,
@@ -1664,7 +1665,7 @@ export class CodeSourceAdapter extends SourceAdapter {
       });
 
       // Create File node
-      const fileName = relPath.split('/').pop() || relPath;
+      const fileName = getLastSegment(relPath);
       const directory = relPath.includes('/') ? relPath.substring(0, relPath.lastIndexOf('/')) : '.';
       const extension = fileName.includes('.') ? fileName.substring(fileName.lastIndexOf('.')) : '';
       const fileUuid = UniqueIDHelper.GenerateFileUUID(filePath);
@@ -1738,7 +1739,7 @@ export class CodeSourceAdapter extends SourceAdapter {
       });
 
       // Create File node
-      const fileName = relPath.split('/').pop() || relPath;
+      const fileName = getLastSegment(relPath);
       const directory = relPath.includes('/') ? relPath.substring(0, relPath.lastIndexOf('/')) : '.';
       const extension = '.vue';
       const fileUuid = UniqueIDHelper.GenerateFileUUID(filePath);
@@ -1811,7 +1812,7 @@ export class CodeSourceAdapter extends SourceAdapter {
       });
 
       // Create File node
-      const fileName = relPath.split('/').pop() || relPath;
+      const fileName = getLastSegment(relPath);
       const directory = relPath.includes('/') ? relPath.substring(0, relPath.lastIndexOf('/')) : '.';
       const extension = '.svelte';
       const fileUuid = UniqueIDHelper.GenerateFileUUID(filePath);
@@ -1885,7 +1886,7 @@ export class CodeSourceAdapter extends SourceAdapter {
       });
 
       // Create File node
-      const fileName = relPath.split('/').pop() || relPath;
+      const fileName = getLastSegment(relPath);
       const directory = relPath.includes('/') ? relPath.substring(0, relPath.lastIndexOf('/')) : '.';
       const extension = fileName.includes('.') ? fileName.substring(fileName.lastIndexOf('.')) : '';
       const fileUuid = UniqueIDHelper.GenerateFileUUID(filePath);
@@ -2037,7 +2038,7 @@ export class CodeSourceAdapter extends SourceAdapter {
       });
 
       // Create File node
-      const fileName = relPath.split('/').pop() || relPath;
+      const fileName = getLastSegment(relPath);
       const directory = relPath.includes('/') ? relPath.substring(0, relPath.lastIndexOf('/')) : '.';
       const extension = fileName.includes('.') ? fileName.substring(fileName.lastIndexOf('.')) : '';
       const fileUuid = UniqueIDHelper.GenerateFileUUID(filePath);
@@ -2119,7 +2120,7 @@ export class CodeSourceAdapter extends SourceAdapter {
       });
 
       // Create File node
-      const fileName = relPath.split('/').pop() || relPath;
+      const fileName = getLastSegment(relPath);
       const directory = relPath.includes('/') ? relPath.substring(0, relPath.lastIndexOf('/')) : '.';
       const extension = fileName.includes('.') ? fileName.substring(fileName.lastIndexOf('.')) : '';
       const fileUuid = UniqueIDHelper.GenerateFileUUID(filePath);
@@ -2321,7 +2322,7 @@ export class CodeSourceAdapter extends SourceAdapter {
       });
 
       // Create File node for media file
-      const fileName = relPath.split('/').pop() || relPath;
+      const fileName = getLastSegment(relPath);
       const directory = relPath.includes('/') ? relPath.substring(0, relPath.lastIndexOf('/')) : '.';
       const extension = path.extname(relPath);
       const fileUuid = UniqueIDHelper.GenerateFileUUID(filePath);
@@ -2417,7 +2418,7 @@ export class CodeSourceAdapter extends SourceAdapter {
       });
 
       // Create File node for document file
-      const fileName = relPath.split('/').pop() || relPath;
+      const fileName = getLastSegment(relPath);
       const directory = relPath.includes('/') ? relPath.substring(0, relPath.lastIndexOf('/')) : '.';
       const extension = path.extname(relPath);
       const fileUuid = UniqueIDHelper.GenerateFileUUID(filePath);
@@ -2486,7 +2487,7 @@ export class CodeSourceAdapter extends SourceAdapter {
         directories.add(dir);
         const absDirPath = path.join(projectRoot, dir);
         const dirUuid = UniqueIDHelper.GenerateDirectoryUUID(absDirPath);
-        const depth = dir.split('/').filter(p => p.length > 0).length;
+        const depth = getPathDepth(dir);
         nodes.push({
           labels: ['Directory'],
           id: dirUuid,
@@ -2576,8 +2577,8 @@ export class CodeSourceAdapter extends SourceAdapter {
         : '.';
 
       // Resolve relative to source file directory
-      const parts = sourceDir.split('/').filter(p => p && p !== '.');
-      const refParts = refValue.split('/');
+      const parts = splitPath(sourceDir).filter(p => p !== '.');
+      const refParts = splitPath(refValue);
 
       for (const part of refParts) {
         if (part === '..') {
@@ -2590,8 +2591,8 @@ export class CodeSourceAdapter extends SourceAdapter {
       return parts.join('/');
     }
 
-    // Absolute path from project root (starts with /)
-    if (refValue.startsWith('/')) {
+    // Absolute path from project root (starts with / or C:\)
+    if (isAbsolutePath(refValue)) {
       return refValue.substring(1);
     }
 

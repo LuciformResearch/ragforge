@@ -15,6 +15,7 @@ import type { FileWatcher } from '../adapters/file-watcher.js';
 import type { IncrementalIngestionManager } from '../adapters/incremental-ingestion.js';
 import type { IngestionLock } from '../../tools/ingestion-lock.js';
 import type { AgentLogger } from '../agents/rag-agent.js';
+import { splitPath } from '../../utils/path-utils.js';
 
 /**
  * Status of a loaded project
@@ -127,7 +128,7 @@ export class ProjectRegistry {
    */
   static generateId(projectPath: string): string {
     // Use last two path components for readability
-    const parts = projectPath.split('/').filter(Boolean);
+    const parts = splitPath(projectPath);
     const relevant = parts.slice(-2).join('-');
     // Add hash suffix for uniqueness
     const hash = projectPath

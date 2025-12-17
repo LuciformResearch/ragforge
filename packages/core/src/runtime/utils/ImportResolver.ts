@@ -12,6 +12,7 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import stripJsonComments from 'strip-json-comments';
+import { isLocalPath } from '../../utils/path-utils.js';
 
 interface TsConfigPaths {
   [pattern: string]: string[];
@@ -111,7 +112,7 @@ export class ImportResolver {
    */
   async resolveImport(importPath: string, currentFile: string): Promise<string | null> {
     // Skip external modules (node_modules)
-    if (!importPath.startsWith('.') && !importPath.startsWith('/')) {
+    if (!isLocalPath(importPath)) {
       // Could be a path mapping or external module
       if (this.paths) {
         const resolved = await this.resolvePathMapping(importPath, currentFile);

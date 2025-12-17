@@ -1,5 +1,5 @@
 import dotenv from 'dotenv';
-import { dirname, resolve } from 'path';
+import { dirname, resolve, isAbsolute } from 'path';
 import { fileURLToPath } from 'url';
 import { existsSync, readFileSync } from 'fs';
 
@@ -75,7 +75,7 @@ export function ensureEnvLoaded(callerUrl: string): string {
       dotenv.config({ path: cwdEnvLocal, override: true });
     }
 
-    if (process.env.GOOGLE_APPLICATION_CREDENTIALS && !process.env.GOOGLE_APPLICATION_CREDENTIALS.startsWith('/')) {
+    if (process.env.GOOGLE_APPLICATION_CREDENTIALS && !isAbsolute(process.env.GOOGLE_APPLICATION_CREDENTIALS)) {
       process.env.GOOGLE_APPLICATION_CREDENTIALS = resolve(root, process.env.GOOGLE_APPLICATION_CREDENTIALS);
     }
 

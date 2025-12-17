@@ -12,36 +12,24 @@
 
 import path from 'path';
 import process from 'process';
-import { promises as fs, readFileSync } from 'fs';
-import dotenv from 'dotenv';
-import yaml from 'js-yaml';
-import { callToolViaDaemon, ensureDaemonRunning, isDaemonRunning, generateDaemonBrainToolHandlers } from './daemon-client.js';
+import { callToolViaDaemon, ensureDaemonRunning } from './daemon-client.js';
 import { getDaemonBrainProxy, type BrainProxy } from './daemon-brain-proxy.js';
 import {
-  createClient,
-  ConfigLoader,
-  generateToolsFromConfig,
   generateFileTools,
   generateFsTools,
   generateShellTools,
   generateContextTools,
   ProjectRegistry,
-  // Discovery tools (get_schema)
-  generateDiscoveryTools,
   // Brain tools (ingest, search)
   generateBrainTools,
-  generateBrainToolHandlers,
   // Setup tools (set_api_key, get_brain_status)
   generateSetupTools,
-  generateSetupToolHandlers,
   // Agent tools (call_agent, extract_agent_prompt, call_agent_steps, create_conversation, switch_conversation)
   generateAgentTools,
   // Debug tools (inspect/test conversation memory)
   generateAllDebugTools,
   // Web tools (search, fetch)
   webToolDefinitions,
-  createWebToolHandlers,
-  type WebToolsContext,
   // Image tools
   generateImageTools,
   type ImageToolsContext,
@@ -49,8 +37,6 @@ import {
   generate3DTools,
   type ThreeDToolsContext,
   // Types
-  type ToolGenerationContext,
-  type RagForgeConfig,
   type GeneratedToolDefinition,
   type ToolSection,
   // Tool Logging
@@ -58,7 +44,7 @@ import {
   withToolLogging,
 } from '@luciformresearch/ragforge';
 import { startMcpServer, type McpServerConfig } from '../mcp/server.js';
-import { ensureEnvLoaded, getEnv } from '../utils/env.js';
+import { ensureEnvLoaded } from '../utils/env.js';
 
 // ============================================
 // Types
@@ -87,9 +73,6 @@ export interface McpServerOptions {
 
 interface McpContext {
   currentProjectPath: string | null;
-  generatedPath: string | null;
-  ragClient: ReturnType<typeof createClient> | null;
-  isProjectLoaded: boolean;
   registry: ProjectRegistry;
   /** Brain proxy - connects to daemon for all brain operations */
   brainProxy: BrainProxy | null;
@@ -100,108 +83,7 @@ interface McpContext {
 // ============================================
 
 /**
- * Extract ToolGenerationContext from RagForge config
- * Note: This is a simplified version that handles the most common cases
- */
-function extractToolContext(config: RagForgeConfig): ToolGenerationContext {
-  // Use type assertion to handle config shape differences
-  const entities: ToolGenerationContext['entities'] = [];
-  const allRelationships: ToolGenerationContext['relationships'] = [];
-  const allVectorIndexes: ToolGenerationContext['vectorIndexes'] = [];
-
-  for (const entityConfig of config.entities || []) {
-    const entity = entityConfig as any;
-    const uniqueField = entity.unique_field || 'name';
-
-    // Extract searchable fields from schema_fields (new format) or fields (legacy)
-    const fields = entity.schema_fields || entity.fields || {};
-    const searchableFields = Object.entries(fields)
-      .filter(([, f]) => (f as any).searchable)
-      .map(([name, f]) => ({
-        name,
-        type: (f as any).type as string,
-        description: (f as any).description,
-      }));
-
-    // Extract computed fields
-    const computedFields = (entity.computed_fields || []).map((cf: any) => ({
-      name: cf.name,
-      type: cf.return_type || 'string',
-      expression: cf.expression,
-      returnType: cf.return_type,
-      description: cf.description,
-    }));
-
-    // Extract vector indexes
-    const vectorIndexes: ToolGenerationContext['vectorIndexes'] = [];
-    if (entity.vector_indexes) {
-      for (const vi of entity.vector_indexes) {
-        vectorIndexes.push({
-          name: vi.name,
-          entityType: entity.name,
-          sourceField: vi.source_field,
-          dimension: vi.dimension,
-          provider: vi.provider,
-          model: vi.model,
-        });
-      }
-    } else if (entity.vector_index) {
-      const vi = entity.vector_index;
-      vectorIndexes.push({
-        name: vi.name,
-        entityType: entity.name,
-        sourceField: vi.source_field,
-        dimension: vi.dimension,
-        provider: vi.provider,
-        model: vi.model,
-      });
-    }
-
-    // Extract relationships
-    const relationships = (entity.relationships || []).map((r: any) => ({
-      type: r.type,
-      sourceEntity: entity.name,
-      targetEntity: r.target,
-      direction: r.direction,
-      description: r.description,
-    }));
-
-    entities.push({
-      name: entity.name,
-      description: entity.description,
-      uniqueField,
-      displayNameField: entity.display_name_field || 'name',
-      queryField: entity.query_field || 'name',
-      contentField: entity.content_field,
-      exampleDisplayFields: entity.example_display_fields,
-      searchableFields,
-      computedFields: computedFields.length > 0 ? computedFields : undefined,
-      vectorIndexes,
-      relationships,
-      changeTracking: entity.track_changes
-        ? { enabled: true, contentField: entity.change_tracking?.content_field || 'source' }
-        : undefined,
-      hierarchicalContent: entity.hierarchical_content
-        ? {
-            childrenRelationship: entity.hierarchical_content.children_relationship,
-            includeChildren: entity.hierarchical_content.include_children,
-          }
-        : undefined,
-    } as any);
-
-    allRelationships.push(...relationships);
-    allVectorIndexes.push(...vectorIndexes);
-  }
-
-  return {
-    entities,
-    relationships: allRelationships,
-    vectorIndexes: allVectorIndexes,
-  };
-}
-
-/**
- * Load project and prepare tools for MCP
+ * Prepare tools for MCP - all brain operations go through daemon
  */
 async function prepareToolsForMcp(
   options: McpServerOptions,
@@ -217,10 +99,7 @@ async function prepareToolsForMcp(
 
   // Create context
   const ctx: McpContext = {
-    currentProjectPath: null,
-    generatedPath: null,
-    ragClient: null,
-    isProjectLoaded: false,
+    currentProjectPath: projectPath,
     registry: new ProjectRegistry({
       memoryPolicy: { maxLoadedProjects: 3, idleUnloadTimeout: 5 * 60 * 1000 },
     }),
@@ -249,90 +128,6 @@ async function prepareToolsForMcp(
   }).catch(err => {
     log('debug', `Daemon background start failed: ${err.message} (will retry on first tool call)`);
   });
-
-  // Cached config for dynamic context
-  let cachedConfig: RagForgeConfig | null = null;
-  let cachedContext: ToolGenerationContext | null = null;
-
-  const getToolContext = (): ToolGenerationContext | null => {
-    if (!ctx.isProjectLoaded || !ctx.currentProjectPath) return null;
-
-    const configPaths = [
-      path.join(ctx.currentProjectPath, '.ragforge', 'ragforge.config.yaml'),
-      path.join(ctx.currentProjectPath, '.ragforge', 'generated', 'ragforge.config.yaml'),
-    ];
-
-    let configPath: string | null = null;
-    for (const p of configPaths) {
-      try {
-        readFileSync(p, 'utf-8');
-        configPath = p;
-        break;
-      } catch {
-        // Try next
-      }
-    }
-
-    if (!configPath) return null;
-
-    try {
-      const configContent = readFileSync(configPath, 'utf-8');
-      const config = yaml.load(configContent) as RagForgeConfig;
-
-      if (config !== cachedConfig) {
-        cachedConfig = config;
-        cachedContext = extractToolContext(config);
-      }
-
-      return cachedContext;
-    } catch {
-      return null;
-    }
-  };
-
-  // Try to load project
-  const configPath = options.config || path.join(projectPath, '.ragforge', 'generated', 'ragforge.config.yaml');
-  const generatedPath = path.join(projectPath, '.ragforge', 'generated');
-
-  try {
-    await fs.access(configPath);
-
-    log('info', `Loading project from ${projectPath}`);
-
-    // Load config
-    const config = await ConfigLoader.load(configPath);
-
-    // Create RagClient (auto-connects on first query)
-    const ragClient = createClient(config as any);
-
-    ctx.currentProjectPath = projectPath;
-    ctx.generatedPath = generatedPath;
-    ctx.ragClient = ragClient;
-    ctx.isProjectLoaded = true;
-
-    cachedConfig = config;
-    cachedContext = extractToolContext(config);
-
-    log('info', `Project loaded with ${config.entities?.length || 0} entities`);
-
-    // Generate RAG tools from config
-    const { tools: ragTools, handlers: ragHandlers } = generateToolsFromConfig(config, {
-      includeDiscovery: true,
-      includeSemanticSearch: true,
-      includeRelationships: true,
-      contextGetter: getToolContext,
-    });
-
-    allTools.push(...ragTools);
-
-    // Bind RAG handlers
-    for (const [name, handlerGen] of Object.entries(ragHandlers)) {
-      allHandlers[name] = (handlerGen as any)(ragClient);
-    }
-  } catch (error: any) {
-    log('info', `No project loaded: ${error.message}`);
-    log('info', 'Running in standalone mode with limited tools');
-  }
 
   // Add FS tools (list_directory, glob_files, etc.) - these run locally as they don't need brain
   // NOTE: delete_path, move_file, copy_file are now in brain-tools only
@@ -396,29 +191,28 @@ async function prepareToolsForMcp(
   // Add context tools
   const contextTools = generateContextTools({
     projectRoot: () => ctx.currentProjectPath,
-    isProjectLoaded: () => ctx.isProjectLoaded,
-    isNeo4jConnected: () => ctx.ragClient !== null,
+    isProjectLoaded: () => ctx.brainProxy !== null,
+    isNeo4jConnected: () => ctx.brainProxy !== null,
   });
   allTools.push(...contextTools.tools);
   for (const [name, handler] of Object.entries(contextTools.handlers)) {
     allHandlers[name] = handler;
   }
 
+  // Create daemon proxy handler factory
+  const createDaemonProxyHandler = (toolName: string) => async (args: any) => {
+    log('debug', `Calling ${toolName} via daemon (auto-restart enabled)`);
+    const result = await callToolViaDaemon(toolName, args);
+    if (!result.success) {
+      throw new Error(result.error || `Tool ${toolName} failed`);
+    }
+    return result.result;
+  };
+
   // Add brain tools via daemon (with auto-restart)
-  // This ensures the daemon is always running when brain tools are called
   {
     const brainToolDefs = generateBrainTools();
     const setupToolDefs = generateSetupTools();
-
-    // Create daemon proxy handlers - these auto-restart the daemon if needed
-    const createDaemonProxyHandler = (toolName: string) => async (args: any) => {
-      log('debug', `Calling ${toolName} via daemon (auto-restart enabled)`);
-      const result = await callToolViaDaemon(toolName, args);
-      if (!result.success) {
-        throw new Error(result.error || `Tool ${toolName} failed`);
-      }
-      return result.result;
-    };
 
     // Add brain tool definitions with daemon proxy handlers
     allTools.push(...brainToolDefs);
@@ -435,21 +229,7 @@ async function prepareToolsForMcp(
     log('debug', 'Setup tools enabled (via daemon with auto-restart)');
   }
 
-  // Add discovery tools (get_schema) - uses cached context from loaded project
-  if (cachedContext) {
-    const discoveryTools = generateDiscoveryTools(cachedContext, getToolContext);
-    allTools.push(...discoveryTools.tools);
-    for (const [name, handlerGen] of Object.entries(discoveryTools.handlers)) {
-      // Discovery handlers are generators that need the client
-      allHandlers[name] = (handlerGen as any)(ctx.ragClient);
-    }
-    log('debug', 'Discovery tools enabled');
-  } else {
-    log('debug', 'Discovery tools disabled (no project loaded)');
-  }
-
-  // File, Web, Image, and 3D tools are routed via daemon (see daemon section below)
-  // This ensures they benefit from daemon's brain integration and atomic ingestion
+  // File, Web, Image, and 3D tools are routed via daemon
   const projectRoot = ctx.currentProjectPath || process.cwd();
 
   log('info', `Prepared ${allTools.length} tools total`);
@@ -470,69 +250,55 @@ async function prepareToolsForMcp(
     }
   };
 
-  // Add tools via daemon (with auto-restart)
-  // This ensures the daemon is always running and handles brain integration atomically
-  {
-    // Create daemon proxy handlers - these auto-restart the daemon if needed
-    const createDaemonProxyHandler = (toolName: string) => async (args: any) => {
-      log('debug', `Calling ${toolName} via daemon (auto-restart enabled)`);
-      const result = await callToolViaDaemon(toolName, args);
-      if (!result.success) {
-        throw new Error(result.error || `Tool ${toolName} failed`);
-      }
-      return result.result;
-    };
-
-    // Add file tools that don't need brain integration (install_package runs locally)
-    // NOTE: read_file, write_file, edit_file, etc. are now in brain-tools and routed via daemon above
-    const fileTools = generateFileTools({ projectRoot: () => ctx.currentProjectPath || process.cwd() });
-    allTools.push(...fileTools.tools);
-    for (const [name, handler] of Object.entries(fileTools.handlers)) {
-      allHandlers[name] = handler; // Run locally, no daemon needed
-    }
-    log('debug', `File tools enabled (local) - ${fileTools.tools.length} tools`);
-
-    // Add web tools via daemon (for brain integration and web page ingestion)
-    allTools.push(...webToolDefinitions);
-    for (const toolDef of webToolDefinitions) {
-      allHandlers[toolDef.name] = createDaemonProxyHandler(toolDef.name);
-    }
-    log('debug', `Web tools enabled (via daemon) - ${webToolDefinitions.length} tools`);
-
-    // Add image tools via daemon (for brain integration and atomic ingestion)
-    const imageToolsCtx: ImageToolsContext = { projectRoot };
-    const imageTools = generateImageTools(imageToolsCtx);
-    allTools.push(...imageTools.tools);
-    for (const toolDef of imageTools.tools) {
-      allHandlers[toolDef.name] = createDaemonProxyHandler(toolDef.name);
-    }
-    log('debug', `Image tools enabled (via daemon) - ${imageTools.tools.length} tools`);
-
-    // Add 3D tools via daemon (for brain integration and atomic ingestion)
-    const threeDToolsCtx: ThreeDToolsContext = { projectRoot };
-    const threeDTools = generate3DTools(threeDToolsCtx);
-    allTools.push(...threeDTools.tools);
-    for (const toolDef of threeDTools.tools) {
-      allHandlers[toolDef.name] = createDaemonProxyHandler(toolDef.name);
-    }
-    log('debug', `3D tools enabled (via daemon) - ${threeDTools.tools.length} tools`);
-
-    // Add agent tools via daemon
-    const agentToolDefs = generateAgentTools();
-    allTools.push(...agentToolDefs);
-    for (const toolDef of agentToolDefs) {
-      allHandlers[toolDef.name] = createDaemonProxyHandler(toolDef.name);
-    }
-    log('debug', `Agent tools enabled (via daemon) - ${agentToolDefs.length} tools`);
-
-    // Add debug tools via daemon (for conversation memory inspection/testing)
-    const debugToolDefs = generateAllDebugTools();
-    allTools.push(...debugToolDefs);
-    for (const toolDef of debugToolDefs) {
-      allHandlers[toolDef.name] = createDaemonProxyHandler(toolDef.name);
-    }
-    log('debug', `Debug tools enabled (via daemon) - ${debugToolDefs.length} tools`);
+  // Add file tools that run locally (install_package, etc.)
+  // NOTE: read_file, write_file, edit_file, etc. are now in brain-tools and routed via daemon above
+  const fileTools = generateFileTools({ projectRoot: () => ctx.currentProjectPath || process.cwd() });
+  allTools.push(...fileTools.tools);
+  for (const [name, handler] of Object.entries(fileTools.handlers)) {
+    allHandlers[name] = handler; // Run locally, no daemon needed
   }
+  log('debug', `File tools enabled (local) - ${fileTools.tools.length} tools`);
+
+  // Add web tools via daemon (for brain integration and web page ingestion)
+  allTools.push(...webToolDefinitions);
+  for (const toolDef of webToolDefinitions) {
+    allHandlers[toolDef.name] = createDaemonProxyHandler(toolDef.name);
+  }
+  log('debug', `Web tools enabled (via daemon) - ${webToolDefinitions.length} tools`);
+
+  // Add image tools via daemon (for brain integration and atomic ingestion)
+  const imageToolsCtx: ImageToolsContext = { projectRoot };
+  const imageTools = generateImageTools(imageToolsCtx);
+  allTools.push(...imageTools.tools);
+  for (const toolDef of imageTools.tools) {
+    allHandlers[toolDef.name] = createDaemonProxyHandler(toolDef.name);
+  }
+  log('debug', `Image tools enabled (via daemon) - ${imageTools.tools.length} tools`);
+
+  // Add 3D tools via daemon (for brain integration and atomic ingestion)
+  const threeDToolsCtx: ThreeDToolsContext = { projectRoot };
+  const threeDTools = generate3DTools(threeDToolsCtx);
+  allTools.push(...threeDTools.tools);
+  for (const toolDef of threeDTools.tools) {
+    allHandlers[toolDef.name] = createDaemonProxyHandler(toolDef.name);
+  }
+  log('debug', `3D tools enabled (via daemon) - ${threeDTools.tools.length} tools`);
+
+  // Add agent tools via daemon
+  const agentToolDefs = generateAgentTools();
+  allTools.push(...agentToolDefs);
+  for (const toolDef of agentToolDefs) {
+    allHandlers[toolDef.name] = createDaemonProxyHandler(toolDef.name);
+  }
+  log('debug', `Agent tools enabled (via daemon) - ${agentToolDefs.length} tools`);
+
+  // Add debug tools via daemon (for conversation memory inspection/testing)
+  const debugToolDefs = generateAllDebugTools();
+  allTools.push(...debugToolDefs);
+  for (const toolDef of debugToolDefs) {
+    allHandlers[toolDef.name] = createDaemonProxyHandler(toolDef.name);
+  }
+  log('debug', `Debug tools enabled (via daemon) - ${debugToolDefs.length} tools`);
 
   log('debug', 'All tools prepared');
 

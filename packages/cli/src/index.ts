@@ -18,11 +18,6 @@ import {
   printTestToolHelp
 } from './commands/test-tool.js';
 import {
-  parseTuiOptions,
-  runTui,
-  printTuiHelp
-} from './commands/tui.js';
-import {
   startDaemon,
   stopDaemon,
   getDaemonStatus,
@@ -38,26 +33,29 @@ import {
   runSetup,
   printSetupHelp
 } from './commands/setup.js';
+import {
+  parseAgentOptions,
+  runAgent,
+  printAgentHelp
+} from './commands/agent.js';
 
 import { VERSION } from './version.js';
 
 function printRootHelp(): void {
   console.log(`RagForge CLI v${VERSION}
 
-AI-powered document search and code analysis.
-Index any files, search with natural language, query via MCP.
+Give Claude (or Cursor, Codex, etc.) a persistent memory.
+Ingest code, docs, and web into a searchable knowledge graph.
 
 Quick start:
   ragforge setup                   # Install Docker + Neo4j
-  ragforge                         # Launch interactive TUI
   ragforge mcp-server              # Start MCP server (for Claude Code)
 
 Usage:
-  ragforge                         Launch interactive TUI (default)
   ragforge setup [options]         Setup Docker + Neo4j environment
-  ragforge daemon <cmd>            Brain daemon (start|stop|status|logs)
   ragforge mcp-server [options]    Start as MCP server
-  ragforge tui [options]           Launch terminal UI
+  ragforge daemon <cmd>            Brain daemon (start|stop|status|logs)
+  ragforge agent [options]         Quick agent commands (ask, search, ingest)
   ragforge test-tool <name>        Test a tool directly (debugging)
   ragforge clean <path>            Remove data for a project
   ragforge help <command>          Show help for a command
@@ -70,11 +68,13 @@ Examples:
   # First time setup
   ragforge setup
 
-  # Interactive mode
-  ragforge
-
   # Use with Claude Code (add to MCP config)
   ragforge mcp-server
+
+  # Quick agent commands
+  ragforge agent --ask "How does auth work?"
+  ragforge agent --search "API endpoints"
+  ragforge agent --ingest ./src
 
   # Check daemon status
   ragforge daemon status
@@ -125,9 +125,8 @@ async function main(): Promise<void> {
   const args = process.argv.slice(2);
 
   if (args.length === 0) {
-    // Default: launch TUI
-    const options = parseTuiOptions([]);
-    await runTui(options);
+    // Default: show help
+    printRootHelp();
     return;
   }
 
@@ -150,11 +149,11 @@ async function main(): Promise<void> {
           case 'setup':
             printSetupHelp();
             break;
-          case 'tui':
-            printTuiHelp();
-            break;
           case 'mcp-server':
             printMcpServerHelp();
+            break;
+          case 'agent':
+            printAgentHelp();
             break;
           case 'test-tool':
             printTestToolHelp();
@@ -176,9 +175,9 @@ async function main(): Promise<void> {
         return;
       }
 
-      case 'tui': {
-        const options = parseTuiOptions(rest);
-        await runTui(options);
+      case 'agent': {
+        const options = parseAgentOptions(rest);
+        await runAgent(options);
         return;
       }
 

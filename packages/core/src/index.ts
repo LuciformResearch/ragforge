@@ -11,19 +11,6 @@
 export * from './types/config.js';
 export * from './types/schema.js';
 
-// Schema introspection
-export { SchemaIntrospector } from './schema/introspector.js';
-
-// Configuration
-export { ConfigLoader } from './config/loader.js';
-export { mergeWithDefaults } from './config/merger.js';
-export { writeConfigWithDefaults, writeMinimalConfig, type WriteOptions } from './config/writer.js';
-
-// Generators
-export { TypeGenerator } from './generator/type-generator.js';
-export { ConfigGenerator, type DomainPattern } from './generator/config-generator.js';
-export { CodeGenerator, type GeneratedCode } from './generator/code-generator.js';
-
 // Tool Generation (Phase 1)
 export { generateToolsFromConfig, type ExtendedToolGenerationOptions } from './tools/tool-generator.js';
 export type {
@@ -292,20 +279,6 @@ export type {
   SectionInfo,
   SubAgentContext,
 } from './tools/tool-sections.js';
-
-// Computed Fields (Phase 3)
-export {
-  evaluateComputedField,
-  evaluateExpression,
-  evaluateComputedFields,
-  generateCypherFragment,
-  validateComputedField
-} from './computed/field-evaluator.js';
-export type {
-  EvaluationContext,
-  EvaluationResult
-}
-from './computed/field-evaluator.js';
 
 // LLM Abstractions - DEPRECATED: moved to runtime/llm, interfaces no longer needed
 // export * from './llm/index.js';

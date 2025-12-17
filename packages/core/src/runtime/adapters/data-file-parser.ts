@@ -12,6 +12,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { createHash } from 'crypto';
 import YAML from 'yaml';
 import { LuciformXMLParser } from '@luciformresearch/xmlparser';
+import { isAbsolutePath, isRelativePath } from '../../utils/path-utils.js';
 
 // =============================================================================
 // Types
@@ -144,13 +145,13 @@ function detectReferenceType(value: string, contextPath: string): ReferenceType 
   // Package in dependencies context
   if (contextPath.includes('dependencies') || contextPath.includes('devDependencies') || contextPath.includes('peerDependencies')) {
     // Skip version specifiers
-    if (!trimmed.startsWith('.') && !trimmed.startsWith('/') && !trimmed.includes('/')) {
+    if (!trimmed.startsWith('.') && !isAbsolutePath(trimmed) && !trimmed.includes('/')) {
       return 'package';
     }
   }
 
   // Relative or absolute path
-  if (trimmed.startsWith('./') || trimmed.startsWith('../') || trimmed.startsWith('/')) {
+  if (isRelativePath(trimmed) || isAbsolutePath(trimmed)) {
     const lower = trimmed.toLowerCase();
 
     // Directory (ends with / or is a glob pattern)

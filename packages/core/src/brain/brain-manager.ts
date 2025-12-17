@@ -24,8 +24,6 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import { Neo4jClient } from '../runtime/client/neo4j-client.js';
 import { ProjectRegistry, type LoadedProject, type ProjectType } from '../runtime/projects/project-registry.js';
-import { ConfigLoader } from '../config/loader.js';
-import { createClient } from '../runtime/index.js';
 import type { RagForgeConfig } from '../types/config.js';
 import { UniversalSourceAdapter } from '../runtime/adapters/universal-source-adapter.js';
 import type { ParseResult } from '../runtime/adapters/types.js';

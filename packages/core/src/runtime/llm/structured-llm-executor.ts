@@ -18,6 +18,7 @@ import type { EntityContext, EntityField } from '../types/entity-context.js';
 import type { LLMProvider } from '../reranking/llm-provider.js';
 import type { QueryFeedback } from '../reranking/llm-reranker.js';
 import { getFilenameTimestamp, formatLocalDate } from '../utils/timestamp.js';
+import { getRagforgeEnvPath } from '../../utils/path-utils.js';
 import {
   GeminiNativeToolProvider,
   type ToolDefinition,
@@ -598,7 +599,7 @@ export class StructuredLLMExecutor {
     }
     // Check ~/.ragforge/.env using already-imported modules
     try {
-      const envPath = `${process.env.HOME || ''}/.ragforge/.env`;
+      const envPath = getRagforgeEnvPath();
       if (fs.existsSync(envPath)) {
         const content = fs.readFileSync(envPath, 'utf-8');
         const regex = new RegExp(`^${varName}\\s*=\\s*["']?true["']?\\s*$`, 'm');
