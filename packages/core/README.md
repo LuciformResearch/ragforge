@@ -170,7 +170,8 @@ src/
 
 ## Related Packages
 
-- [`@luciformresearch/ragforge-cli`](https://www.npmjs.com/package/@luciformresearch/ragforge-cli) - Command-line interface
+- [`@luciformresearch/ragforge-cli`](https://www.npmjs.com/package/@luciformresearch/ragforge-cli) - Command-line interface and MCP server
+- [`@luciformresearch/ragforge-studio`](https://www.npmjs.com/package/@luciformresearch/ragforge-studio) - Desktop app with setup wizard and graph explorer
 
 ---
 

@@ -120,13 +120,26 @@ ragforge ingest --path ./src --embeddings
 
 ---
 
-### `ragforge quickstart`
+### `ragforge setup`
 
-Interactive setup wizard for new projects.
+Setup Docker and Neo4j for RagForge.
 
 ```bash
-ragforge quickstart
+ragforge setup
 ```
+
+This will:
+- Check Docker is installed and running
+- Create a Neo4j container (`ragforge-neo4j`)
+- Configure `~/.ragforge/.env` automatically
+
+**Options:**
+```bash
+ragforge setup --password myPassword  # Custom Neo4j password
+ragforge setup --force                # Recreate container
+```
+
+> **Tip:** For a visual guided setup, use [RagForge Studio](https://www.npmjs.com/package/@luciformresearch/ragforge-studio) instead.
 
 ---
 
@@ -258,6 +271,7 @@ This package is part of the [RagForge](https://github.com/LuciformResearch/ragfo
 
 **Related Packages:**
 - [`@luciformresearch/ragforge`](https://www.npmjs.com/package/@luciformresearch/ragforge) - Core library
+- [`@luciformresearch/ragforge-studio`](https://www.npmjs.com/package/@luciformresearch/ragforge-studio) - Desktop app with setup wizard and graph explorer
 
 ---
 
