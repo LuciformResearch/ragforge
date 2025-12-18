@@ -1,0 +1,14 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+release/
+out/
+
+# Electron
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

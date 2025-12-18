@@ -493,6 +493,15 @@ Default: false. Requires GEMINI_API_KEY.`,
           description: `Additional context for summarization (e.g., the agent's reasoning at the time of search).
 Only used when summarize=true. Helps the LLM understand what information is being sought.`,
         },
+        fuzzy_distance: {
+          type: 'number',
+          optional: true,
+          description: `Fuzzy matching edit distance for BM25 text search (0, 1, or 2).
+Only applies when semantic=false (BM25 mode).
+- 0: Exact match only (no typo tolerance)
+- 1: Allow 1 character difference (default, good for small typos)
+- 2: Allow 2 character differences (more tolerant, may return less relevant results)`,
+        },
       },
       required: ['query'],
     },
@@ -519,6 +528,7 @@ export function generateBrainSearchHandler(ctx: BrainToolsContext) {
     explore_depth?: number;
     summarize?: boolean;
     summarize_context?: string;
+    fuzzy_distance?: 0 | 1 | 2;
   }): Promise<UnifiedSearchResult & {
     waited_for_edits?: boolean;
     watchers_started?: string[];
@@ -710,6 +720,8 @@ export function generateBrainSearchHandler(ctx: BrainToolsContext) {
         minScore: params.min_score,
         // Include orphan files under cwd when user doesn't specify projects
         touchedFilesBasePath,
+        // Fuzzy distance for BM25 search (only applies when semantic=false)
+        fuzzyDistance: params.fuzzy_distance,
       };
       const searchStart = Date.now();
       let result = await ctx.brain.search(params.query, options);
@@ -1118,6 +1130,14 @@ export function generateBrainSearchHandler(ctx: BrainToolsContext) {
             name: string;
             type: string;
             file?: string;
+            signature?: string;
+            docstring?: string;
+            startLine?: number;
+            endLine?: number;
+            absolutePath?: string;
+            relativePath?: string;
+            parentUuid?: string;
+            parentLabel?: string;
             score: number | null;
             isSearchResult: boolean;
           }>();
@@ -1155,7 +1175,7 @@ export function generateBrainSearchHandler(ctx: BrainToolsContext) {
             exploredUuids.add(nodeUuid);
 
             try {
-              // Query outgoing and incoming relationships
+              // Query outgoing and incoming relationships with full node properties
               const queries = [
                 {
                   query: `
@@ -1163,8 +1183,16 @@ export function generateBrainSearchHandler(ctx: BrainToolsContext) {
                     RETURN type(rel) as relationType,
                            related.uuid as relatedUuid,
                            coalesce(related.name, related.title, related.signature) as relatedName,
-                           labels(related)[0] as relatedType,
-                           coalesce(related.file, related.absolutePath) as relatedFile
+                           coalesce(related.type, labels(related)[0]) as relatedType,
+                           coalesce(related.file, related.absolutePath) as relatedFile,
+                           related.signature as relatedSignature,
+                           related.docstring as relatedDocstring,
+                           related.startLine as relatedStartLine,
+                           related.endLine as relatedEndLine,
+                           related.absolutePath as relatedAbsolutePath,
+                           related.relativePath as relatedRelativePath,
+                           related.parentUuid as relatedParentUuid,
+                           related.parentLabel as relatedParentLabel
                     LIMIT 15
                   `,
                   isOutgoing: true,
@@ -1175,8 +1203,16 @@ export function generateBrainSearchHandler(ctx: BrainToolsContext) {
                     RETURN type(rel) as relationType,
                            related.uuid as relatedUuid,
                            coalesce(related.name, related.title, related.signature) as relatedName,
-                           labels(related)[0] as relatedType,
-                           coalesce(related.file, related.absolutePath) as relatedFile
+                           coalesce(related.type, labels(related)[0]) as relatedType,
+                           coalesce(related.file, related.absolutePath) as relatedFile,
+                           related.signature as relatedSignature,
+                           related.docstring as relatedDocstring,
+                           related.startLine as relatedStartLine,
+                           related.endLine as relatedEndLine,
+                           related.absolutePath as relatedAbsolutePath,
+                           related.relativePath as relatedRelativePath,
+                           related.parentUuid as relatedParentUuid,
+                           related.parentLabel as relatedParentLabel
                     LIMIT 15
                   `,
                   isOutgoing: false,
@@ -1191,6 +1227,14 @@ export function generateBrainSearchHandler(ctx: BrainToolsContext) {
                   const relatedName = (record.get('relatedName') as string) || 'unnamed';
                   const relatedType = (record.get('relatedType') as string) || 'unknown';
                   const relatedFile = record.get('relatedFile') as string | undefined;
+                  const relatedSignature = record.get('relatedSignature') as string | undefined;
+                  const relatedDocstring = record.get('relatedDocstring') as string | undefined;
+                  const relatedStartLine = record.get('relatedStartLine') as number | undefined;
+                  const relatedEndLine = record.get('relatedEndLine') as number | undefined;
+                  const relatedAbsolutePath = record.get('relatedAbsolutePath') as string | undefined;
+                  const relatedRelativePath = record.get('relatedRelativePath') as string | undefined;
+                  const relatedParentUuid = record.get('relatedParentUuid') as string | undefined;
+                  const relatedParentLabel = record.get('relatedParentLabel') as string | undefined;
 
                   // Add related node if not already present (don't overwrite search results with scores)
                   if (!graphNodes.has(relatedUuid)) {
@@ -1199,6 +1243,14 @@ export function generateBrainSearchHandler(ctx: BrainToolsContext) {
                       name: relatedName,
                       type: relatedType,
                       file: relatedFile,
+                      signature: relatedSignature,
+                      docstring: relatedDocstring,
+                      startLine: relatedStartLine,
+                      endLine: relatedEndLine,
+                      absolutePath: relatedAbsolutePath,
+                      relativePath: relatedRelativePath,
+                      parentUuid: relatedParentUuid,
+                      parentLabel: relatedParentLabel,
                       score: null,
                       isSearchResult: false,
                     });
@@ -1237,9 +1289,13 @@ export function generateBrainSearchHandler(ctx: BrainToolsContext) {
             return 0;
           });
 
-          // Remove undefined file fields
+          // Remove undefined fields from nodes
           for (const node of sortedNodes) {
-            if (node.file === undefined) delete (node as any).file;
+            for (const key of Object.keys(node)) {
+              if ((node as any)[key] === undefined) {
+                delete (node as any)[key];
+              }
+            }
           }
 
           graph = {

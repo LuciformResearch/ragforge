@@ -286,6 +286,13 @@ export interface BrainSearchOptions {
    * Default: 60 (standard value from the RRF paper)
    */
   rrfK?: number;
+  /**
+   * Fuzzy matching edit distance for BM25 full-text search (0-2).
+   * - 0: Exact match only (no typo tolerance)
+   * - 1: Allow 1 character difference (default, good for small typos)
+   * - 2: Allow 2 character differences (more tolerant, may return less relevant results)
+   */
+  fuzzyDistance?: 0 | 1 | 2;
 }
 
 export interface BrainSearchResult {
@@ -3878,6 +3885,7 @@ volumes:
         params,
         limit,
         minScore: options.minScore,
+        fuzzyDistance: options.fuzzyDistance,
       });
     }
 
@@ -4282,9 +4290,10 @@ volumes:
       params: Record<string, any>;
       limit: number;
       minScore?: number;
+      fuzzyDistance?: 0 | 1 | 2;
     }
   ): Promise<BrainSearchResult[]> {
-    const { projectFilter, nodeTypeFilter, basePathFilter = '', params, limit, minScore } = options;
+    const { projectFilter, nodeTypeFilter, basePathFilter = '', params, limit, minScore, fuzzyDistance = 1 } = options;
 
     // Full-text index names to search (aligned with ensureFullTextIndexes)
     const fullTextIndexes = [
@@ -4301,9 +4310,12 @@ volumes:
     // Escape special Lucene characters in query
     const escapedQuery = query.replace(/[+\-&|!(){}[\]^"~*?:\\/]/g, '\\$&');
 
-    // Use Lucene query syntax with fuzzy matching (~1 = 1 edit distance, more precise)
+    // Use Lucene query syntax with fuzzy matching
+    // ~0 = exact match, ~1 = 1 edit distance, ~2 = 2 edit distances
     const words = escapedQuery.split(/\s+/).filter(w => w.length > 0);
-    const luceneQuery = words.map(w => `${w}~1`).join(' ');
+    const luceneQuery = fuzzyDistance === 0
+      ? words.join(' ')
+      : words.map(w => `${w}~${fuzzyDistance}`).join(' ');
 
     // Build a single UNION ALL query for all indexes (1 network round-trip instead of 8)
     const unionClauses = fullTextIndexes.map(indexName => `

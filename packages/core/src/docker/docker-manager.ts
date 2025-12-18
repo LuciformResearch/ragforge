@@ -1,6 +1,9 @@
 import { exec, spawn, ChildProcess } from 'child_process';
 import { promisify } from 'util';
-import { platform } from 'os';
+import { platform, homedir } from 'os';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { join } from 'path';
+import { randomBytes } from 'crypto';
 
 const execAsync = promisify(exec);
 
@@ -18,10 +21,66 @@ export interface Neo4jStatus {
   boltUrl?: string;
 }
 
-const NEO4J_CONTAINER_NAME = 'ragforge-neo4j';
-const NEO4J_IMAGE = 'neo4j:5-community';
+const NEO4J_CONTAINER_NAME = 'ragforge-brain-neo4j';
+const NEO4J_IMAGE = 'neo4j:5.23-community';
 const NEO4J_BOLT_PORT = 7687;
 const NEO4J_HTTP_PORT = 7474;
+const RAGFORGE_DIR = join(homedir(), '.ragforge');
+const RAGFORGE_ENV_FILE = join(RAGFORGE_DIR, '.env');
+
+/**
+ * Generate a random 16-character password
+ */
+function generatePassword(): string {
+  const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let password = '';
+  const bytes = randomBytes(16);
+  for (let i = 0; i < 16; i++) {
+    password += chars.charAt(bytes[i] % chars.length);
+  }
+  return password;
+}
+
+/**
+ * Get Neo4j password from ~/.ragforge/.env or generate a new one
+ */
+function getOrCreatePassword(): string {
+  // Try to read existing password from .env
+  if (existsSync(RAGFORGE_ENV_FILE)) {
+    try {
+      const envContent = readFileSync(RAGFORGE_ENV_FILE, 'utf-8');
+      const match = envContent.match(/NEO4J_PASSWORD=(.+)/);
+      if (match && match[1]) {
+        return match[1].trim();
+      }
+    } catch {
+      // Fall through to generate new password
+    }
+  }
+
+  // Generate new password and save to .env
+  const password = generatePassword();
+
+  // Ensure ~/.ragforge directory exists
+  if (!existsSync(RAGFORGE_DIR)) {
+    mkdirSync(RAGFORGE_DIR, { recursive: true });
+  }
+
+  // Create or update .env file
+  const envContent = `# RagForge Neo4j Configuration
+NEO4J_URI=bolt://localhost:${NEO4J_BOLT_PORT}
+NEO4J_DATABASE=neo4j
+NEO4J_USERNAME=neo4j
+NEO4J_PASSWORD=${password}
+
+# API Keys (add your keys here)
+# GEMINI_API_KEY=your_key_here
+# REPLICATE_API_TOKEN=your_token_here
+`;
+
+  writeFileSync(RAGFORGE_ENV_FILE, envContent, 'utf-8');
+  return password;
+}
 
 export class DockerManager {
   async checkDocker(): Promise<DockerStatus> {
@@ -132,15 +191,16 @@ Install Docker on Linux:
     });
   }
 
-  async createNeo4jContainer(password: string = 'ragforge'): Promise<void> {
+  async createNeo4jContainer(password?: string): Promise<void> {
+    const neo4jPassword = password || getOrCreatePassword();
     const args = [
       'run', '-d',
       '--name', NEO4J_CONTAINER_NAME,
       '-p', `${NEO4J_BOLT_PORT}:7687`,
       '-p', `${NEO4J_HTTP_PORT}:7474`,
-      '-e', `NEO4J_AUTH=neo4j/${password}`,
-      '-e', 'NEO4J_PLUGINS=["apoc"]',
-      '-e', 'NEO4J_dbms_security_procedures_unrestricted=apoc.*',
+      '-e', `NEO4J_AUTH=neo4j/${neo4jPassword}`,
+      '-e', 'NEO4J_PLUGINS=["apoc", "graph-data-science"]',
+      '-e', 'NEO4J_dbms_security_procedures_unrestricted=apoc.*,gds.*',
       '--restart', 'unless-stopped',
       NEO4J_IMAGE,
     ];
@@ -195,7 +255,7 @@ Install Docker on Linux:
   }
 
   async ensureNeo4jRunning(onProgress?: (msg: string) => void): Promise<{ boltUrl: string; password: string }> {
-    const password = 'ragforge';
+    const password = getOrCreatePassword();
 
     // Check Docker first
     const dockerStatus = await this.checkDocker();
@@ -238,7 +298,7 @@ Install Docker on Linux:
     return {
       boltUrl: `bolt://localhost:${NEO4J_BOLT_PORT}`,
       username: 'neo4j',
-      password: 'ragforge',
+      password: getOrCreatePassword(),
     };
   }
 }
