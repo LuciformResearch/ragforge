@@ -69,54 +69,33 @@ ragforge mcp
 
 ### `ragforge agent`
 
-Run the AI agent for natural language interaction with your codebase.
+Quick commands for interacting with the brain.
 
 ```bash
-# Ask a question
-ragforge agent --ask "What functions handle authentication?"
+# Ask the ResearchAgent a question
+ragforge agent --ask "How does authentication work?"
 
-# Create a project
-ragforge agent --ask "Create a TypeScript project called my-api"
+# Search the brain
+ragforge agent --search "API endpoints"
 
-# Use a specific model
-ragforge agent --model gemini-2.0-flash --ask "Explain this codebase"
+# Ingest a directory
+ragforge agent --ingest ./src
+
+# Ingest with media analysis
+ragforge agent --ingest ./docs --analyze-images --ocr
 
 # Verbose mode
 ragforge agent --verbose --ask "Find all TODO comments"
 ```
 
 **Options:**
-- `--ask <prompt>` - Question or task for the agent
-- `--project <path>` - Project directory (default: current directory)
-- `--model <name>` - Model to use (default: gemini-2.0-flash)
-- `--persona <text>` - Custom persona for the agent
-- `--verbose` - Enable verbose logging
-
----
-
-### `ragforge ingest`
-
-Manually ingest a directory into the brain.
-
-```bash
-# Ingest current directory
-ragforge ingest
-
-# Ingest specific path
-ragforge ingest --path /path/to/project
-
-# With custom name
-ragforge ingest --path ./docs --name my-docs
-
-# Generate embeddings
-ragforge ingest --path ./src --embeddings
-```
-
-**Options:**
-- `--path <dir>` - Directory to ingest (default: current directory)
-- `--name <name>` - Custom project name
-- `--embeddings` - Generate embeddings for semantic search
-- `--watch` - Watch for file changes after ingestion
+- `--ask <question>` - Ask the ResearchAgent a question
+- `--search <query>` - Search the brain (semantic search)
+- `--ingest <path>` - Ingest a directory into the brain
+- `--analyze-images` - Analyze images with Gemini Vision
+- `--analyze-3d` - Analyze 3D models by rendering them
+- `--ocr` - Run OCR on scanned PDF documents
+- `--verbose` - Show detailed output
 
 ---
 
@@ -201,52 +180,6 @@ The brain persists in `~/.ragforge/`:
 
 - **Images** - Text-to-image, editing via Gemini
 - **3D Models** - Text/image-to-3D via Trellis
-
----
-
-## Legacy Commands
-
-These commands are for the legacy code generation workflow:
-
-### `ragforge init`
-
-Bootstrap a new RAG project by introspecting Neo4j.
-
-```bash
-ragforge init --project my-project --out ./output
-```
-
-### `ragforge introspect`
-
-Analyze Neo4j database and generate YAML configuration.
-
-```bash
-ragforge introspect --project my-project --out ./output
-```
-
-### `ragforge generate`
-
-Generate type-safe client from YAML configuration.
-
-```bash
-ragforge generate --config ./ragforge.config.yaml --out ./generated
-```
-
-### `ragforge embeddings:index`
-
-Create vector indexes in Neo4j.
-
-```bash
-ragforge embeddings:index --config ./ragforge.config.yaml
-```
-
-### `ragforge embeddings:generate`
-
-Generate embeddings for configured indexes.
-
-```bash
-ragforge embeddings:generate --config ./ragforge.config.yaml
-```
 
 ---
 

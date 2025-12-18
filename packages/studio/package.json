@@ -1,6 +1,6 @@
 {
   "name": "@luciformresearch/ragforge-studio",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "type": "module",
   "description": "RagForge Studio - Setup, monitoring and graph exploration for RagForge",
   "author": "Lucie Defraiteur <luciedefraiteur@luciformresearch.com>",
@@ -17,8 +17,8 @@
     "package:all": "electron-builder -mwl"
   },
   "dependencies": {
-    "@luciformresearch/ragforge": "^0.3.2",
-    "@luciformresearch/ragforge-cli": "^0.3.2",
+    "@luciformresearch/ragforge": "^0.3.3",
+    "@luciformresearch/ragforge-cli": "^0.3.3",
     "@reactflow/node-resizer": "^2.2.14",
     "dagre": "^0.8.5",
     "dockerode": "^4.0.2",

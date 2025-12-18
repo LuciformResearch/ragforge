@@ -1,6 +1,6 @@
 {
   "name": "@luciformresearch/ragforge",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Unified RagForge library - YAML config parsing, Neo4j schema introspection, TypeScript code generation, LLM execution, agents, and RAG runtime.",
   "license": "LRSL-1.1 (See LICENSE file for more information)",
   "author": "Lucie Defraiteur <luciedefraiteur@luciformresearch.com>",
