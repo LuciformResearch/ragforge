@@ -1,6 +1,6 @@
 {
   "name": "@luciformresearch/ragforge-desktop",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "RagForge Desktop - AI-powered document search and code analysis",
   "author": "Lucie Defraiteur <luciedefraiteur@luciformresearch.com>",
   "license": "LRSL-1.1",
