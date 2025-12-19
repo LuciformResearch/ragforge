@@ -1,0 +1,62 @@
+@import "tailwindcss";
+
+:root {
+  --background: #0a0a0f;
+  --foreground: #ededed;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+/* Print styles for CV export */
+@media print {
+  :root {
+    --background: #0a0a0f;
+    --foreground: #ededed;
+  }
+
+  /* Remove default margins for full-bleed printing */
+  @page {
+    margin: 0;
+    size: A4;
+  }
+
+  html, body {
+    background: #0a0a0f !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+    color-adjust: exact !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  /* Hide navigation only */
+  nav {
+    display: none !important;
+  }
+
+  /* Keep 3D background visible */
+  canvas {
+    position: fixed !important;
+    top: 0 !important;
+    left: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
+    z-index: -1 !important;
+  }
+
+  /* Add padding to content since page margins are 0 */
+  .print-content {
+    padding: 1.5cm !important;
+  }
+}
