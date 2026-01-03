@@ -12,8 +12,8 @@
 
 import process from 'process';
 import * as path from 'path';
-import { BrainManager } from '@luciformresearch/ragforge';
 import { ensureEnvLoaded } from '../utils/env.js';
+import { ensureDaemonRunning, callToolViaDaemon } from './daemon-client.js';
 
 export interface CleanOptions {
   projectPath: string;
@@ -70,119 +70,98 @@ export function parseCleanOptions(args: string[]): CleanOptions {
 }
 
 export async function runClean(options: CleanOptions): Promise<void> {
-  const rootDir = ensureEnvLoaded(import.meta.url);
-  const brain = await BrainManager.getInstance();
+  ensureEnvLoaded(import.meta.url);
 
   const resolvedPath = path.resolve(options.projectPath);
   console.log(`🧹 Cleaning project: ${resolvedPath}`);
 
-  // Find project by path (try cache first)
-  let project = brain.findProjectByPath(resolvedPath);
-  let projectId: string | null = null;
-  
-  // If not found in cache, search directly in Neo4j
-  if (!project) {
-    console.log(`📡 Project not in cache, searching in Neo4j...`);
-    const neo4jClient = (brain as any).neo4jClient;
-    if (!neo4jClient) {
-      console.error(`❌ Neo4j client not initialized. Is the daemon running?`);
-      process.exitCode = 1;
-      return;
-    }
-    
-    // Try by projectId first (in case user passed a projectId instead of path)
-    let result = await neo4jClient.run(
-      `MATCH (p:Project {projectId: $search})
-       OPTIONAL MATCH (n {projectId: p.projectId})
-       WITH p, count(n) as nodeCount
-       RETURN p.projectId as id, p.rootPath as path, p.type as type,
-              p.lastAccessed as lastAccessed, p.excluded as excluded,
-              p.autoCleanup as autoCleanup, p.name as displayName,
-              nodeCount`,
-      { search: options.projectPath } // Try original input as projectId
-    );
-    
-    // If not found, try exact path match
-    if (result.records.length === 0) {
-      result = await neo4jClient.run(
-        `MATCH (p:Project {rootPath: $path})
-         OPTIONAL MATCH (n {projectId: p.projectId})
-         WITH p, count(n) as nodeCount
-         RETURN p.projectId as id, p.rootPath as path, p.type as type,
-                p.lastAccessed as lastAccessed, p.excluded as excluded,
-                p.autoCleanup as autoCleanup, p.name as displayName,
-                nodeCount`,
-        { path: resolvedPath }
-      );
-    }
-    
-    // If still not found, try matching any project where the path starts with the resolved path
-    if (result.records.length === 0) {
-      result = await neo4jClient.run(
-        `MATCH (p:Project)
-         WHERE p.rootPath STARTS WITH $path OR $path STARTS WITH p.rootPath
-         OPTIONAL MATCH (n {projectId: p.projectId})
-         WITH p, count(n) as nodeCount
-         RETURN p.projectId as id, p.rootPath as path, p.type as type,
-                p.lastAccessed as lastAccessed, p.excluded as excluded,
-                p.autoCleanup as autoCleanup, p.name as displayName,
-                nodeCount
-         ORDER BY length(p.rootPath) DESC
-         LIMIT 1`,
-        { path: resolvedPath }
-      );
-    }
-    
-    if (result.records.length > 0) {
-      const r = result.records[0];
-      const lastAccessed = r.get('lastAccessed');
-      project = {
-        id: r.get('id'),
-        path: r.get('path'),
-        type: r.get('type') || 'quick-ingest',
-        lastAccessed: lastAccessed ? (lastAccessed instanceof Date ? lastAccessed : new Date(lastAccessed)) : new Date(),
-        nodeCount: r.get('nodeCount')?.toNumber() || 0,
-        excluded: r.get('excluded') || false,
-        autoCleanup: r.get('autoCleanup') || false,
-        displayName: r.get('displayName'),
-      };
-      projectId = project.id;
-    } else {
-      // List all available projects
-      const allProjectsResult = await neo4jClient.run(
-        `MATCH (p:Project) RETURN p.projectId as id, p.rootPath as path ORDER BY p.rootPath`
-      );
-      console.error(`❌ Project not found: ${resolvedPath}`);
-      console.log(`\n💡 Available projects:`);
-      if (allProjectsResult.records.length === 0) {
-        console.log(`   (no projects found)`);
-      } else {
-        allProjectsResult.records.forEach((r: any) => {
-          console.log(`   - ${r.get('path')} (ID: ${r.get('id')})`);
-        });
-      }
-      process.exitCode = 1;
-      return;
-    }
-  } else {
-    projectId = project.id;
+  // Ensure daemon is running (handles Kuzu single-process constraint)
+  console.log(`📡 Connecting to daemon...`);
+  try {
+    await ensureDaemonRunning();
+  } catch (error: any) {
+    console.error(`❌ Failed to connect to daemon: ${error.message}`);
+    console.log(`\n💡 Try: ragforge daemon start`);
+    process.exitCode = 1;
+    return;
   }
 
-  console.log(`📦 Project ID: ${projectId}`);
+  // Find project using daemon
+  const projectsResult = await callToolViaDaemon('list_brain_projects', {});
+  if (!projectsResult.success) {
+    console.error(`❌ Failed to list projects: ${projectsResult.error}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const projects = projectsResult.result?.projects || [];
+
+  // Find matching project by path or ID
+  let project = projects.find((p: any) =>
+    p.path === resolvedPath ||
+    p.id === options.projectPath ||
+    resolvedPath.startsWith(p.path) ||
+    p.path?.startsWith(resolvedPath)
+  );
+
+  if (!project) {
+    console.error(`❌ Project not found: ${resolvedPath}`);
+    console.log(`\n💡 Available projects:`);
+    if (projects.length === 0) {
+      console.log(`   (no projects found)`);
+    } else {
+      projects.forEach((p: any) => {
+        console.log(`   - ${p.path} (ID: ${p.id})`);
+      });
+    }
+    process.exitCode = 1;
+    return;
+  }
+
+  console.log(`📦 Project ID: ${project.id}`);
   console.log(`📁 Root path: ${project.path}`);
 
   try {
     if (options.embeddingsOnly) {
       console.log(`\n🗑️  Removing embeddings only (nodes will be kept)...`);
-      const stats = await brain.removeProjectEmbeddings(projectId!);
-      console.log(`✅ Removed embeddings:`);
-      console.log(`   - Scope embeddings: ${stats.scopeEmbeddings}`);
-      console.log(`   - File embeddings: ${stats.fileEmbeddings}`);
-      console.log(`   - MarkdownSection embeddings: ${stats.markdownSectionEmbeddings}`);
-      console.log(`   - CodeBlock embeddings: ${stats.codeBlockEmbeddings}`);
-      console.log(`   - Other embeddings: ${stats.otherEmbeddings}`);
+
+      // Use run_cypher via daemon to remove embeddings
+      // This removes embedding properties while keeping nodes
+      const cypherResult = await callToolViaDaemon('run_cypher', {
+        query: `
+          MATCH (n {projectId: $projectId})
+          WHERE n.embedding IS NOT NULL
+             OR n.embedding_name IS NOT NULL
+             OR n.embedding_content IS NOT NULL
+             OR n.embedding_description IS NOT NULL
+          SET n.embedding = null,
+              n.embedding_name = null,
+              n.embedding_content = null,
+              n.embedding_description = null,
+              n.embedding_hash = null,
+              n._embeddingHash = null
+          RETURN count(n) as clearedCount
+        `,
+        params: { projectId: project.id }
+      });
+
+      // Also delete EmbeddingChunk nodes for this project
+      await callToolViaDaemon('run_cypher', {
+        query: `
+          MATCH (c:EmbeddingChunk {projectId: $projectId})
+          DETACH DELETE c
+        `,
+        params: { projectId: project.id }
+      });
+
+      if (cypherResult.success) {
+        const clearedCount = cypherResult.result?.records?.[0]?.clearedCount || 0;
+        console.log(`✅ Removed embeddings from ${clearedCount} nodes`);
+      } else {
+        console.log(`✅ Embeddings removal attempted (may have partially succeeded)`);
+      }
+
       console.log(`\n💡 Nodes are still in the database. Re-run ingestion to regenerate embeddings.`);
-      console.log(`💡 All nodes are now marked as "dirty" (hash = null) and will be re-embedded.`);
     } else if (options.all) {
       console.log(`\n⚠️  Removing ALL nodes and embeddings (full cleanup)...`);
       const confirmed = await confirmDeletion();
@@ -190,8 +169,20 @@ export async function runClean(options: CleanOptions): Promise<void> {
         console.log(`❌ Cancelled.`);
         return;
       }
-      await brain.forgetPath(resolvedPath);
-      console.log(`✅ Project completely removed from brain.`);
+
+      // Use forget_path via daemon
+      const forgetResult = await callToolViaDaemon('forget_path', {
+        path: resolvedPath
+      });
+
+      if (forgetResult.success) {
+        console.log(`✅ Project completely removed from brain.`);
+      } else {
+        console.error(`❌ Cleanup failed: ${forgetResult.error}`);
+        process.exitCode = 1;
+        return;
+      }
+
       console.log(`💡 Re-run ingestion to re-index the project.`);
     }
   } catch (error: any) {

@@ -6,7 +6,18 @@ export interface RagForgeConfig {
   name: string;
   version: string;
   description?: string;
-  neo4j: Neo4jConfig;
+
+  /**
+   * Database configuration (new unified format)
+   * Allows choosing between Neo4j and Kuzu
+   */
+  database?: DatabaseConfig;
+
+  /**
+   * @deprecated Use `database.neo4j` instead. Kept for backward compatibility.
+   */
+  neo4j?: Neo4jConfig;
+
   entities: EntityConfig[];
   reranking?: RerankingConfig;
   mcp?: McpConfig;
@@ -89,6 +100,29 @@ export interface Neo4jConfig {
   maxConnectionPoolSize?: number;
   /** Connection timeout in ms (optional) */
   connectionTimeout?: number;
+}
+
+/**
+ * Kuzu embedded database configuration
+ */
+export interface KuzuConfig {
+  /** Path to the database directory (default: ~/.ragforge/kuzu) */
+  path?: string;
+}
+
+/**
+ * Database provider configuration
+ * Allows choosing between Neo4j (requires Docker) and Kuzu (embedded, no external deps)
+ */
+export interface DatabaseConfig {
+  /** Database provider: 'neo4j' (default) or 'kuzu' (embedded, no Docker needed) */
+  provider: 'neo4j' | 'kuzu';
+
+  /** Neo4j configuration (required if provider is 'neo4j') */
+  neo4j?: Neo4jConfig;
+
+  /** Kuzu configuration (optional, uses defaults if provider is 'kuzu') */
+  kuzu?: KuzuConfig;
 }
 
 export interface EntityConfig {

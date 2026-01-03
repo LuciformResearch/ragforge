@@ -268,6 +268,14 @@ export class TouchedFilesWatcher {
       stats.durationMs = Date.now() - startTime;
       this.config.onProcessingComplete?.(stats);
 
+      // Mark indexes as dirty if data was changed (Kuzu only - lazy rebuild before search)
+      if (stats.parsed > 0 || stats.embedded > 0) {
+        const client = this.neo4jClient as any;
+        if (typeof client.markIndexesDirty === 'function') {
+          client.markIndexesDirty();
+        }
+      }
+
       if (this.verbose) {
         console.log(`[TouchedFilesWatcher] Complete: ${stats.parsed} parsed, ${stats.embedded} embedded, ${stats.skipped} skipped, ${stats.errors} errors (${stats.durationMs}ms)`);
       }
@@ -341,6 +349,14 @@ export class TouchedFilesWatcher {
         const embedStats = await this.processFilesForEmbedding(toEmbed);
         stats.embedded = embedStats.embedded;
         stats.errors += embedStats.errors;
+      }
+    }
+
+    // Mark indexes as dirty if data was changed (Kuzu only - lazy rebuild before search)
+    if (stats.parsed > 0 || stats.embedded > 0) {
+      const client = this.neo4jClient as any;
+      if (typeof client.markIndexesDirty === 'function') {
+        client.markIndexesDirty();
       }
     }
 

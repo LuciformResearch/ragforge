@@ -34,13 +34,13 @@ import { EmbeddingService, MULTI_EMBED_CONFIGS, type EmbeddingProviderConfig } f
 import { TouchedFilesWatcher, type ProcessingStats as TouchedFilesStats } from './touched-files-watcher.js';
 import type { FileState } from './file-state-machine.js';
 import { CONTENT_NODE_LABELS } from '../utils/node-schema.js';
-import { createSearchProvider, type SearchProvider, type RawSearchResult } from './search-provider.js';
 import { computeSchemaHash } from '../utils/schema-version.js';
 import { FileWatcher, type FileWatcherConfig } from '../runtime/adapters/file-watcher.js';
 import { IncrementalIngestionManager } from '../runtime/adapters/incremental-ingestion.js';
 import { IngestionLock, getGlobalIngestionLock, getGlobalEmbeddingLock } from '../tools/ingestion-lock.js';
 import { UniqueIDHelper } from '../runtime/utils/UniqueIDHelper.js';
 import neo4j from 'neo4j-driver';
+import { createSearchProvider, type SearchProvider, type RawSearchResult } from './search-provider.js';
 import { matchesGlob } from '../runtime/utils/pattern-matching.js';
 import { processBatch } from '../runtime/utils/batch-processor.js';
 import { DEFAULT_INCLUDE_PATTERNS, DEFAULT_EXCLUDE_PATTERNS } from '../ingestion/constants.js';
@@ -58,9 +58,13 @@ import {
 
 const execAsync = promisify(exec);
 
+// Brain container name (fixed, not per-project)
+const BRAIN_CONTAINER_NAME = 'ragforge-brain-neo4j';
+
 /**
- * Helper to convert Neo4j Integer or native JS numbers to a plain number.
- * Neo4j driver returns Integer objects with .toNumber(), but Kuzu returns native numbers.
+ * Safely convert a value to a number.
+ * Handles both Neo4j Integer objects (with .toNumber()) and regular JS numbers.
+ * This is needed for Kuzu compatibility since Kuzu returns native JS numbers.
  */
 function toNum(value: unknown): number {
   if (value === null || value === undefined) return 0;
@@ -71,9 +75,6 @@ function toNum(value: unknown): number {
   }
   return Number(value) || 0;
 }
-
-// Brain container name (fixed, not per-project)
-const BRAIN_CONTAINER_NAME = 'ragforge-brain-neo4j';
 
 // ============================================
 // Types
@@ -160,6 +161,12 @@ export interface BrainConfig {
   /** Database provider: 'neo4j' (requires Docker) or 'kuzu' (embedded, no external deps) */
   databaseProvider?: 'neo4j' | 'kuzu';
 
+  /** Kuzu configuration (used when databaseProvider is 'kuzu') */
+  kuzu?: {
+    /** Path to Kuzu database directory (default: ~/.ragforge/kuzu) */
+    path?: string;
+  };
+
   /** Neo4j configuration (loaded from .env, not persisted in config.yaml) */
   neo4j: {
     /** URI for Neo4j (from .env) */
@@ -174,12 +181,6 @@ export interface BrainConfig {
     boltPort?: number;
     /** HTTP port (persisted, used for Docker) */
     httpPort?: number;
-  };
-
-  /** Kuzu configuration (used when databaseProvider is 'kuzu') */
-  kuzu?: {
-    /** Path to Kuzu database directory (default: ~/.ragforge/kuzu) */
-    path?: string;
   };
 
   /** API Keys (loaded from .env) */
@@ -435,7 +436,6 @@ export class BrainManager {
   // Note: When using Kuzu, this will be a KuzuClient cast to Neo4jClient
   // Both have compatible interfaces for the operations we use
   private neo4jClient: Neo4jClient | null = null;
-  private searchProvider: SearchProvider | null = null;
   private projectRegistry: ProjectRegistry;
   private registeredProjects: Map<string, RegisteredProject> = new Map();
   private initialized = false;
@@ -443,6 +443,7 @@ export class BrainManager {
   private ingestionManager: IncrementalIngestionManager | null = null;
   private embeddingService: EmbeddingService | null = null;
   private touchedFilesWatcher: TouchedFilesWatcher | null = null;
+  private searchProvider: SearchProvider | null = null;
   private ingestionLock: IngestionLock;
   private embeddingLock: IngestionLock;
   private activeWatchers: Map<string, FileWatcher> = new Map();
@@ -858,7 +859,7 @@ export class BrainManager {
             { indexName }
           );
 
-          const exists = toNum(checkResult.records[0]?.get('count')) > 0;
+          const exists = checkResult.records[0]?.get('count')).let(v => toNum(v)) > 0;
 
           if (!exists) {
             // Create vector index
@@ -899,7 +900,7 @@ export class BrainManager {
           `SHOW INDEXES YIELD name WHERE name = $indexName RETURN count(name) as count`,
           { indexName }
         );
-        const exists = toNum(checkResult.records[0]?.get('count')) > 0;
+        const exists = checkResult.records[0]?.get('count')).let(v => toNum(v)) > 0;
         if (!exists) {
           const createQuery = `
             CREATE VECTOR INDEX ${indexName} IF NOT EXISTS
@@ -994,7 +995,7 @@ export class BrainManager {
           { currentVersion: currentSchemaVersion }
         );
 
-        const outdatedCount = toNum(outdatedResult.records[0]?.get('count'));
+        const outdatedCount = outdatedResult.records[0]?.get('count')).let(v => toNum(v)) || 0;
 
         if (outdatedCount > 0) {
           console.log(`[Brain] Found ${outdatedCount} outdated ${label} nodes (schema changed)`);
@@ -1051,13 +1052,12 @@ export class BrainManager {
       const content = await fs.readFile(configPath, 'utf-8');
       const loadedConfig = yaml.load(content) as Partial<BrainConfig>;
 
-      console.log('[Brain] Loaded databaseProvider from yaml:', loadedConfig?.databaseProvider);
       // Merge loaded config with defaults (neo4j ports come from config)
+      console.log('[Brain] Loaded databaseProvider from yaml:', loadedConfig?.databaseProvider);
       this.config = {
         ...this.config,
         ...loadedConfig,
         neo4j: { ...this.config.neo4j, ...loadedConfig?.neo4j },
-        kuzu: { ...this.config.kuzu, ...loadedConfig?.kuzu },
         embeddings: { ...this.config.embeddings, ...loadedConfig?.embeddings },
         cleanup: { ...this.config.cleanup, ...loadedConfig?.cleanup },
         agentSettings: loadedConfig?.agentSettings,
@@ -1510,16 +1510,24 @@ volumes:
   private async getProjectFromDb(projectId: string): Promise<RegisteredProject | null> {
     if (!this.neo4jClient) return null;
 
-    const result = await this.neo4jClient.run(
-      `MATCH (p:Project {projectId: $projectId})
-       OPTIONAL MATCH (n {projectId: $projectId})
-       WITH p, count(n) as nodeCount
-       RETURN p.projectId as id, p.rootPath as path, p.type as type,
-              p.lastAccessed as lastAccessed, p.excluded as excluded,
-              p.autoCleanup as autoCleanup, p.name as displayName,
-              nodeCount`,
-      { projectId }
-    );
+    // Kuzu doesn't support OPTIONAL MATCH with property-based matching on arbitrary labels
+    const isKuzu = this.config.databaseProvider === 'kuzu';
+
+    const query = isKuzu
+      ? `MATCH (p:Project {projectId: $projectId})
+         RETURN p.projectId as id, p.rootPath as path, p.type as type,
+                p.lastAccessed as lastAccessed, p.excluded as excluded,
+                p.autoCleanup as autoCleanup, p.name as displayName,
+                0 as nodeCount`
+      : `MATCH (p:Project {projectId: $projectId})
+         OPTIONAL MATCH (n {projectId: $projectId})
+         WITH p, count(n) as nodeCount
+         RETURN p.projectId as id, p.rootPath as path, p.type as type,
+                p.lastAccessed as lastAccessed, p.excluded as excluded,
+                p.autoCleanup as autoCleanup, p.name as displayName,
+                nodeCount`;
+
+    const result = await this.neo4jClient.run(query, { projectId });
 
     if (result.records.length === 0) return null;
 
@@ -1568,7 +1576,7 @@ volumes:
       path: record.get('path'),
       type: record.get('type') || 'quick-ingest',
       lastAccessed: record.get('lastAccessed') ? new Date(record.get('lastAccessed')) : new Date(),
-      nodeCount: toNum(record.get('nodeCount')),
+      nodeCount: record.get('nodeCount')?.toNumber?.() || record.get('nodeCount') || 0,
       excluded: record.get('excluded') || false,
       autoCleanup: record.get('autoCleanup') ?? true,
       displayName: record.get('displayName') || undefined,
@@ -1622,14 +1630,14 @@ volumes:
       console.log('[Brain] Connected to Neo4j');
     }
 
+    // Initialize ingestion manager (with change tracking)
+    this.ingestionManager = new IncrementalIngestionManager(this.neo4jClient);
+    console.log('[Brain] IncrementalIngestionManager initialized');
+
     // Initialize search provider based on database type
     const dbType = this.config.databaseProvider === 'kuzu' ? 'kuzu' : 'neo4j';
     this.searchProvider = createSearchProvider(this.neo4jClient, dbType);
     console.log(`[Brain] SearchProvider initialized (${this.searchProvider.name})`);
-
-    // Initialize ingestion manager (with change tracking)
-    this.ingestionManager = new IncrementalIngestionManager(this.neo4jClient);
-    console.log('[Brain] IncrementalIngestionManager initialized');
 
     // Initialize embedding service with configured provider
     const embeddingConfig = this.buildEmbeddingProviderConfig();
@@ -1873,7 +1881,7 @@ volumes:
         `MATCH (n) WHERE n.projectId = $projectId RETURN count(n) as count`,
         { projectId }
       );
-      return toNum(result.records[0]?.get('count'));
+      return result.records[0]?.get('count')).let(v => toNum(v)) || 0;
     } catch {
       return 0;
     }
@@ -1939,31 +1947,14 @@ volumes:
     console.log(`[Brain] Found ${orphansResult.records.length} orphan files to migrate to project ${projectId}`);
 
     // 1b. Ensure Project node exists (MERGE to avoid duplicates)
-    const isKuzu = this.config.databaseProvider === 'kuzu';
-    const projectUuid = UniqueIDHelper.GenerateProjectUUID(projectId);
-    const localTimestamp = formatLocalDate();
-    
-    if (isKuzu) {
-      await this.neo4jClient.run(`
-        MERGE (p:Project {uuid: $projectUuid})
-        ON CREATE SET p.projectId = $projectId,
-                      p.path = $projectPath,
-                      p.name = $projectId,
-                      p.createdAt = $timestamp,
-                      p.type = 'quick-ingest'
-        ON MATCH SET p.path = $projectPath
-      `, { projectUuid, projectId, projectPath, timestamp: localTimestamp });
-    } else {
-      await this.neo4jClient.run(`
-        MERGE (p:Project {projectId: $projectId})
-        ON CREATE SET p.uuid = $projectUuid,
-                      p.path = $projectPath,
-                      p.name = $projectId,
-                      p.createdAt = datetime(),
-                      p.type = 'quick-ingest'
-        ON MATCH SET p.path = $projectPath
-      `, { projectId, projectUuid, projectPath });
-    }
+    await this.neo4jClient.run(`
+      MERGE (p:Project {projectId: $projectId})
+      ON CREATE SET p.path = $projectPath,
+                    p.name = $projectId,
+                    p.createdAt = datetime(),
+                    p.type = 'quick-ingest'
+      ON MATCH SET p.path = $projectPath
+    `, { projectId, projectPath });
 
     let migratedFiles = 0;
     let migratedScopes = 0;
@@ -1999,7 +1990,7 @@ volumes:
         RETURN count(s) as count
       `, { absolutePath, newProjectId: projectId, relativePath });
 
-      migratedScopes += toNum(scopeResult.records[0]?.get('count'));
+      migratedScopes += scopeResult.records[0]?.get('count')).let(v => toNum(v)) || 0;
 
       // 2c. Update other node types: change projectId, update file path, create BELONGS_TO
       const otherNodeTypes = [
@@ -2020,7 +2011,7 @@ volumes:
           RETURN count(n) as count
         `, { orphanProjectId, absolutePath, newProjectId: projectId, relativePath });
 
-        migratedOther += toNum(otherResult.records[0]?.get('count'));
+        migratedOther += otherResult.records[0]?.get('count')).let(v => toNum(v)) || 0;
       }
     }
 
@@ -2085,7 +2076,7 @@ volumes:
       RETURN count(f) as count
     `, { childProjectId, parentProjectId, prefix: pathPrefix });
 
-    const migratedFiles = toNum(fileResult.records[0]?.get('count'));
+    const migratedFiles = fileResult.records[0]?.get('count')).let(v => toNum(v)) || 0;
 
     // 4. Migrate Scope nodes
     const scopeResult = await this.neo4jClient.run(`
@@ -2095,7 +2086,7 @@ volumes:
       RETURN count(s) as count
     `, { childProjectId, parentProjectId, prefix: pathPrefix });
 
-    const migratedScopes = toNum(scopeResult.records[0]?.get('count'));
+    const migratedScopes = scopeResult.records[0]?.get('count')).let(v => toNum(v)) || 0;
 
     // 5. Migrate other node types
     const otherNodeTypes = [
@@ -2116,7 +2107,7 @@ volumes:
         RETURN count(n) as count
       `, { childProjectId, parentProjectId, prefix: pathPrefix });
 
-      migratedOther += toNum(otherResult.records[0]?.get('count'));
+      migratedOther += otherResult.records[0]?.get('count')).let(v => toNum(v)) || 0;
     }
 
     // 6. Migrate Directory nodes - prefix their paths
@@ -2164,35 +2155,14 @@ volumes:
       currentPath = path.join(currentPath, part);
       const dirUuid = UniqueIDHelper.GenerateDirectoryUUID(currentPath);
 
-      const isKuzu = this.config.databaseProvider === 'kuzu';
-      
-      if (isKuzu) {
-        // Kuzu requires primary key (uuid) in MERGE pattern
-        await this.neo4jClient.run(`
-          MERGE (d:Directory {uuid: $dirUuid})
-          ON CREATE SET d.path = $path, d.name = $name
-          ON MATCH SET d.path = $path, d.name = $name
-        `, { path: currentPath, name: part, dirUuid });
-        
-        // Link to parent in separate query (Kuzu doesn't support WITH after MERGE well)
-        if (parentPath !== currentPath) {
-          await this.neo4jClient.run(`
-            MATCH (d:Directory {uuid: $dirUuid})
-            MATCH (parent:Directory {path: $parentPath})
-            MERGE (d)-[:IN_DIRECTORY]->(parent)
-          `, { dirUuid, parentPath });
-        }
-      } else {
-        // Neo4j - original query
-        await this.neo4jClient.run(`
-          MERGE (d:Directory {path: $path})
-          ON CREATE SET d.name = $name, d.uuid = $dirUuid
-          WITH d
-          MATCH (parent:Directory {path: $parentPath})
-          WHERE $parentPath <> $path
-          MERGE (d)-[:IN_DIRECTORY]->(parent)
-        `, { path: currentPath, name: part, parentPath, dirUuid });
-      }
+      await this.neo4jClient.run(`
+        MERGE (d:Directory {path: $path})
+        ON CREATE SET d.name = $name, d.uuid = $dirUuid
+        WITH d
+        MATCH (parent:Directory {path: $parentPath})
+        WHERE $parentPath <> $path
+        MERGE (d)-[:IN_DIRECTORY]->(parent)
+      `, { path: currentPath, name: part, parentPath, dirUuid });
     }
   }
 
@@ -2241,133 +2211,43 @@ volumes:
     // Create/update the File node
     const localTimestamp = formatLocalDate();
     const fileUuid = UniqueIDHelper.GenerateFileUUID(absolutePath);
-    const isKuzu = this.config.databaseProvider === 'kuzu';
-    
-    let result;
-    if (isKuzu) {
-      // Kuzu: Use two queries - first check if exists, then create/update
-      // Kuzu has issues with accessing properties in RETURN after MERGE
-      // Also Kuzu throws if a property doesn't exist on a node
-      let exists = false;
-      let prevState: string | null = null;
-      let prevCount = 0;
-      
-      try {
-        const existsResult = await this.neo4jClient.run(`
-          MATCH (f:File {uuid: $fileUuid})
-          RETURN f.state as state
-        `, { fileUuid });
-        
-        exists = existsResult.records.length > 0;
-        prevState = exists ? existsResult.records[0]?.get('state') : null;
-        
-        // Try to get accessCount separately (might not exist on old nodes)
-        if (exists) {
-          try {
-            const countResult = await this.neo4jClient.run(`
-              MATCH (f:File {uuid: $fileUuid})
-              RETURN f.accessCount as accessCount
-            `, { fileUuid });
-            prevCount = countResult.records[0]?.get('accessCount') || 0;
-          } catch {
-            // accessCount doesn't exist on this node, use 0
-            prevCount = 0;
-          }
-        }
-      } catch {
-        // Node doesn't exist or other error
-        exists = false;
-      }
-      
-      if (exists) {
-        // Update existing file
-        await this.neo4jClient.run(`
-          MATCH (f:File {uuid: $fileUuid})
-          SET f.lastAccessed = $timestamp,
-              f.accessCount = $newCount
-        `, { fileUuid, timestamp: localTimestamp, newCount: prevCount + 1 });
-      } else {
-        // Create new file
-        await this.neo4jClient.run(`
-          CREATE (f:File {
-            uuid: $fileUuid,
-            absolutePath: $absolutePath,
-            name: $name,
-            extension: $extension,
-            state: $initialState,
-            projectId: 'touched-files',
-            firstAccessed: $timestamp,
-            lastAccessed: $timestamp,
-            accessCount: 1
-          })
-        `, {
-          fileUuid,
-          absolutePath,
-          name: path.basename(absolutePath),
-          extension: path.extname(absolutePath),
-          initialState,
-          timestamp: localTimestamp
-        });
-      }
-      
-      // Create a fake result object for compatibility
-      result = {
-        records: [{
-          get: (key: string) => {
-            if (key === 'newState') return initialState;
-            if (key === 'wasCreated') return !exists;
-            if (key === 'prevState') return prevState;
-            return null;
-          }
-        }]
-      };
-      
-      // Link to directory in separate query for Kuzu
-      await this.neo4jClient.run(`
-        MATCH (f:File {uuid: $fileUuid})
-        MATCH (dir:Directory {path: $dirPath})
-        MERGE (f)-[:IN_DIRECTORY]->(dir)
-      `, { fileUuid, dirPath: path.dirname(absolutePath) });
-    } else {
-      // Neo4j: original query with MERGE on absolutePath
-      result = await this.neo4jClient.run(`
-        MERGE (f:File {absolutePath: $absolutePath})
-        ON CREATE SET
-          f.uuid = $fileUuid,
-          f.name = $name,
-          f.extension = $extension,
-          f.state = $initialState,
-          f.projectId = 'touched-files',
-          f.firstAccessed = $timestamp,
-          f.lastAccessed = $timestamp,
-          f.accessCount = 1
-        ON MATCH SET
-          f.lastAccessed = $timestamp,
-          f.accessCount = COALESCE(f.accessCount, 0) + 1,
-          f.state = CASE
-            // Allow 'parsing' to claim a 'discovered' or 'mentioned' file
-            WHEN $initialState = 'parsing' AND f.state IN ['discovered', 'mentioned'] THEN 'parsing'
-            // Allow 'discovered' to upgrade 'mentioned'
-            WHEN $initialState = 'discovered' AND f.state = 'mentioned' THEN 'discovered'
-            // Otherwise keep current state (don't regress)
-            ELSE f.state
-          END
-        WITH f,
-             CASE WHEN f.accessCount = 1 THEN true ELSE false END as wasCreated,
-             CASE WHEN f.accessCount > 1 THEN f.state ELSE null END as prevState
-        MATCH (dir:Directory {path: $dirPath})
-        MERGE (f)-[:IN_DIRECTORY]->(dir)
-        RETURN f.state as newState, wasCreated, prevState
-      `, {
-        absolutePath,
-        fileUuid,
-        initialState,
-        name: path.basename(absolutePath),
-        extension: path.extname(absolutePath),
-        dirPath: path.dirname(absolutePath),
-        timestamp: localTimestamp
-      });
-    }
+    const result = await this.neo4jClient.run(`
+      MERGE (f:File {absolutePath: $absolutePath})
+      ON CREATE SET
+        f.uuid = $fileUuid,
+        f.name = $name,
+        f.extension = $extension,
+        f.state = $initialState,
+        f.projectId = 'touched-files',
+        f.firstAccessed = $timestamp,
+        f.lastAccessed = $timestamp,
+        f.accessCount = 1
+      ON MATCH SET
+        f.lastAccessed = $timestamp,
+        f.accessCount = COALESCE(f.accessCount, 0) + 1,
+        f.state = CASE
+          // Allow 'parsing' to claim a 'discovered' or 'mentioned' file
+          WHEN $initialState = 'parsing' AND f.state IN ['discovered', 'mentioned'] THEN 'parsing'
+          // Allow 'discovered' to upgrade 'mentioned'
+          WHEN $initialState = 'discovered' AND f.state = 'mentioned' THEN 'discovered'
+          // Otherwise keep current state (don't regress)
+          ELSE f.state
+        END
+      WITH f,
+           CASE WHEN f.accessCount = 1 THEN true ELSE false END as wasCreated,
+           CASE WHEN f.accessCount > 1 THEN f.state ELSE null END as prevState
+      MATCH (dir:Directory {path: $dirPath})
+      MERGE (f)-[:IN_DIRECTORY]->(dir)
+      RETURN f.state as newState, wasCreated, prevState
+    `, {
+      absolutePath,
+      fileUuid,
+      initialState,
+      name: path.basename(absolutePath),
+      extension: path.extname(absolutePath),
+      dirPath: path.dirname(absolutePath),
+      timestamp: localTimestamp
+    });
 
     const record = result.records[0];
     if (!record) {
@@ -2383,10 +2263,6 @@ volumes:
     } else if (previousState === 'mentioned') {
       console.log(`[TouchedFiles] Promoted: ${absolutePath} (mentioned → ${newState})`);
     }
-
-    // Mark indexes as dirty (Kuzu only)
-    // Indexes are immutable in Kuzu - they will be rebuilt lazily before next search
-    this.markIndexesDirty();
 
     // Trigger background processing if file needs indexing
     // Non-blocking: fire and forget
@@ -2417,7 +2293,7 @@ volumes:
     return result.records.map(r => ({
       path: r.get('path'),
       uuid: r.get('uuid'),
-      lineCount: toNum(r.get('lineCount')) || undefined,
+      lineCount: r.get('lineCount')).let(v => toNum(v)),
     }));
   }
 
@@ -2464,7 +2340,7 @@ volumes:
       { absolutePath, projectId: BrainManager.TOUCHED_FILES_PROJECT_ID }
     );
 
-    const deleted = toNum(result.records[0]?.get('deleted'));
+    const deleted = result.records[0]?.get('deleted')).let(v => toNum(v)) || 0;
     return deleted > 0;
   }
 
@@ -2546,7 +2422,7 @@ volumes:
       dirPathPrefix: absoluteDirPath + path.sep
     });
 
-    return toNum(result.records[0]?.get('pending'));
+    return result.records[0]?.get('pending')).let(v => toNum(v)) || 0;
   }
 
   /**
@@ -2678,104 +2554,49 @@ volumes:
     await this.ensureDirectoryHierarchy(absolutePath);
 
     const fileUuid = UniqueIDHelper.GenerateFileUUID(absolutePath);
-    const isKuzu = this.config.databaseProvider === 'kuzu';
-    const localTimestamp = formatLocalDate();
-    
-    let result;
-    if (isKuzu) {
-      // Kuzu: Split into multiple simpler queries
-      // 1. Create/get the file
-      result = await this.neo4jClient.run(`
-        MERGE (f:File {uuid: $fileUuid})
-        ON CREATE SET
-          f.absolutePath = $absolutePath,
-          f.name = $name,
-          f.extension = $extension,
-          f.state = 'mentioned',
-          f.projectId = $projectId,
-          f.firstMentioned = $timestamp
-        RETURN f.state as fileState, f.firstMentioned = $timestamp as wasCreated
-      `, {
-        fileUuid,
-        absolutePath,
-        name: path.basename(absolutePath),
-        extension: path.extname(absolutePath),
-        projectId: BrainManager.TOUCHED_FILES_PROJECT_ID,
-        timestamp: localTimestamp
-      });
-      
-      // 2. Link to directory
-      await this.neo4jClient.run(`
-        MATCH (f:File {uuid: $fileUuid})
-        MATCH (dir:Directory {path: $dirPath})
-        MERGE (f)-[:IN_DIRECTORY]->(dir)
-      `, { fileUuid, dirPath: path.dirname(absolutePath) });
-      
-      // 3. Create PENDING_IMPORT (simplified for Kuzu)
-      const importerUuid = UniqueIDHelper.GenerateFileUUID(importedBy.filePath);
-      await this.neo4jClient.run(`
-        MATCH (f:File {uuid: $fileUuid})
-        MATCH (importer:File {uuid: $importerUuid})
-        MERGE (importer)-[pending:PENDING_IMPORT]->(f)
-        ON CREATE SET
-          pending.importPath = $importPath,
-          pending.symbols = $symbols,
-          pending.scopeUuid = $scopeUuid,
-          pending.createdAt = $timestamp
-      `, {
-        fileUuid,
-        importerUuid,
-        importPath: importedBy.importPath,
-        symbols: importedBy.symbols,
-        scopeUuid: importedBy.scopeUuid || null,
-        timestamp: localTimestamp
-      });
-    } else {
-      // Neo4j: original complex query
-      result = await this.neo4jClient.run(`
-        // Create or get the mentioned file
-        MERGE (f:File {absolutePath: $absolutePath})
-        ON CREATE SET
-          f.uuid = $fileUuid,
-          f.name = $name,
-          f.extension = $extension,
-          f.state = 'mentioned',
-          f.projectId = $projectId,
-          f.firstMentioned = datetime()
-        WITH f, (f.firstMentioned = datetime()) as wasCreated
+    const result = await this.neo4jClient.run(`
+      // Create or get the mentioned file
+      MERGE (f:File {absolutePath: $absolutePath})
+      ON CREATE SET
+        f.uuid = $fileUuid,
+        f.name = $name,
+        f.extension = $extension,
+        f.state = 'mentioned',
+        f.projectId = $projectId,
+        f.firstMentioned = datetime()
+      WITH f, (f.firstMentioned = datetime()) as wasCreated
 
-        // Ensure IN_DIRECTORY relation
-        MATCH (dir:Directory {path: $dirPath})
-        MERGE (f)-[:IN_DIRECTORY]->(dir)
+      // Ensure IN_DIRECTORY relation
+      MATCH (dir:Directory {path: $dirPath})
+      MERGE (f)-[:IN_DIRECTORY]->(dir)
 
-        // Create PENDING_IMPORT relationship
-        WITH f, wasCreated
-        MATCH (importer:File {absolutePath: $importerPath})
-        MERGE (importer)-[pending:PENDING_IMPORT {importPath: $importPath}]->(f)
-        ON CREATE SET
-          pending.symbols = $symbols,
-          pending.scopeUuid = $scopeUuid,
-          pending.createdAt = datetime()
-        ON MATCH SET
-          pending.symbols = CASE
-            WHEN pending.symbols IS NULL THEN $symbols
-            ELSE [x IN pending.symbols WHERE NOT x IN $symbols] + $symbols
-          END
+      // Create PENDING_IMPORT relationship
+      WITH f, wasCreated
+      MATCH (importer:File {absolutePath: $importerPath})
+      MERGE (importer)-[pending:PENDING_IMPORT {importPath: $importPath}]->(f)
+      ON CREATE SET
+        pending.symbols = $symbols,
+        pending.scopeUuid = $scopeUuid,
+        pending.createdAt = datetime()
+      ON MATCH SET
+        pending.symbols = CASE
+          WHEN pending.symbols IS NULL THEN $symbols
+          ELSE [x IN pending.symbols WHERE NOT x IN $symbols] + $symbols
+        END
 
-        RETURN f.state as fileState, wasCreated
-      `, {
-        absolutePath,
-        fileUuid,
-        name: path.basename(absolutePath),
-        extension: path.extname(absolutePath),
-        projectId: BrainManager.TOUCHED_FILES_PROJECT_ID,
-        dirPath: path.dirname(absolutePath),
-        importerPath: importedBy.filePath,
-        importPath: importedBy.importPath,
-        symbols: importedBy.symbols,
-        scopeUuid: importedBy.scopeUuid || null
-      });
-    }
+      RETURN f.state as fileState, wasCreated
+    `, {
+      absolutePath,
+      fileUuid,
+      name: path.basename(absolutePath),
+      extension: path.extname(absolutePath),
+      projectId: BrainManager.TOUCHED_FILES_PROJECT_ID,
+      dirPath: path.dirname(absolutePath),
+      importerPath: importedBy.filePath,
+      importPath: importedBy.importPath,
+      symbols: importedBy.symbols,
+      scopeUuid: importedBy.scopeUuid || null
+    });
 
     const record = result.records[0];
     return {
@@ -2838,7 +2659,7 @@ volumes:
         scopeUuid: scopeUuid || null
       });
 
-      const created = toNum(consumesResult.records[0]?.get('created'));
+      const created = consumesResult.records[0]?.get('created')).let(v => toNum(v)) || 0;
       if (created > 0) {
         resolved++;
       }
@@ -2994,6 +2815,10 @@ volumes:
         console.log(`[QuickIngest] Analyzed ${analyzedCount} media/document files`);
       }
     }
+
+    // Mark indexes as dirty (Kuzu only)
+    // Indexes are immutable in Kuzu - they will be rebuilt lazily before next search
+    this.markIndexesDirty();
 
     // Watcher reste toujours actif (plus d'option pour le désactiver)
     const elapsed = Date.now() - startTime;
@@ -3167,55 +2992,28 @@ volumes:
     const relativeFilePath = path.relative(project.path, htmlPath);
 
     // Create WebPage node with file path
-    const isKuzu = this.config.databaseProvider === 'kuzu';
-    
-    if (isKuzu) {
-      await this.neo4jClient.run(
-        `MERGE (n:WebPage {uuid: $uuid})
-         SET n.url = $url,
-             n.title = $title,
-             n.domain = $domain,
-             n.textContent = $textContent,
-             n.rawHtml = $rawHtml,
-             n.projectId = $projectId,
-             n.file = $file,
-             n.ingestedAt = $ingestedAt`,
-        {
-          uuid: nodeId,
-          url: params.url,
-          title,
-          domain,
-          textContent: textContent.slice(0, 100000),
-          rawHtml,
-          projectId,
-          file: relativeFilePath,
-          ingestedAt: new Date().toISOString(),
-        }
-      );
-    } else {
-      await this.neo4jClient.run(
-        `MERGE (n:WebPage {url: $url})
-         SET n.uuid = $uuid,
-             n.title = $title,
-             n.domain = $domain,
-             n.textContent = $textContent,
-             n.rawHtml = $rawHtml,
-             n.projectId = $projectId,
-             n.file = $file,
-             n.ingestedAt = $ingestedAt`,
-        {
-          uuid: nodeId,
-          url: params.url,
-          title,
-          domain,
-          textContent: textContent.slice(0, 100000),
-          rawHtml,
-          projectId,
-          file: relativeFilePath,
-          ingestedAt: new Date().toISOString(),
-        }
-      );
-    }
+    await this.neo4jClient.run(
+      `MERGE (n:WebPage {url: $url})
+       SET n.uuid = $uuid,
+           n.title = $title,
+           n.domain = $domain,
+           n.textContent = $textContent,
+           n.rawHtml = $rawHtml,
+           n.projectId = $projectId,
+           n.file = $file,
+           n.ingestedAt = $ingestedAt`,
+      {
+        uuid: nodeId,
+        url: params.url,
+        title,
+        domain,
+        textContent: textContent.slice(0, 100000), // Limit content size
+        rawHtml,
+        projectId,
+        file: relativeFilePath, // Relative path from project.path to the HTML file
+        ingestedAt: new Date().toISOString(),
+      }
+    );
 
     // Update project cache
     const cachedProject = this.registeredProjects.get(projectId);
@@ -3793,48 +3591,23 @@ volumes:
       this.registeredProjects.set(projectId, registered);
       
       // Create or update Project node in Neo4j with rootPath
-      const isKuzu = this.config.databaseProvider === 'kuzu';
-      const projectUuid = UniqueIDHelper.GenerateProjectUUID(projectId);
-      
-      if (isKuzu) {
-        await this.neo4jClient!.run(
-          `MERGE (p:Project {uuid: $projectUuid})
-           SET p.projectId = $projectId,
-               p.rootPath = $rootPath,
-               p.type = $type,
-               p.lastAccessed = $lastAccessed,
-               p.autoCleanup = $autoCleanup,
-               p.displayName = $displayName`,
-          {
-            projectUuid,
-            projectId,
-            rootPath: webPagesDir,
-            type: 'web-crawl',
-            lastAccessed: new Date().toISOString(),
-            autoCleanup: true,
-            displayName: projectName,
-          }
-        );
-      } else {
-        await this.neo4jClient!.run(
-          `MERGE (p:Project {projectId: $projectId})
-           SET p.rootPath = $rootPath,
-               p.type = $type,
-               p.lastAccessed = $lastAccessed,
-               p.autoCleanup = $autoCleanup,
-               p.displayName = $displayName,
-               p.uuid = coalesce(p.uuid, $projectUuid)`,
-          {
-            projectId,
-            projectUuid,
-            rootPath: webPagesDir,
-            type: 'web-crawl',
-            lastAccessed: new Date().toISOString(),
-            autoCleanup: true,
-            displayName: projectName,
-          }
-        );
-      }
+      await this.neo4jClient!.run(
+        `MERGE (p:Project {projectId: $projectId})
+         SET p.rootPath = $rootPath,
+             p.type = $type,
+             p.lastAccessed = $lastAccessed,
+             p.autoCleanup = $autoCleanup,
+             p.displayName = $displayName,
+             p.uuid = coalesce(p.uuid, $projectId)`,
+        {
+          projectId,
+          rootPath: webPagesDir,
+          type: 'web-crawl',
+          lastAccessed: new Date().toISOString(),
+          autoCleanup: true,
+          displayName: projectName,
+        }
+      );
     }
 
     return projectId;
@@ -4437,19 +4210,19 @@ volumes:
   ): Promise<BrainSearchResult[]> {
     const { embeddingType, projectFilter, nodeTypeFilter, basePathFilter = '', params, limit, minScore } = options;
 
-    // Use SearchProvider for Kuzu (simpler brute-force approach)
-    if (this.config.databaseProvider === 'kuzu' && this.searchProvider) {
-      return this.vectorSearchWithProvider(query, options);
-    }
-
-    // Neo4j uses vector indexes for faster search (existing logic below)
-
     // Get query embedding
     const queryEmbedding = await this.embeddingService!.getQueryEmbedding(query);
     if (!queryEmbedding) {
       console.warn('[BrainManager] Failed to get query embedding, falling back to text search');
       return [];
     }
+
+    // Use SearchProvider for Kuzu (simpler brute-force approach)
+    if (this.config.databaseProvider === 'kuzu' && this.searchProvider) {
+      return this.vectorSearchWithProvider(queryEmbedding, options);
+    }
+
+    // Neo4j uses vector indexes for faster search (existing logic below)
 
     // Determine which embedding properties to search
     const embeddingProps: string[] = [];
@@ -4731,7 +4504,7 @@ volumes:
           const key = record.get('key');
           const lineCount = record.get('lineCount');
           if (key && lineCount) {
-            lineCountMap.set(key, toNum(lineCount));
+            lineCountMap.set(key, typeof lineCount === 'object' ? lineCount.toNumber() : lineCount);
           }
         }
 
@@ -4756,93 +4529,6 @@ volumes:
   }
 
   /**
-   * Vector search using SearchProvider (for Kuzu)
-   * Simpler brute-force approach without vector indexes
-   */
-  private async vectorSearchWithProvider(
-    query: string,
-    options: {
-      embeddingType: 'name' | 'content' | 'description' | 'all';
-      projectFilter: string;
-      nodeTypeFilter: string;
-      basePathFilter?: string;
-      params: Record<string, any>;
-      limit: number;
-      minScore: number;
-    }
-  ): Promise<BrainSearchResult[]> {
-    if (!this.searchProvider || !this.embeddingService) {
-      return [];
-    }
-
-    const { embeddingType, params, limit, minScore } = options;
-
-    // Get query embedding
-    const queryEmbedding = await this.embeddingService.getQueryEmbedding(query);
-    if (!queryEmbedding) {
-      console.warn('[BrainManager] Failed to get query embedding');
-      return [];
-    }
-
-    // Determine which embedding properties to search
-    const embeddingProps: string[] = [];
-    if (embeddingType === 'name' || embeddingType === 'all') {
-      embeddingProps.push('embedding_name');
-    }
-    if (embeddingType === 'content' || embeddingType === 'all') {
-      embeddingProps.push('embedding_content');
-    }
-    if (embeddingType === 'description' || embeddingType === 'all') {
-      embeddingProps.push('embedding_description');
-    }
-
-    const allResults: BrainSearchResult[] = [];
-    const seenUuids = new Set<string>();
-
-    // Search each embedding property using the provider
-    for (const embeddingProp of embeddingProps) {
-      const rawResults = await this.searchProvider.vectorSearch({
-        labels: ['Scope', 'File', 'MarkdownSection', 'CodeBlock'],
-        embeddingProperty: embeddingProp,
-        queryEmbedding,
-        projectFilter: options.projectFilter,
-        nodeTypeFilter: options.nodeTypeFilter,
-        basePathFilter: options.basePathFilter,
-        params,
-        limit: limit * 2, // Get more to account for deduplication
-        minScore,
-      });
-
-      for (const raw of rawResults) {
-        const uuid = raw.node.uuid;
-        if (uuid && seenUuids.has(uuid)) continue;
-        if (uuid) seenUuids.add(uuid);
-
-        // Look up project info for enrichment
-        const projectId = raw.node.projectId || '';
-        const project = this.registeredProjects.get(projectId);
-        const projectPath = project?.path || '';
-        const projectType = project?.type || 'unknown';
-        const nodeFile = raw.node.file || raw.node.path || raw.node.absolutePath || '';
-        const filePath = nodeFile.startsWith('/') ? nodeFile : path.join(projectPath, nodeFile);
-
-        allResults.push({
-          node: raw.node,
-          score: raw.score,
-          projectId,
-          projectPath,
-          projectType,
-          filePath,
-        });
-      }
-    }
-
-    // Sort by score and limit
-    allResults.sort((a, b) => b.score - a.score);
-    return allResults.slice(0, limit);
-  }
-
-  /**
    * Compute cosine similarity between two vectors
    */
   private cosineSimilarity(a: number[], b: number[]): number {
@@ -4863,8 +4549,8 @@ volumes:
   }
 
   /**
-   * Full-text search using Neo4j Lucene indexes (BM25)
-   * Searches across all full-text indexes in PARALLEL and returns results with BM25 scores
+   * Full-text search using SearchProvider
+   * Delegates to the appropriate provider (Neo4j/Kuzu) for database-specific search
    */
   private async fullTextSearch(
     query: string,
@@ -4878,191 +4564,181 @@ volumes:
       fuzzyDistance?: 0 | 1 | 2;
     }
   ): Promise<BrainSearchResult[]> {
+    if (!this.searchProvider) {
+      console.warn('[BrainManager] SearchProvider not initialized');
+      return [];
+    }
+
     const { projectFilter, nodeTypeFilter, basePathFilter = '', params, limit, minScore, fuzzyDistance = 1 } = options;
 
-    // Full-text index names to search (aligned with ensureFullTextIndexes)
-    const fullTextIndexes = [
-      'scope_fulltext',
-      'file_fulltext',
-      'datafile_fulltext',
-      'document_fulltext',
-      'markdown_fulltext',
-      'media_fulltext',
-      'webpage_fulltext',
-      'codeblock_fulltext',
-    ];
+    // Labels to search
+    const labels = ['Scope', 'File', 'DataFile', 'DocumentFile', 'MarkdownSection', 'MediaFile', 'WebPage', 'CodeBlock'];
 
-    // Escape special Lucene characters in query
-    const escapedQuery = query.replace(/[+\-&|!(){}[\]^"~*?:\\/]/g, '\\$&');
+    // Use SearchProvider for database-agnostic text search
+    const rawResults = await this.searchProvider.textSearch(query, {
+      labels,
+      projectFilter,
+      nodeTypeFilter,
+      basePathFilter,
+      params,
+      limit: limit * 2, // Fetch more for deduplication
+      minScore,
+      fuzzyDistance,
+    });
 
-    // Use Lucene query syntax with fuzzy matching
-    // ~0 = exact match, ~1 = 1 edit distance, ~2 = 2 edit distances
-    const words = escapedQuery.split(/\s+/).filter(w => w.length > 0);
-    const luceneQuery = fuzzyDistance === 0
-      ? words.join(' ')
-      : words.map(w => `${w}~${fuzzyDistance}`).join(' ');
-
-    // Build a single UNION ALL query for all indexes (1 network round-trip instead of 8)
-    const unionClauses = fullTextIndexes.map(indexName => `
-      CALL db.index.fulltext.queryNodes('${indexName}', $luceneQuery)
-      YIELD node AS n, score
-      WHERE true ${projectFilter} ${nodeTypeFilter} ${basePathFilter}
-      RETURN n, score
-    `);
-
-    const cypher = `
-      ${unionClauses.join('\nUNION ALL\n')}
-      ORDER BY score DESC
-      LIMIT $limit
-    `;
-
-    try {
-      const result = await this.neo4jClient!.run(cypher, {
-        luceneQuery,
-        ...params,
-        limit: neo4j.int(limit * 2), // Fetch more to account for deduplication
-      });
-
-      // Process results
-      const allResults: BrainSearchResult[] = [];
-      const seenUuids = new Set<string>();
-
-      for (const record of result.records) {
-        const rawNode = record.get('n').properties;
-        const uuid = rawNode.uuid;
-        const score = record.get('score');
-
-        // Skip duplicates (same node may appear in multiple indexes)
-        if (seenUuids.has(uuid)) continue;
-        seenUuids.add(uuid);
-
-        // Apply minScore filter if specified
-        if (minScore !== undefined && score < minScore) continue;
-
-        const projectId = rawNode.projectId || 'unknown';
-        const project = this.registeredProjects.get(projectId);
-        const projectPath = project?.path || 'unknown';
-
-        const nodeFile = rawNode.file || rawNode.path || '';
-        const filePath = projectPath !== 'unknown' && nodeFile
-          ? path.join(projectPath, nodeFile)
-          : nodeFile || 'unknown';
-
-        allResults.push({
-          node: this.stripEmbeddingFields(rawNode),
-          score,
-          projectId,
-          projectPath,
-          projectType: project?.type || 'unknown',
-          filePath,
-        });
-
-        // Stop if we have enough results
-        if (allResults.length >= limit) break;
-      }
-
-      return allResults;
-    } catch (err: any) {
-      // Fallback: if UNION fails (e.g., some indexes don't exist), try individual queries
-      console.debug(`[BrainManager] UNION ALL query failed, falling back to parallel queries: ${err.message}`);
-      return this.fullTextSearchFallback(luceneQuery, { ...options, basePathFilter });
-    }
+    // Enrich results with project information
+    return this.enrichSearchResults(rawResults, limit);
   }
 
   /**
-   * Fallback method for full-text search when UNION ALL fails
-   * Executes queries in parallel against individual indexes
+   * Enrich raw search results with project information
    */
-  private async fullTextSearchFallback(
-    luceneQuery: string,
-    options: {
-      projectFilter: string;
-      nodeTypeFilter: string;
-      basePathFilter: string;
-      params: Record<string, any>;
-      limit: number;
-      minScore?: number;
-    }
-  ): Promise<BrainSearchResult[]> {
-    const { projectFilter, nodeTypeFilter, basePathFilter, params, limit, minScore } = options;
-
-    const fullTextIndexes = [
-      'scope_fulltext',
-      'file_fulltext',
-      'datafile_fulltext',
-      'document_fulltext',
-      'markdown_fulltext',
-      'media_fulltext',
-      'webpage_fulltext',
-      'codeblock_fulltext',
-    ];
-
-    const cypher = `
-      CALL db.index.fulltext.queryNodes($indexName, $luceneQuery)
-      YIELD node AS n, score
-      WHERE true ${projectFilter} ${nodeTypeFilter} ${basePathFilter}
-      RETURN n, score
-      ORDER BY score DESC
-      LIMIT $limit
-    `;
-
-    // Execute all index queries in PARALLEL
-    const queryPromises = fullTextIndexes.map(async (indexName) => {
-      try {
-        const result = await this.neo4jClient!.run(cypher, {
-          indexName,
-          luceneQuery,
-          ...params,
-          limit: neo4j.int(limit),
-        });
-        return { records: result.records };
-      } catch (err: any) {
-        if (!err.message?.includes('does not exist')) {
-          console.debug(`[BrainManager] Full-text search failed for ${indexName}: ${err.message}`);
-        }
-        return { records: [] };
-      }
-    });
-
-    const queryResults = await Promise.all(queryPromises);
-
-    // Merge results from all indexes
-    const allResults: BrainSearchResult[] = [];
+  private enrichSearchResults(rawResults: RawSearchResult[], limit: number): BrainSearchResult[] {
+    const results: BrainSearchResult[] = [];
     const seenUuids = new Set<string>();
 
-    for (const { records } of queryResults) {
-      for (const record of records) {
-        const rawNode = record.get('n').properties;
-        const uuid = rawNode.uuid;
-        const score = record.get('score');
+    for (const raw of rawResults) {
+      const uuid = raw.node.uuid;
+      if (!uuid || seenUuids.has(uuid)) continue;
+      seenUuids.add(uuid);
 
-        if (seenUuids.has(uuid)) continue;
-        seenUuids.add(uuid);
+      const projectId = raw.node.projectId || 'unknown';
+      const project = this.registeredProjects.get(projectId);
+      const projectPath = project?.path || 'unknown';
 
-        if (minScore !== undefined && score < minScore) continue;
+      const nodeFile = raw.node.file || raw.node.path || '';
+      const filePath = projectPath !== 'unknown' && nodeFile
+        ? path.join(projectPath, nodeFile)
+        : nodeFile || 'unknown';
 
-        const projectId = rawNode.projectId || 'unknown';
-        const project = this.registeredProjects.get(projectId);
-        const projectPath = project?.path || 'unknown';
+      results.push({
+        node: this.stripEmbeddingFields(raw.node),
+        score: raw.score,
+        projectId,
+        projectPath,
+        projectType: project?.type || 'unknown',
+        filePath,
+      });
 
-        const nodeFile = rawNode.file || rawNode.path || '';
-        const filePath = projectPath !== 'unknown' && nodeFile
-          ? path.join(projectPath, nodeFile)
-          : nodeFile || 'unknown';
+      if (results.length >= limit) break;
+    }
 
-        allResults.push({
-          node: this.stripEmbeddingFields(rawNode),
-          score,
-          projectId,
-          projectPath,
-          projectType: project?.type || 'unknown',
-          filePath,
-        });
+    return results;
+  }
+
+  /**
+   * Vector search using SearchProvider (for Kuzu)
+   * Simpler approach without Neo4j vector indexes
+   */
+  private async vectorSearchWithProvider(
+    queryEmbedding: number[],
+    options: {
+      embeddingType: 'name' | 'content' | 'description' | 'all';
+      projectFilter: string;
+      nodeTypeFilter: string;
+      basePathFilter?: string;
+      params: Record<string, any>;
+      limit: number;
+      minScore: number;
+    }
+  ): Promise<BrainSearchResult[]> {
+    const { embeddingType, projectFilter, nodeTypeFilter, basePathFilter = '', params, limit, minScore } = options;
+
+    if (!this.searchProvider) {
+      console.warn('[BrainManager] SearchProvider not initialized');
+      return [];
+    }
+
+    // Determine which embedding properties to search
+    const embeddingProps: string[] = [];
+    if (embeddingType === 'name' || embeddingType === 'all') {
+      embeddingProps.push('embedding_name');
+    }
+    if (embeddingType === 'content' || embeddingType === 'all') {
+      embeddingProps.push('embedding_content');
+    }
+    if (embeddingType === 'description' || embeddingType === 'all') {
+      embeddingProps.push('embedding_description');
+    }
+
+    // Labels to search
+    const labels = ['Scope', 'File', 'MarkdownSection', 'CodeBlock', 'MarkdownDocument', 'EmbeddingChunk'];
+
+    // Search each embedding property and collect results
+    const allRawResults: RawSearchResult[] = [];
+
+    for (const embeddingProp of embeddingProps) {
+      const rawResults = await this.searchProvider.vectorSearch({
+        labels,
+        embeddingProperty: embeddingProp,
+        queryEmbedding,
+        projectFilter,
+        nodeTypeFilter,
+        basePathFilter,
+        params,
+        limit: limit * 2,
+        minScore,
+      });
+      allRawResults.push(...rawResults);
+    }
+
+    // Handle EmbeddingChunks: normalize to parent nodes
+    const chunkMatches = new Map<string, { chunk: Record<string, any>; score: number; parentLabel: string }>();
+    const directResults: RawSearchResult[] = [];
+
+    for (const raw of allRawResults) {
+      if (raw.label === 'EmbeddingChunk') {
+        const parentUuid = raw.node.parentUuid;
+        const parentLabel = raw.node.parentLabel;
+        const existing = chunkMatches.get(parentUuid);
+        if (!existing || raw.score > existing.score) {
+          chunkMatches.set(parentUuid, { chunk: raw.node, score: raw.score, parentLabel });
+        }
+      } else {
+        directResults.push(raw);
       }
     }
 
-    allResults.sort((a, b) => b.score - a.score);
-    return allResults.slice(0, limit);
+    // Fetch parent nodes for chunk matches
+    if (chunkMatches.size > 0) {
+      // Group by parent label
+      const byLabel = new Map<string, string[]>();
+      for (const [parentUuid, { parentLabel }] of chunkMatches) {
+        if (!byLabel.has(parentLabel)) byLabel.set(parentLabel, []);
+        byLabel.get(parentLabel)!.push(parentUuid);
+      }
+
+      // Fetch parents
+      for (const [label, parentUuids] of byLabel) {
+        try {
+          const result = await this.neo4jClient!.run(
+            `MATCH (n:\`${label}\`) WHERE n.uuid IN $uuids RETURN n`,
+            { uuids: parentUuids }
+          );
+
+          for (const record of result.records) {
+            const parentNode = record.get('n').properties || record.get('n');
+            const parentUuid = parentNode.uuid;
+            const chunkMatch = chunkMatches.get(parentUuid);
+            if (chunkMatch) {
+              directResults.push({
+                node: parentNode,
+                score: chunkMatch.score,
+                label,
+              });
+            }
+          }
+        } catch (err: any) {
+          console.debug(`[BrainManager] Failed to fetch parent nodes for ${label}: ${err.message}`);
+        }
+      }
+    }
+
+    // Deduplicate and sort
+    directResults.sort((a, b) => b.score - a.score);
+
+    // Enrich with project information
+    return this.enrichSearchResults(directResults, limit);
   }
 
   /**
@@ -5337,7 +5013,7 @@ volumes:
        RETURN count(s) as count`,
       { projectId }
     );
-    stats.scopeEmbeddings = toNum(scopeResult.records[0]?.get('count'));
+    stats.scopeEmbeddings = scopeResult.records[0]?.get('count')).let(v => toNum(v)) || 0;
 
     // Remove embeddings AND hashes from File nodes (mark as dirty)
     const fileResult = await this.neo4jClient.run(
@@ -5353,7 +5029,7 @@ volumes:
        RETURN count(f) as count`,
       { projectId }
     );
-    stats.fileEmbeddings = toNum(fileResult.records[0]?.get('count'));
+    stats.fileEmbeddings = fileResult.records[0]?.get('count')).let(v => toNum(v)) || 0;
 
     // Remove embeddings AND hashes from MarkdownSection nodes (mark as dirty)
     const markdownSectionResult = await this.neo4jClient.run(
@@ -5365,7 +5041,7 @@ volumes:
        RETURN count(s) as count`,
       { projectId }
     );
-    stats.markdownSectionEmbeddings = toNum(markdownSectionResult.records[0]?.get('count'));
+    stats.markdownSectionEmbeddings = markdownSectionResult.records[0]?.get('count')).let(v => toNum(v)) || 0;
 
     // Remove embeddings AND hashes from CodeBlock nodes (mark as dirty)
     const codeBlockResult = await this.neo4jClient.run(
@@ -5377,7 +5053,7 @@ volumes:
        RETURN count(c) as count`,
       { projectId }
     );
-    stats.codeBlockEmbeddings = toNum(codeBlockResult.records[0]?.get('count'));
+    stats.codeBlockEmbeddings = codeBlockResult.records[0]?.get('count')).let(v => toNum(v)) || 0;
 
     // Remove embeddings AND hashes from other node types (MarkdownDocument, DataFile, WebPage, MediaFile, ThreeDFile, DocumentFile)
     const otherResult = await this.neo4jClient.run(
@@ -5398,7 +5074,7 @@ volumes:
        RETURN count(n) as count`,
       { projectId }
     );
-    stats.otherEmbeddings = toNum(otherResult.records[0]?.get('count'));
+    stats.otherEmbeddings = otherResult.records[0]?.get('count')).let(v => toNum(v)) || 0;
 
     return stats;
   }
@@ -5422,7 +5098,7 @@ volumes:
       DETACH DELETE n
       RETURN count(n) as deleted
     `);
-    stats.orphanedNodesRemoved = toNum(orphanResult.records[0]?.get('deleted'));
+    stats.orphanedNodesRemoved = orphanResult.records[0]?.get('deleted')).let(v => toNum(v)) || 0;
 
     // Remove stale quick-ingest projects
     const now = Date.now();
@@ -5439,19 +5115,6 @@ volumes:
     }
 
     return stats;
-  }
-
-  /**
-   * Mark FTS and Vector indexes as dirty (for Kuzu)
-   * Should be called after data modifications to trigger lazy index rebuild.
-   * No-op for Neo4j which has real-time indexes.
-   */
-  markIndexesDirty(): void {
-    // Call the optional method if client supports it (KuzuClient does)
-    const client = this.neo4jClient as any;
-    if (client?.markIndexesDirty) {
-      client.markIndexesDirty();
-    }
   }
 
   // ============================================
@@ -5643,9 +5306,9 @@ volumes:
         for (const key of record.keys) {
           if (typeof key !== 'string') continue;
           const value = record.get(key);
-          // Handle Neo4j Integer type (or native numbers from Kuzu)
+          // Handle Neo4j Integer type
           if (value && typeof value === 'object' && 'toNumber' in value) {
-            obj[key] = toNum(value);
+            obj[key] = (value as { toNumber: () => number }).toNumber();
           } else if (value && typeof value === 'object' && 'properties' in value) {
             // Neo4j Node - extract properties
             obj[key] = (value as { properties: unknown }).properties;
@@ -5792,7 +5455,7 @@ volumes:
              RETURN count(n) as count`,
             { projectId }
           );
-          dirtyCount = toNum(result.records[0]?.get('count'));
+          dirtyCount = result.records[0]?.get('count')).let(v => toNum(v)) ?? 0;
         } catch (err) {
           return; // Can't check, skip
         }
@@ -6240,6 +5903,48 @@ volumes:
   // ============================================
   // Lifecycle
   // ============================================
+
+  /**
+   * Mark all indexes as dirty (Kuzu only).
+   * Call this after data changes. The indexes will be rebuilt lazily before the next search.
+   * This is more efficient than rebuilding immediately after each ingestion.
+   */
+  markIndexesDirty(): void {
+    if (this.config.databaseProvider !== 'kuzu') {
+      return; // Only applies to Kuzu
+    }
+
+    if (!this.neo4jClient) {
+      return;
+    }
+
+    // Cast to KuzuClient to access markIndexesDirty method
+    const kuzuClient = this.neo4jClient as unknown as import('../runtime/client/kuzu-client.js').KuzuClient;
+    if (typeof kuzuClient.markIndexesDirty === 'function') {
+      kuzuClient.markIndexesDirty();
+    }
+  }
+
+  /**
+   * Rebuild FTS indexes immediately (Kuzu only).
+   * Use markFtsIndexesDirty() for lazy rebuild, or this for immediate rebuild.
+   */
+  async rebuildFtsIndexes(): Promise<void> {
+    if (this.config.databaseProvider !== 'kuzu') {
+      return; // Only applies to Kuzu
+    }
+
+    if (!this.neo4jClient) {
+      console.warn('[Brain] Cannot rebuild FTS indexes: no database connection');
+      return;
+    }
+
+    // Cast to KuzuClient to access rebuildFtsIndexes method
+    const kuzuClient = this.neo4jClient as unknown as import('../runtime/client/kuzu-client.js').KuzuClient;
+    if (typeof kuzuClient.rebuildFtsIndexes === 'function') {
+      await kuzuClient.rebuildFtsIndexes();
+    }
+  }
 
   /**
    * Shutdown the brain manager

@@ -6279,16 +6279,16 @@ export function generateGetSchemaHandler() {
         };
       }
       node_types[node_type] = {
-        required: schema.required,
-        optional: schema.optional,
+        required: Object.keys(schema.required),
+        optional: schema.optional ? Object.keys(schema.optional) : [],
         description: schema.description,
       };
     } else {
       // All node types
       for (const [name, schema] of Object.entries(NODE_SCHEMAS)) {
         node_types[name] = {
-          required: schema.required,
-          optional: schema.optional,
+          required: Object.keys(schema.required),
+          optional: schema.optional ? Object.keys(schema.optional) : [],
           description: schema.description,
         };
       }

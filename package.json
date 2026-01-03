@@ -55,11 +55,13 @@
     "unicorn-magic": "^0.4.0"
   },
   "devDependencies": {
+    "@surrealdb/node": "^2.4.0",
     "@types/ink": "^0.5.2",
     "@typescript-eslint/eslint-plugin": "^8.0.0",
     "@typescript-eslint/parser": "^8.0.0",
     "eslint": "^9.0.0",
     "prettier": "^3.3.0",
+    "surrealdb": "^2.0.0-alpha.14",
     "tsx": "^4.20.0",
     "turbo": "^1.10.0",
     "typescript": "^5.0.0",

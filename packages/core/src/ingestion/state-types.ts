@@ -5,6 +5,8 @@
  * All nodes (Scope, File, MarkdownSection, etc.) use this state system.
  */
 
+import { NODE_SCHEMAS } from '../utils/node-schema.js';
+
 /**
  * Node states in the ingestion pipeline
  */
@@ -243,26 +245,38 @@ export interface RetryOptions {
 }
 
 /**
- * Node labels that support state tracking
+ * Node labels that support state tracking.
+ * Derived from NODE_SCHEMAS where stateful: true.
+ * This is the single source of truth - modify NODE_SCHEMAS to add/remove stateful labels.
  */
-export const STATEFUL_NODE_LABELS = [
-  'Scope',
-  'File',
-  'MarkdownDocument',
-  'MarkdownSection',
-  'CodeBlock',
-  'DataFile',
-  'DataSection',
-  'ImageFile',
-  'ThreeDFile',
-  'DocumentFile',
-  'WebPage',
-  'Stylesheet',
-  'VueSFC',
-  'SvelteComponent',
-] as const;
+export const STATEFUL_NODE_LABELS = Object.entries(NODE_SCHEMAS)
+  .filter(([, schema]) => schema.stateful === true)
+  .map(([label]) => label) as StatefulNodeLabel[];
 
-export type StatefulNodeLabel = typeof STATEFUL_NODE_LABELS[number];
+/**
+ * All known stateful node labels (compile-time type)
+ */
+export type StatefulNodeLabel =
+  | 'Scope'
+  | 'File'
+  | 'Project'
+  | 'MarkdownDocument'
+  | 'MarkdownSection'
+  | 'CodeBlock'
+  | 'DataFile'
+  | 'ImageFile'
+  | 'ThreeDFile'
+  | 'DocumentFile'
+  | 'WebPage'
+  | 'WebDocument'
+  | 'Stylesheet'
+  | 'VueSFC'
+  | 'SvelteComponent'
+  | 'PDFDocument'
+  | 'WordDocument'
+  | 'SpreadsheetDocument'
+  | 'MediaFile'
+  | 'GenericFile';
 
 /**
  * Check if a label supports state tracking

@@ -206,336 +206,962 @@ export const TYPE_INDEXES: Record<string, string[]> = {
   Scope: ['name', 'type', 'file'],
 };
 
+// ============================================================
+// PROPERTY TYPES (for Kuzu schema generation)
+// ============================================================
+
+/**
+ * Property types supported by Kuzu
+ */
+export type PropType = 'STRING' | 'INT64' | 'DOUBLE' | 'BOOLEAN' | 'DOUBLE[]' | 'STRING[]';
+
+/**
+ * Property definition with type
+ */
+export interface PropDef {
+  type: PropType;
+  nullable?: boolean;
+}
+
+/**
+ * Common state tracking properties (for stateful nodes)
+ */
+export const STATE_PROPS: Record<string, PropDef> = {
+  _state: { type: 'STRING' },
+  _stateChangedAt: { type: 'STRING', nullable: true },
+  _errorType: { type: 'STRING', nullable: true },
+  _errorMessage: { type: 'STRING', nullable: true },
+  _retryCount: { type: 'INT64', nullable: true },
+  _createdAt: { type: 'STRING', nullable: true },
+  _updatedAt: { type: 'STRING', nullable: true },
+  _detectedAt: { type: 'STRING', nullable: true },
+  _parsedAt: { type: 'STRING', nullable: true },
+  _linkedAt: { type: 'STRING', nullable: true },
+  _embeddedAt: { type: 'STRING', nullable: true },
+  _contentHash: { type: 'STRING', nullable: true },
+  // Properties used by incremental ingestion
+  schemaDirty: { type: 'BOOLEAN', nullable: true },
+  embeddingsDirty: { type: 'BOOLEAN', nullable: true },
+  hash: { type: 'STRING', nullable: true },
+  textContent: { type: 'STRING', nullable: true },
+  source_file: { type: 'STRING', nullable: true },
+};
+
+/**
+ * Common embedding properties (multi-embedding support)
+ */
+export const EMBEDDING_PROPS: Record<string, PropDef> = {
+  // Legacy single embedding (kept for backwards compatibility)
+  embedding: { type: 'DOUBLE[]', nullable: true },
+  _embeddingHash: { type: 'STRING', nullable: true },
+  // Multi-embedding: name embedding (for fuzzy name search)
+  embedding_name: { type: 'DOUBLE[]', nullable: true },
+  embedding_name_hash: { type: 'STRING', nullable: true },
+  // Multi-embedding: content embedding (for semantic code search)
+  embedding_content: { type: 'DOUBLE[]', nullable: true },
+  embedding_content_hash: { type: 'STRING', nullable: true },
+  // Multi-embedding: description embedding (for docstring/comment search)
+  embedding_description: { type: 'DOUBLE[]', nullable: true },
+  embedding_description_hash: { type: 'STRING', nullable: true },
+  // Provider info (shared across all embedding types)
+  _embeddingProvider: { type: 'STRING', nullable: true },
+  _embeddingModel: { type: 'STRING', nullable: true },
+  embedding_provider: { type: 'STRING', nullable: true },
+  embedding_model: { type: 'STRING', nullable: true },
+  // Chunking support for large files
+  usesChunks: { type: 'BOOLEAN', nullable: true },
+  chunkCount: { type: 'INT64', nullable: true },
+};
+
 /**
  * Schema definition for a node type (for ingestion/tools)
  * Note: This is different from types/schema.ts NodeSchema which is for Neo4j introspection
  */
 export interface NodeTypeSchema {
-  /** Required properties - must always be present */
-  required: string[];
-  /** Optional properties - may be present depending on content */
-  optional?: string[];
+  /** Primary key field (default: 'uuid') */
+  primaryKey?: string;
+  /** Required properties with types */
+  required: Record<string, PropDef>;
+  /** Optional properties with types */
+  optional?: Record<string, PropDef>;
   /** Description of the node type */
   description?: string;
+  /** Whether this node type supports state tracking */
+  stateful?: boolean;
+  /** Whether this node type has embeddings */
+  hasEmbedding?: boolean;
 }
 
 /**
- * Schema definitions for content nodes.
+ * Schema definitions for all node types.
  * This is the single source of truth for node type schemas.
  *
- * Required properties define the "shape" of each node type.
- * Optional properties may be present depending on the content being parsed.
- *
- * The schema hash is computed from required properties only,
- * ensuring nodes of the same type get the same schemaVersion regardless
- * of which optional properties they have.
+ * Used for:
+ * - Kuzu table generation (types)
+ * - Schema validation
+ * - Embedding extraction
  */
 export const NODE_SCHEMAS: Record<string, NodeTypeSchema> = {
-  // Code scopes (functions, classes, methods, etc.)
-  Scope: {
-    required: ['name', 'type', 'file', 'language', 'startLine', 'endLine', 'linesOfCode', 'source', 'signature'],
-    optional: [
-      'returnType',      // Return type for functions/methods
-      'parameters',      // Function parameters (JSON string)
-      'parent',          // Parent scope name
-      'parentUUID',      // Parent scope UUID
-      'depth',           // Nesting depth
-      'modifiers',       // Access modifiers (public, private, static, etc.)
-      'complexity',      // Cyclomatic complexity
-      'heritageClauses', // extends/implements clauses (JSON string)
-      'extends',         // Extended classes (comma-separated)
-      'implements',      // Implemented interfaces (comma-separated)
-      'genericParameters', // Generic type parameters (JSON string)
-      'generics',        // Generic names (comma-separated)
-      'decoratorDetails', // Decorator details (JSON string)
-      'decorators',      // Decorator names (comma-separated)
-      'enumMembers',     // Enum member values (JSON string)
-      'docstring',       // Documentation string
-      'value',           // Value for constants/variables
-      // Embeddings (generated)
-      'nameEmbedding',
-      'contentEmbedding',
-      'descriptionEmbedding',
-    ],
-    description: 'Code scope (function, class, method, interface, variable, etc.)',
-  },
-
-  // Markdown documents
-  MarkdownDocument: {
-    required: ['file', 'type', 'title', 'sectionCount', 'codeBlockCount', 'linkCount', 'imageCount', 'wordCount'],
-    optional: [
-      'frontMatter',  // YAML front matter (JSON string)
-      'sections',     // Section summary (JSON string)
-    ],
-    description: 'Markdown document with sections and code blocks',
-  },
-
-  // Markdown sections (headings)
-  MarkdownSection: {
-    required: ['title', 'level', 'content', 'file', 'startLine', 'endLine', 'slug'],
-    optional: [
-      'ownContent',   // Section content without children
-      'rawText',      // Raw text content for search
-      'parentTitle',  // Parent section title
-      // Embeddings
-      'nameEmbedding',
-      'contentEmbedding',
-    ],
-    description: 'Section within a markdown document',
-  },
-
-  // Code blocks in markdown
-  CodeBlock: {
-    required: ['file', 'language', 'code', 'rawText', 'startLine', 'endLine'],
-    optional: [
-      'index',        // Index in document
-      'linesOfCode',  // Line count
-      // Embeddings
-      'contentEmbedding',
-    ],
-    description: 'Code block embedded in markdown',
-  },
-
-  // Web pages
-  WebPage: {
-    required: ['url', 'title', 'textContent', 'headingCount', 'linkCount', 'depth', 'crawledAt'],
-    optional: [
-      'description',    // Meta description
-      'headingsJson',   // Headings structure (JSON string)
-      'rawHtml',        // Original HTML
-      // Embeddings
-      'contentEmbedding',
-    ],
-    description: 'Crawled web page',
-  },
-
-  // Media files (base type)
-  MediaFile: {
-    required: ['file', 'path', 'format', 'category', 'sizeBytes'],
-    optional: [
-      'analyzed',       // Whether content analysis was performed
-      'description',    // Visual description (from AI)
-      'ocrText',        // OCR extracted text
-      // Embeddings
-      'descriptionEmbedding',
-    ],
-    description: 'Base type for media files',
-  },
-
-  // Image files
-  ImageFile: {
-    required: ['file', 'path', 'format', 'category', 'sizeBytes'],
-    optional: [
-      'width',          // Image width in pixels
-      'height',         // Image height in pixels
-      'analyzed',
-      'description',
-      'ocrText',
-      'descriptionEmbedding',
-    ],
-    description: 'Image file (PNG, JPG, GIF, WebP, SVG, etc.)',
-  },
-
-  // 3D model files
-  ThreeDFile: {
-    required: ['file', 'path', 'format', 'category', 'sizeBytes'],
-    optional: [
-      'meshCount',      // Number of meshes
-      'materialCount',  // Number of materials
-      'textureCount',   // Number of textures
-      'animationCount', // Number of animations
-      'gltfVersion',    // GLTF version
-      'generator',      // Generator tool
-      'analyzed',
-      'description',
-      'renderedViews',  // Paths to rendered view images
-      'descriptionEmbedding',
-    ],
-    description: '3D model file (GLTF, GLB)',
-  },
-
-  // Document files (PDF, Word, etc.)
-  DocumentFile: {
-    required: ['file', 'path', 'format', 'category', 'sizeBytes'],
-    optional: [
-      'pageCount',
-      'title',
-      'author',
-      'extractedText',
-      'contentEmbedding',
-    ],
-    description: 'Document file (PDF, DOCX, etc.)',
-  },
-
-  // PDF documents
-  PDFDocument: {
-    required: ['file', 'path', 'format', 'category', 'sizeBytes'],
-    optional: [
-      'pageCount',
-      'title',
-      'author',
-      'subject',
-      'extractedText',
-      'contentEmbedding',
-    ],
-    description: 'PDF document',
-  },
-
-  // Word documents
-  WordDocument: {
-    required: ['file', 'path', 'format', 'category', 'sizeBytes'],
-    optional: [
-      'pageCount',
-      'title',
-      'author',
-      'extractedText',
-      'contentEmbedding',
-    ],
-    description: 'Word document (DOCX)',
-  },
-
-  // Spreadsheet documents
-  SpreadsheetDocument: {
-    required: ['file', 'path', 'format', 'category', 'sizeBytes'],
-    optional: [
-      'sheetCount',
-      'sheetNames',
-      'rowCount',
-      'columnCount',
-      'extractedText',
-    ],
-    description: 'Spreadsheet (XLSX, CSV)',
-  },
-
-  // Vue single file components
-  VueSFC: {
-    required: ['file', 'type', 'templateStartLine', 'templateEndLine'],
-    optional: [
-      'componentName',
-      'scriptLang',
-      'isScriptSetup',
-      'hasStyle',
-      'imports',
-      'usedComponents',
-    ],
-    description: 'Vue Single File Component',
-  },
-
-  // Svelte components
-  SvelteComponent: {
-    required: ['file', 'type', 'templateStartLine', 'templateEndLine'],
-    optional: [
-      'componentName',
-      'scriptLang',
-      'hasStyle',
-      'imports',
-    ],
-    description: 'Svelte component',
-  },
-
-  // CSS/SCSS stylesheets
-  Stylesheet: {
-    required: ['file', 'type', 'ruleCount'],
-    optional: [
-      'selectorCount',
-      'variableCount',
-      'mixinCount',
-      'importCount',
-    ],
-    description: 'CSS/SCSS stylesheet',
-  },
-
-  // Data files (JSON, YAML, etc.)
-  DataFile: {
-    required: ['file', 'type', 'format'],
-    optional: [
-      'keyCount',
-      'structure',
-      'preview',
-    ],
-    description: 'Data file (JSON, YAML, XML, etc.)',
-  },
-
-  // Generic/unknown code files
-  GenericFile: {
-    required: ['file', 'type', 'language', 'linesOfCode'],
-    optional: [
-      'braceStyle',
-      'imports',
-    ],
-    description: 'Generic code file with unknown syntax',
-  },
-
-  // HTML documents
-  WebDocument: {
-    required: ['file', 'type', 'title'],
-    optional: [
-      'hasTemplate',
-      'hasScript',
-      'hasStyle',
-      'componentName',
-      'scriptLang',
-      'isScriptSetup',
-      'imports',
-      'usedComponents',
-      'imageCount',
-    ],
-    description: 'HTML document or web component',
-  },
-
-  // Structural nodes (not content nodes, but included for completeness)
-  File: {
-    required: ['path', 'name', 'directory', 'extension'],
-    optional: [
-      'contentHash',
-      'rawContentHash',
-      'mtime',
-    ],
-    description: 'File in the filesystem',
-  },
-
-  Directory: {
-    required: ['path', 'depth'],
-    optional: [],
-    description: 'Directory in the filesystem',
-  },
+  // ============================================================
+  // STRUCTURAL NODES
+  // ============================================================
 
   Project: {
-    required: ['name', 'rootPath'],
-    optional: [
-      'gitRemote',
-      'indexedAt',
-    ],
+    primaryKey: 'uuid',
+    required: {
+      uuid: { type: 'STRING' },
+      projectId: { type: 'STRING' },
+      name: { type: 'STRING' },
+      path: { type: 'STRING' },
+    },
+    optional: {
+      rootPath: { type: 'STRING', nullable: true }, // Project root directory path
+      type: { type: 'STRING', nullable: true }, // Project type: quick-ingest, web-crawl, etc.
+      lastAccessed: { type: 'STRING', nullable: true }, // ISO timestamp of last access
+      excluded: { type: 'BOOLEAN', nullable: true }, // Whether project is excluded from search
+      autoCleanup: { type: 'BOOLEAN', nullable: true }, // Whether to auto-cleanup old data
+      displayName: { type: 'STRING', nullable: true }, // Human-readable display name
+      gitRemote: { type: 'STRING', nullable: true },
+      gitBranch: { type: 'STRING', nullable: true },
+      indexedAt: { type: 'STRING', nullable: true },
+      ...STATE_PROPS,
+    },
+    stateful: true,
     description: 'Project root',
   },
 
+  Directory: {
+    primaryKey: 'uuid',
+    required: {
+      uuid: { type: 'STRING' },
+      path: { type: 'STRING' },
+      name: { type: 'STRING' },
+    },
+    optional: {
+      projectId: { type: 'STRING', nullable: true },
+      depth: { type: 'INT64', nullable: true },
+    },
+    description: 'Directory in the filesystem',
+  },
+
+  File: {
+    primaryKey: 'uuid',
+    required: {
+      uuid: { type: 'STRING' },
+      path: { type: 'STRING' },
+      name: { type: 'STRING' },
+    },
+    optional: {
+      absolutePath: { type: 'STRING', nullable: true }, // Full absolute path to file
+      extension: { type: 'STRING', nullable: true },
+      projectId: { type: 'STRING', nullable: true },
+      directory: { type: 'STRING', nullable: true },
+      lineCount: { type: 'INT64', nullable: true },
+      contentHash: { type: 'STRING', nullable: true },
+      rawContentHash: { type: 'STRING', nullable: true },
+      mtime: { type: 'STRING', nullable: true },
+      source: { type: 'STRING', nullable: true }, // File content for embedding
+      // Orphan watcher properties
+      isWatched: { type: 'BOOLEAN', nullable: true },
+      watchedSince: { type: 'STRING', nullable: true }, // ISO timestamp
+      firstAccessed: { type: 'STRING', nullable: true }, // ISO timestamp - first touch
+      lastAccessed: { type: 'STRING', nullable: true }, // ISO timestamp - last touch
+      accessCount: { type: 'INT64', nullable: true }, // Number of times accessed
+      // State property (used by file state machine)
+      state: { type: 'STRING', nullable: true },
+      ...STATE_PROPS,
+      ...EMBEDDING_PROPS,
+    },
+    stateful: true,
+    hasEmbedding: true,
+    description: 'File in the filesystem',
+  },
+
   ExternalLibrary: {
-    required: ['name'],
-    optional: [],
+    primaryKey: 'uuid',
+    required: {
+      uuid: { type: 'STRING' },
+      name: { type: 'STRING' },
+    },
+    optional: {
+      projectId: { type: 'STRING', nullable: true },
+    },
     description: 'External library dependency',
   },
 
+  // ============================================================
+  // CODE NODES
+  // ============================================================
+
+  Scope: {
+    primaryKey: 'uuid',
+    required: {
+      uuid: { type: 'STRING' },
+      name: { type: 'STRING' },
+      type: { type: 'STRING' },
+    },
+    optional: {
+      signature: { type: 'STRING', nullable: true },
+      file: { type: 'STRING', nullable: true },
+      projectId: { type: 'STRING', nullable: true },
+      language: { type: 'STRING', nullable: true },
+      startLine: { type: 'INT64', nullable: true },
+      endLine: { type: 'INT64', nullable: true },
+      startCol: { type: 'INT64', nullable: true },
+      endCol: { type: 'INT64', nullable: true },
+      linesOfCode: { type: 'INT64', nullable: true },
+      source: { type: 'STRING', nullable: true },
+      docstring: { type: 'STRING', nullable: true },
+      returnType: { type: 'STRING', nullable: true },
+      parameters: { type: 'STRING', nullable: true },
+      parent: { type: 'STRING', nullable: true },
+      parentUUID: { type: 'STRING', nullable: true },
+      depth: { type: 'INT64', nullable: true },
+      modifiers: { type: 'STRING', nullable: true },
+      complexity: { type: 'INT64', nullable: true },
+      isExported: { type: 'BOOLEAN', nullable: true },
+      isAsync: { type: 'BOOLEAN', nullable: true },
+      extends: { type: 'STRING', nullable: true },
+      implements: { type: 'STRING', nullable: true },
+      generics: { type: 'STRING', nullable: true },
+      decorators: { type: 'STRING', nullable: true },
+      value: { type: 'STRING', nullable: true },
+      ...STATE_PROPS,
+      ...EMBEDDING_PROPS,
+    },
+    stateful: true,
+    hasEmbedding: true,
+    description: 'Code scope (function, class, method, interface, variable, etc.)',
+  },
+
+  // ============================================================
+  // MARKDOWN NODES
+  // ============================================================
+
+  MarkdownDocument: {
+    primaryKey: 'uuid',
+    required: {
+      uuid: { type: 'STRING' },
+      path: { type: 'STRING' },
+      name: { type: 'STRING' },
+    },
+    optional: {
+      projectId: { type: 'STRING', nullable: true },
+      file: { type: 'STRING', nullable: true },
+      title: { type: 'STRING', nullable: true },
+      wordCount: { type: 'INT64', nullable: true },
+      sectionCount: { type: 'INT64', nullable: true },
+      codeBlockCount: { type: 'INT64', nullable: true },
+      linkCount: { type: 'INT64', nullable: true },
+      imageCount: { type: 'INT64', nullable: true },
+      frontMatter: { type: 'STRING', nullable: true },
+      ...STATE_PROPS,
+      ...EMBEDDING_PROPS,
+    },
+    stateful: true,
+    hasEmbedding: true,
+    description: 'Markdown document with sections and code blocks',
+  },
+
+  MarkdownSection: {
+    primaryKey: 'uuid',
+    required: {
+      uuid: { type: 'STRING' },
+    },
+    optional: {
+      path: { type: 'STRING', nullable: true },
+      projectId: { type: 'STRING', nullable: true },
+      file: { type: 'STRING', nullable: true },
+      title: { type: 'STRING', nullable: true },
+      heading: { type: 'STRING', nullable: true },
+      level: { type: 'INT64', nullable: true },
+      content: { type: 'STRING', nullable: true },
+      ownContent: { type: 'STRING', nullable: true },
+      rawText: { type: 'STRING', nullable: true },
+      slug: { type: 'STRING', nullable: true },
+      startLine: { type: 'INT64', nullable: true },
+      endLine: { type: 'INT64', nullable: true },
+      parentTitle: { type: 'STRING', nullable: true },
+      ...STATE_PROPS,
+      ...EMBEDDING_PROPS,
+    },
+    stateful: true,
+    hasEmbedding: true,
+    description: 'Section within a markdown document',
+  },
+
+  CodeBlock: {
+    primaryKey: 'uuid',
+    required: {
+      uuid: { type: 'STRING' },
+    },
+    optional: {
+      file: { type: 'STRING', nullable: true },
+      projectId: { type: 'STRING', nullable: true },
+      language: { type: 'STRING', nullable: true },
+      code: { type: 'STRING', nullable: true },
+      rawText: { type: 'STRING', nullable: true },
+      startLine: { type: 'INT64', nullable: true },
+      endLine: { type: 'INT64', nullable: true },
+      index: { type: 'INT64', nullable: true },
+      linesOfCode: { type: 'INT64', nullable: true },
+      ...STATE_PROPS,
+      ...EMBEDDING_PROPS,
+    },
+    stateful: true,
+    hasEmbedding: true,
+    description: 'Code block embedded in markdown',
+  },
+
+  // ============================================================
+  // WEB NODES
+  // ============================================================
+
+  WebPage: {
+    primaryKey: 'uuid',
+    required: {
+      uuid: { type: 'STRING' },
+      url: { type: 'STRING' },
+    },
+    optional: {
+      title: { type: 'STRING', nullable: true },
+      projectId: { type: 'STRING', nullable: true },
+      textContent: { type: 'STRING', nullable: true },
+      content: { type: 'STRING', nullable: true },
+      html: { type: 'STRING', nullable: true },
+      rawHtml: { type: 'STRING', nullable: true },
+      description: { type: 'STRING', nullable: true },
+      metaDescription: { type: 'STRING', nullable: true },
+      headingCount: { type: 'INT64', nullable: true },
+      linkCount: { type: 'INT64', nullable: true },
+      depth: { type: 'INT64', nullable: true },
+      crawledAt: { type: 'STRING', nullable: true },
+      headingsJson: { type: 'STRING', nullable: true },
+      ...STATE_PROPS,
+      ...EMBEDDING_PROPS,
+    },
+    stateful: true,
+    hasEmbedding: true,
+    description: 'Crawled web page',
+  },
+
+  // ============================================================
+  // MEDIA NODES
+  // ============================================================
+
+  ImageFile: {
+    primaryKey: 'uuid',
+    required: {
+      uuid: { type: 'STRING' },
+      path: { type: 'STRING' },
+      name: { type: 'STRING' },
+    },
+    optional: {
+      projectId: { type: 'STRING', nullable: true },
+      file: { type: 'STRING', nullable: true },
+      format: { type: 'STRING', nullable: true },
+      category: { type: 'STRING', nullable: true },
+      sizeBytes: { type: 'INT64', nullable: true },
+      width: { type: 'INT64', nullable: true },
+      height: { type: 'INT64', nullable: true },
+      analyzed: { type: 'BOOLEAN', nullable: true },
+      description: { type: 'STRING', nullable: true },
+      ocrText: { type: 'STRING', nullable: true },
+      ...STATE_PROPS,
+      ...EMBEDDING_PROPS,
+    },
+    stateful: true,
+    hasEmbedding: true,
+    description: 'Image file (PNG, JPG, GIF, WebP, SVG, etc.)',
+  },
+
+  ThreeDFile: {
+    primaryKey: 'uuid',
+    required: {
+      uuid: { type: 'STRING' },
+      path: { type: 'STRING' },
+      name: { type: 'STRING' },
+    },
+    optional: {
+      projectId: { type: 'STRING', nullable: true },
+      file: { type: 'STRING', nullable: true },
+      format: { type: 'STRING', nullable: true },
+      category: { type: 'STRING', nullable: true },
+      sizeBytes: { type: 'INT64', nullable: true },
+      meshCount: { type: 'INT64', nullable: true },
+      materialCount: { type: 'INT64', nullable: true },
+      textureCount: { type: 'INT64', nullable: true },
+      animationCount: { type: 'INT64', nullable: true },
+      gltfVersion: { type: 'STRING', nullable: true },
+      generator: { type: 'STRING', nullable: true },
+      analyzed: { type: 'BOOLEAN', nullable: true },
+      description: { type: 'STRING', nullable: true },
+      renderedViews: { type: 'STRING', nullable: true },
+      ...STATE_PROPS,
+      ...EMBEDDING_PROPS,
+    },
+    stateful: true,
+    hasEmbedding: true,
+    description: '3D model file (GLTF, GLB)',
+  },
+
+  // ============================================================
+  // DOCUMENT NODES
+  // ============================================================
+
+  DocumentFile: {
+    primaryKey: 'uuid',
+    required: {
+      uuid: { type: 'STRING' },
+      path: { type: 'STRING' },
+      name: { type: 'STRING' },
+    },
+    optional: {
+      projectId: { type: 'STRING', nullable: true },
+      file: { type: 'STRING', nullable: true },
+      format: { type: 'STRING', nullable: true },
+      category: { type: 'STRING', nullable: true },
+      sizeBytes: { type: 'INT64', nullable: true },
+      pageCount: { type: 'INT64', nullable: true },
+      title: { type: 'STRING', nullable: true },
+      author: { type: 'STRING', nullable: true },
+      extractedText: { type: 'STRING', nullable: true },
+      content: { type: 'STRING', nullable: true },
+      ...STATE_PROPS,
+      ...EMBEDDING_PROPS,
+    },
+    stateful: true,
+    hasEmbedding: true,
+    description: 'Document file (PDF, DOCX, etc.)',
+  },
+
+  DataFile: {
+    primaryKey: 'uuid',
+    required: {
+      uuid: { type: 'STRING' },
+      path: { type: 'STRING' },
+      name: { type: 'STRING' },
+    },
+    optional: {
+      projectId: { type: 'STRING', nullable: true },
+      file: { type: 'STRING', nullable: true },
+      format: { type: 'STRING', nullable: true },
+      keyCount: { type: 'INT64', nullable: true },
+      structure: { type: 'STRING', nullable: true },
+      preview: { type: 'STRING', nullable: true },
+      rawContent: { type: 'STRING', nullable: true },
+      ...STATE_PROPS,
+      ...EMBEDDING_PROPS,
+    },
+    stateful: true,
+    hasEmbedding: true,
+    description: 'Data file (JSON, YAML, XML, etc.)',
+  },
+
+  MediaFile: {
+    primaryKey: 'uuid',
+    required: {
+      uuid: { type: 'STRING' },
+      path: { type: 'STRING' },
+      name: { type: 'STRING' },
+    },
+    optional: {
+      projectId: { type: 'STRING', nullable: true },
+      file: { type: 'STRING', nullable: true },
+      format: { type: 'STRING', nullable: true },
+      category: { type: 'STRING', nullable: true },
+      sizeBytes: { type: 'INT64', nullable: true },
+      duration: { type: 'INT64', nullable: true },
+      width: { type: 'INT64', nullable: true },
+      height: { type: 'INT64', nullable: true },
+      textContent: { type: 'STRING', nullable: true },
+      ocrText: { type: 'STRING', nullable: true },
+      description: { type: 'STRING', nullable: true },
+      ...STATE_PROPS,
+      ...EMBEDDING_PROPS,
+    },
+    stateful: true,
+    hasEmbedding: true,
+    description: 'Media file (audio, video)',
+  },
+
+  WebDocument: {
+    primaryKey: 'uuid',
+    required: {
+      uuid: { type: 'STRING' },
+      url: { type: 'STRING' },
+    },
+    optional: {
+      projectId: { type: 'STRING', nullable: true },
+      title: { type: 'STRING', nullable: true },
+      content: { type: 'STRING', nullable: true },
+      html: { type: 'STRING', nullable: true },
+      fetchedAt: { type: 'STRING', nullable: true },
+      ...STATE_PROPS,
+      ...EMBEDDING_PROPS,
+    },
+    stateful: true,
+    hasEmbedding: true,
+    description: 'Web document (fetched HTML page)',
+  },
+
+  // ============================================================
+  // COMPONENT NODES
+  // ============================================================
+
+  VueSFC: {
+    primaryKey: 'uuid',
+    required: {
+      uuid: { type: 'STRING' },
+      path: { type: 'STRING' },
+      name: { type: 'STRING' },
+    },
+    optional: {
+      projectId: { type: 'STRING', nullable: true },
+      file: { type: 'STRING', nullable: true },
+      componentName: { type: 'STRING', nullable: true },
+      scriptLang: { type: 'STRING', nullable: true },
+      isScriptSetup: { type: 'BOOLEAN', nullable: true },
+      hasStyle: { type: 'BOOLEAN', nullable: true },
+      templateStartLine: { type: 'INT64', nullable: true },
+      templateEndLine: { type: 'INT64', nullable: true },
+      imports: { type: 'STRING', nullable: true },
+      usedComponents: { type: 'STRING', nullable: true },
+      ...STATE_PROPS,
+    },
+    stateful: true,
+    description: 'Vue Single File Component',
+  },
+
+  SvelteComponent: {
+    primaryKey: 'uuid',
+    required: {
+      uuid: { type: 'STRING' },
+      path: { type: 'STRING' },
+      name: { type: 'STRING' },
+    },
+    optional: {
+      projectId: { type: 'STRING', nullable: true },
+      file: { type: 'STRING', nullable: true },
+      componentName: { type: 'STRING', nullable: true },
+      scriptLang: { type: 'STRING', nullable: true },
+      hasStyle: { type: 'BOOLEAN', nullable: true },
+      templateStartLine: { type: 'INT64', nullable: true },
+      templateEndLine: { type: 'INT64', nullable: true },
+      imports: { type: 'STRING', nullable: true },
+      ...STATE_PROPS,
+    },
+    stateful: true,
+    description: 'Svelte component',
+  },
+
+  Stylesheet: {
+    primaryKey: 'uuid',
+    required: {
+      uuid: { type: 'STRING' },
+      path: { type: 'STRING' },
+      name: { type: 'STRING' },
+    },
+    optional: {
+      projectId: { type: 'STRING', nullable: true },
+      file: { type: 'STRING', nullable: true },
+      ruleCount: { type: 'INT64', nullable: true },
+      selectorCount: { type: 'INT64', nullable: true },
+      variableCount: { type: 'INT64', nullable: true },
+      mixinCount: { type: 'INT64', nullable: true },
+      importCount: { type: 'INT64', nullable: true },
+      ...STATE_PROPS,
+    },
+    stateful: true,
+    description: 'CSS/SCSS stylesheet',
+  },
+
   PackageJson: {
-    required: ['file', 'name', 'version'],
-    optional: [
-      'description',
-      'dependencies',
-      'devDependencies',
-      'peerDependencies',
-      'scripts',
-      'main',
-      'moduleType',
-    ],
+    primaryKey: 'uuid',
+    required: {
+      uuid: { type: 'STRING' },
+    },
+    optional: {
+      file: { type: 'STRING', nullable: true },
+      path: { type: 'STRING', nullable: true },
+      name: { type: 'STRING', nullable: true },
+      version: { type: 'STRING', nullable: true },
+      description: { type: 'STRING', nullable: true },
+      dependencies: { type: 'STRING', nullable: true },
+      devDependencies: { type: 'STRING', nullable: true },
+      peerDependencies: { type: 'STRING', nullable: true },
+      scripts: { type: 'STRING', nullable: true },
+      main: { type: 'STRING', nullable: true },
+      moduleType: { type: 'STRING', nullable: true },
+      projectId: { type: 'STRING', nullable: true },
+    },
     description: 'package.json file',
   },
+
+  // ============================================================
+  // EMBEDDING CHUNKS (for large content that needs chunking)
+  // ============================================================
+
+  EmbeddingChunk: {
+    primaryKey: 'uuid',
+    required: {
+      uuid: { type: 'STRING' },
+      projectId: { type: 'STRING' },
+      parentUuid: { type: 'STRING' },
+      parentLabel: { type: 'STRING' },
+    },
+    optional: {
+      chunkIndex: { type: 'INT64', nullable: true },
+      text: { type: 'STRING', nullable: true },
+      startChar: { type: 'INT64', nullable: true },
+      endChar: { type: 'INT64', nullable: true },
+      startLine: { type: 'INT64', nullable: true },
+      endLine: { type: 'INT64', nullable: true },
+      embedding_content: { type: 'DOUBLE[]', nullable: true },
+      embedding_content_hash: { type: 'STRING', nullable: true },
+      embedding_provider: { type: 'STRING', nullable: true },
+      embedding_model: { type: 'STRING', nullable: true },
+      // State machine embedding tracking (used by P.embeddingProvider/P.embeddingModel)
+      _embeddingProvider: { type: 'STRING', nullable: true },
+      _embeddingModel: { type: 'STRING', nullable: true },
+      ...STATE_PROPS,
+    },
+    stateful: true,
+    hasEmbedding: true,
+    description: 'Embedding chunk for large content that was split into smaller pieces',
+  },
+
+  // ============================================================
+  // SYSTEM METADATA
+  // ============================================================
+
+  RagForgeMetadata: {
+    required: {
+      uuid: { type: 'STRING' },
+      key: { type: 'STRING' },
+    },
+    optional: {
+      value: { type: 'STRING', nullable: true },
+      boolValue: { type: 'BOOLEAN', nullable: true },
+      intValue: { type: 'INT64', nullable: true },
+      updatedAt: { type: 'STRING', nullable: true },
+    },
+    stateful: false,
+    hasEmbedding: false,
+    description: 'System metadata storage (index state, configuration, etc.)',
+  },
 };
+
+// ============================================================
+// RELATIONSHIP SCHEMAS
+// ============================================================
+
+export interface RelSchema {
+  from: string;
+  to: string;
+  properties?: Record<string, PropDef>;
+}
+
+export const REL_SCHEMAS: Record<string, RelSchema[]> = {
+  BELONGS_TO: [
+    { from: 'File', to: 'Project' },
+    { from: 'Scope', to: 'Project' },
+    { from: 'MarkdownDocument', to: 'Project' },
+    { from: 'MarkdownSection', to: 'Project' },
+    { from: 'CodeBlock', to: 'Project' },
+    { from: 'DataFile', to: 'Project' },
+    { from: 'MediaFile', to: 'Project' },
+    { from: 'ImageFile', to: 'Project' },
+    { from: 'ThreeDFile', to: 'Project' },
+    { from: 'DocumentFile', to: 'Project' },
+    { from: 'VueSFC', to: 'Project' },
+    { from: 'SvelteComponent', to: 'Project' },
+    { from: 'Stylesheet', to: 'Project' },
+    { from: 'WebPage', to: 'Project' },
+    { from: 'WebDocument', to: 'Project' },
+    { from: 'PackageJson', to: 'Project' },
+  ],
+  IN_PROJECT: [
+    { from: 'File', to: 'Project' },
+    { from: 'Directory', to: 'Project' },
+    { from: 'Scope', to: 'Project' },
+  ],
+  IN_DIRECTORY: [
+    { from: 'File', to: 'Directory' },
+    { from: 'Directory', to: 'Directory' },
+  ],
+  DEFINED_IN: [
+    { from: 'Scope', to: 'File' },
+  ],
+  CONTAINS: [
+    { from: 'Scope', to: 'Scope' },
+  ],
+  CONSUMES: [
+    { from: 'Scope', to: 'Scope', properties: { line: { type: 'INT64', nullable: true } } },
+  ],
+  CONSUMED_BY: [
+    { from: 'Scope', to: 'Scope' },
+  ],
+  INHERITS_FROM: [
+    { from: 'Scope', to: 'Scope' },
+  ],
+  IMPLEMENTS: [
+    { from: 'Scope', to: 'Scope' },
+  ],
+  DECORATED_BY: [
+    { from: 'Scope', to: 'Scope' },
+  ],
+  USES_LIBRARY: [
+    { from: 'Scope', to: 'ExternalLibrary' },
+  ],
+  IN_DOCUMENT: [
+    { from: 'MarkdownSection', to: 'MarkdownDocument' },
+    { from: 'CodeBlock', to: 'MarkdownSection' },
+  ],
+  LINKS_TO: [
+    { from: 'WebPage', to: 'WebPage' },
+  ],
+  HAS_EMBEDDING_CHUNK: [
+    { from: 'Scope', to: 'EmbeddingChunk' },
+    { from: 'File', to: 'EmbeddingChunk' },
+    { from: 'MarkdownDocument', to: 'EmbeddingChunk' },
+    { from: 'MarkdownSection', to: 'EmbeddingChunk' },
+    { from: 'CodeBlock', to: 'EmbeddingChunk' },
+    { from: 'WebPage', to: 'EmbeddingChunk' },
+    { from: 'ImageFile', to: 'EmbeddingChunk' },
+    { from: 'ThreeDFile', to: 'EmbeddingChunk' },
+    { from: 'DocumentFile', to: 'EmbeddingChunk' },
+    { from: 'DataFile', to: 'EmbeddingChunk' },
+    { from: 'MediaFile', to: 'EmbeddingChunk' },
+    { from: 'WebDocument', to: 'EmbeddingChunk' },
+  ],
+};
+
+// ============================================================
+// KUZU SCHEMA GENERATION
+// ============================================================
+
+/**
+ * FTS (Full-Text Search) index configuration per node type.
+ * Maps node label to array of STRING properties to index.
+ * Based on KuzuSearchProvider searchFields.
+ */
+export const FTS_INDEX_CONFIG: Record<string, string[]> = {
+  Scope: ['name', 'signature', 'docstring', 'source'],
+  File: ['name', 'path', 'source'],
+  MarkdownSection: ['title', 'heading', 'content', 'ownContent'],
+  WebPage: ['title', 'textContent', 'description'],
+  CodeBlock: ['code', 'language'],
+  DataFile: ['name', 'preview', 'structure'],
+  DocumentFile: ['name', 'title', 'extractedText', 'content'],
+  MediaFile: ['name', 'description', 'textContent'],
+};
+
+/**
+ * Vector index configuration per node type.
+ * Maps node label to embedding property names to index.
+ * Note: Kuzu vector extension only supports FLOAT[] (32-bit).
+ * Our schema uses DOUBLE[] so vector indexes won't work until migration.
+ */
+export const VECTOR_INDEX_CONFIG: Record<string, string[]> = {
+  // Now enabled - schema generates FLOAT[] for Kuzu (see convertTypeForKuzu)
+  Scope: ['embedding_content', 'embedding_name', 'embedding_description'],
+  File: ['embedding_content'],
+  MarkdownSection: ['embedding_content'],
+  WebPage: ['embedding_content'],
+  EmbeddingChunk: ['embedding_content'],
+};
+
+/**
+ * Generate Kuzu CREATE NODE TABLE statement
+ */
+/**
+ * Convert property type for Kuzu.
+ * Kuzu's vector indexes require FLOAT[] instead of DOUBLE[].
+ * This saves memory and is standard for ML embeddings (float32).
+ */
+function convertTypeForKuzu(type: PropType): string {
+  // Convert DOUBLE[] to FLOAT[] for Kuzu vector index compatibility
+  if (type === 'DOUBLE[]') {
+    return 'FLOAT[]';
+  }
+  return type;
+}
+
+export function generateKuzuNodeTable(name: string, schema: NodeTypeSchema): string {
+  const allProps = { ...schema.required, ...schema.optional };
+  const props = Object.entries(allProps)
+    .map(([propName, propDef]) => `${propName} ${convertTypeForKuzu(propDef.type)}`)
+    .join(', ');
+
+  const pk = schema.primaryKey || 'uuid';
+  return `CREATE NODE TABLE IF NOT EXISTS ${name}(${props}, PRIMARY KEY(${pk}))`;
+}
+
+/**
+ * Generate Kuzu CREATE REL TABLE statement
+ */
+export function generateKuzuRelTable(name: string, schema: RelSchema): string {
+  const propsStr = schema.properties
+    ? ', ' + Object.entries(schema.properties)
+        .map(([propName, propDef]) => `${propName} ${convertTypeForKuzu(propDef.type)}`)
+        .join(', ')
+    : '';
+
+  return `CREATE REL TABLE IF NOT EXISTS ${name}(FROM ${schema.from} TO ${schema.to}${propsStr})`;
+}
+
+/**
+ * Generate all Kuzu schema statements
+ *
+ * Note: For relationship types with multiple FROM/TO combinations,
+ * we use Kuzu's REL TABLE GROUP syntax.
+ */
+export function generateKuzuSchema(): string[] {
+  const statements: string[] = [];
+
+  // Node tables
+  for (const [name, schema] of Object.entries(NODE_SCHEMAS)) {
+    statements.push(generateKuzuNodeTable(name, schema));
+  }
+
+  // Relationship tables - use GROUP for multi-source/target relationships
+  for (const [relType, schemas] of Object.entries(REL_SCHEMAS)) {
+    if (schemas.length === 1) {
+      // Single FROM/TO - use simple REL TABLE
+      statements.push(generateKuzuRelTable(relType, schemas[0]));
+    } else {
+      // Multiple FROM/TO combinations - use REL TABLE GROUP
+      const propsStr = schemas[0].properties
+        ? ', ' + Object.entries(schemas[0].properties)
+            .map(([propName, propDef]) => `${propName} ${convertTypeForKuzu(propDef.type)}`)
+            .join(', ')
+        : '';
+
+      const connections = schemas
+        .map(s => `FROM ${s.from} TO ${s.to}`)
+        .join(', ');
+
+      statements.push(`CREATE REL TABLE GROUP IF NOT EXISTS ${relType}(${connections}${propsStr})`);
+    }
+  }
+
+  return statements;
+}
+
+/**
+ * Generate FTS index creation statements for Kuzu.
+ * These should be run AFTER schema creation and data ingestion.
+ *
+ * Note: FTS indexes are immutable in Kuzu - they must be dropped and
+ * recreated after data changes.
+ *
+ * @returns Array of CALL CREATE_FTS_INDEX statements
+ */
+export function generateKuzuFtsIndexes(): string[] {
+  const statements: string[] = [];
+
+  for (const [label, properties] of Object.entries(FTS_INDEX_CONFIG)) {
+    // Filter to only include properties that exist in the schema
+    const schema = NODE_SCHEMAS[label];
+    if (!schema) continue;
+
+    const allProps = { ...schema.required, ...schema.optional };
+    const validProps = properties.filter(p => p in allProps);
+
+    if (validProps.length === 0) continue;
+
+    const indexName = `${label.toLowerCase()}_fts`;
+    const propsArray = validProps.map(p => `'${p}'`).join(', ');
+
+    // CALL CREATE_FTS_INDEX('TableName', 'index_name', ['prop1', 'prop2'])
+    statements.push(
+      `CALL CREATE_FTS_INDEX('${label}', '${indexName}', [${propsArray}])`
+    );
+  }
+
+  return statements;
+}
+
+/**
+ * Generate FTS index drop statements for Kuzu.
+ * Use before recreating indexes after data changes.
+ *
+ * @returns Array of CALL DROP_FTS_INDEX statements
+ */
+export function generateKuzuFtsDropIndexes(): string[] {
+  const statements: string[] = [];
+
+  for (const label of Object.keys(FTS_INDEX_CONFIG)) {
+    const indexName = `${label.toLowerCase()}_fts`;
+    statements.push(`CALL DROP_FTS_INDEX('${label}', '${indexName}')`);
+  }
+
+  return statements;
+}
+
+/**
+ * Generate Vector index creation statements for Kuzu.
+ * Currently disabled because Kuzu only supports FLOAT[] and we use DOUBLE[].
+ *
+ * @returns Array of CALL CREATE_VECTOR_INDEX statements
+ */
+export function generateKuzuVectorIndexes(): string[] {
+  const statements: string[] = [];
+
+  for (const [label, properties] of Object.entries(VECTOR_INDEX_CONFIG)) {
+    for (const prop of properties) {
+      const indexName = `${label.toLowerCase()}_${prop}_vec`;
+      // CALL CREATE_VECTOR_INDEX('TableName', 'index_name', 'column_name', metric := 'cosine')
+      statements.push(
+        `CALL CREATE_VECTOR_INDEX('${label}', '${indexName}', '${prop}', metric := 'cosine')`
+      );
+    }
+  }
+
+  return statements;
+}
 
 /**
  * Get the required properties for a node type.
  * Returns undefined if the type is not defined (fallback to dynamic computation).
  */
 export function getRequiredProperties(nodeType: string): string[] | undefined {
-  return NODE_SCHEMAS[nodeType]?.required;
+  const schema = NODE_SCHEMAS[nodeType];
+  if (!schema) return undefined;
+  return Object.keys(schema.required);
+}
+
+/**
+ * Get all stateful node labels
+ */
+export function getStatefulLabels(): string[] {
+  return Object.entries(NODE_SCHEMAS)
+    .filter(([_, schema]) => schema.stateful)
+    .map(([name]) => name);
+}
+
+/**
+ * Get all labels with embeddings
+ */
+export function getEmbeddingLabels(): string[] {
+  return Object.entries(NODE_SCHEMAS)
+    .filter(([_, schema]) => schema.hasEmbedding)
+    .map(([name]) => name);
+}
+
+/**
+ * Check if a label is stateful
+ */
+export function isStatefulLabelFromSchema(label: string): boolean {
+  return NODE_SCHEMAS[label]?.stateful ?? false;
+}
+
+/**
+ * Get schema for a node type
+ */
+export function getNodeSchema(label: string): NodeTypeSchema | undefined {
+  return NODE_SCHEMAS[label];
 }
 
 /**

@@ -357,6 +357,26 @@ export class UniqueIDHelper {
   }
 
   /**
+   * Generate a deterministic UUID for a Project
+   * @param projectId The project ID
+   * @returns A deterministic UUID string prefixed with "proj:"
+   */
+  public static GenerateProjectUUID(projectId: string): string {
+    const uuid = this.GenerateDeterministicUUID(`proj:${projectId}`);
+    return `proj:${uuid}`;
+  }
+
+  /**
+   * Generate a deterministic UUID for a WebPage
+   * @param url The page URL
+   * @returns A deterministic UUID string prefixed with "webpage:"
+   */
+  public static GenerateWebPageUUID(url: string): string {
+    const uuid = this.GenerateDeterministicUUID(`webpage:${url}`);
+    return `webpage:${uuid}`;
+  }
+
+  /**
    * Generate a deterministic UUID for an Image node
    * @param absolutePath The absolute path to the file containing the image reference
    * @param line The line number where the image is referenced
